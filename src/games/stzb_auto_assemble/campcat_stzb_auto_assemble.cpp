@@ -12,7 +12,6 @@
 #include <system_error>
 #include <thread>
 
-#include <opencv2/imgcodecs.hpp>
 #include <opencv2/imgproc.hpp>
 
 namespace campcat {
@@ -737,19 +736,6 @@ campcat_stzb_auto_assemble::run_cycle(const std::function<bool()> &should_stop) 
 
   (void)m_adb->delay_after_action(
       std::chrono::milliseconds(m_cfg->action_gap_ms));
-
-  if (m_cfg->debug_screenshots) {
-    cv::Mat dbg;
-    if (m_adb->screencap_png(&dbg)) {
-      std::filesystem::create_directories(m_cfg->debug_dir);
-      const auto stamp =
-          std::chrono::steady_clock::now().time_since_epoch().count();
-      const auto p =
-          m_cfg->debug_dir / ("screen_" + std::to_string(stamp) + ".png");
-      cv::imwrite(p.string(), dbg);
-      m_log("[fsm] wrote debug screenshot: " + p.string());
-    }
-  }
 
   const size_t n_teams = static_cast<size_t>(std::clamp(
       m_profile->team_count, 1,

@@ -32,6 +32,7 @@
 #include "core/log_buffer.h"
 #include "core/scheduler.h"
 #include "games/stzb_auto_assemble/stzb_auto_assemble_profile.h"
+#include "app/template_capture_ui.h"
 #include "games/ccat_script/ccat_script_profile.h"
 
 namespace {
@@ -51,13 +52,11 @@ void shell_merge_buffer_paths(campcat::app_config *_dst,
                               const campcat::app_config &_ui,
                               const char *_adb_path_buf,
                               const char *_serial_buf,
-                              const char *_adb_connect_buf,
-                              const char *_dbg_buf) {
+                              const char *_adb_connect_buf) {
   *_dst = _ui;
   _dst->adb_path = _adb_path_buf;
   _dst->adb_serial = _serial_buf;
   _dst->adb_connect_address = _adb_connect_buf;
-  _dst->debug_dir = _dbg_buf;
 }
 
 std::string script_display_label(const std::string &_id) {
@@ -331,12 +330,11 @@ int main(int argc, char **argv) {
 
   append_log("[ui] cfg=" + cfg_path.string());
   append_log("[ui] script combo: switching logs that script snapshot to the "
-             "debug log.");
+             "log pane.");
 
   static char adb_path_buf[512]{};
   static char serial_buf[256]{};
   static char adb_connect_buf[256]{};
-  static char dbg_buf[512]{};
   static bool buffers_init = false;
 
   campcat::stzb_auto_assemble_profile stzb_ui = snapshot_stzb_live();
@@ -441,8 +439,6 @@ int main(int argc, char **argv) {
                     cfg_view.adb_serial.c_str());
       std::snprintf(adb_connect_buf, sizeof(adb_connect_buf), "%s",
                     cfg_view.adb_connect_address.c_str());
-      std::snprintf(dbg_buf, sizeof(dbg_buf), "%s",
-                    cfg_view.debug_dir.string().c_str());
       buffers_init = true;
     }
 
@@ -452,7 +448,7 @@ int main(int argc, char **argv) {
           std::string err;
           campcat::app_config to_write{};
           shell_merge_buffer_paths(&to_write, cfg_view, adb_path_buf,
-                                   serial_buf, adb_connect_buf, dbg_buf);
+                                   serial_buf, adb_connect_buf);
           bool ok = false;
           {
             std::lock_guard<std::mutex> lk(cfg_mu);
@@ -501,101 +497,115 @@ int main(int argc, char **argv) {
       }
     }
 
-    ImGui::SliderInt("tap_delay_ms", &cfg_view.tap_delay_ms, 40, 800);
-    ImGui::SliderInt("action_gap_ms (min pause between ops)",
-                     &cfg_view.action_gap_ms, 1000, 5000);
-
-    ImGui::SliderInt("swipe_duration_ms", &cfg_view.swipe_duration_ms, 50,
-                     2000);
+    const bool busy_now = cycle_running.load();
+    const bool lock_manual_single = busy_now || scheduler.running();
 
     static double min_th = 0.35;
     static double max_th = 1.0;
-    ImGui::SliderScalar("match_threshold", ImGuiDataType_Double,
-                        &cfg_view.match_threshold, &min_th, &max_th, "%.3f");
 
-    ImGui::Checkbox("match_multiscale", &cfg_view.match_multiscale);
-
-    ImGui::InputText("adb_path", adb_path_buf, IM_ARRAYSIZE(adb_path_buf));
-    ImGui::InputText("adb_serial", serial_buf, IM_ARRAYSIZE(serial_buf));
-    ImGui::InputText("adb_connect_address", adb_connect_buf,
-                     IM_ARRAYSIZE(adb_connect_buf));
-
-    ImGui::Checkbox("debug_screenshots", &cfg_view.debug_screenshots);
-    ImGui::InputText("debug_dir", dbg_buf, IM_ARRAYSIZE(dbg_buf));
-
-    ImGui::Separator();
-    ImGui::Checkbox("scheduler.enabled", &cfg_view.scheduler.enabled);
-    ImGui::SliderInt("interval_s", &cfg_view.scheduler.interval_seconds, 300,
-                     6 * 3600);
-    ImGui::SliderInt("jitter_s", &cfg_view.scheduler.jitter_seconds, 0, 900);
-    ImGui::Checkbox("scheduler.skip_if_busy", &cfg_view.scheduler.skip_if_busy);
-    if (cfg_view.scheduler.enabled && !scheduler.running()) {
-      ImGui::TextDisabled(
-          "scheduler idle : click run_schedule to arm (not started at boot)");
-    }
-
-    ImGui::Separator();
-
-    const bool busy_now = cycle_running.load();
-    const bool lock_manual_single = busy_now || scheduler.running();
-    if (lock_manual_single) {
-      ImGui::BeginDisabled();
-    }
-
-    auto push_job_snapshot = [&]() {
-      shell_merge_buffer_paths(&cfg_view, cfg_view, adb_path_buf, serial_buf,
-                               adb_connect_buf, dbg_buf);
-      std::lock_guard<std::mutex> lk(cfg_mu);
-      cfg = cfg_view;
-      stzb_live = stzb_ui;
-      ccat_live = ccat_ui;
-    };
-
-    if (ImGui::Button("run_single")) {
-      push_job_snapshot();
-      run_single_job();
-    }
-    if (lock_manual_single) {
-      ImGui::EndDisabled();
-    }
-
-    ImGui::SameLine();
-    if (ImGui::Button("stop cycle")) {
-      stop_requested.store(true);
-      scheduler.stop();
-      append_log("[ui] stop cycle");
-    }
-
-    ImGui::SameLine();
-    if (ImGui::Button("run_schedule")) {
-      cfg_view.scheduler.enabled = true;
-      {
-        push_job_snapshot();
+    if (ImGui::CollapsingHeader("Shell configuration###cfg_shell_root",
+                                ImGuiTreeNodeFlags_DefaultOpen)) {
+      ImGui::Indent();
+      if (ImGui::CollapsingHeader("Timing & template match###cfg_timing",
+                                  ImGuiTreeNodeFlags_DefaultOpen)) {
+        ImGui::SliderInt("tap_delay_ms", &cfg_view.tap_delay_ms, 40, 800);
+        ImGui::SliderInt("action_gap_ms (min pause between ops)",
+                         &cfg_view.action_gap_ms, 1000, 5000);
+        ImGui::SliderInt("swipe_duration_ms", &cfg_view.swipe_duration_ms, 50,
+                         2000);
+        ImGui::SliderScalar("match_threshold", ImGuiDataType_Double,
+                            &cfg_view.match_threshold, &min_th, &max_th,
+                            "%.3f");
+        ImGui::Checkbox("match_multiscale", &cfg_view.match_multiscale);
       }
-      std::string err;
-      bool ok_writ = persist_bundle_to_disk(snapshot_cfg(), snapshot_stzb_live(),
-                                            snapshot_ccat_live(), cfg_path,
-                                            &err);
-      if (ok_writ) {
-        append_log("[ui] autosaved scheduler flag to " + cfg_path.string());
-      } else {
-        append_log("[ui] autosave warning: " + err);
-      }
-      refresh_scheduler_locked(true);
-    }
 
-    if (cfg_view.scheduler.enabled && scheduler.running()) {
-      const auto wp = scheduler.tick_wait_progress();
-      if (wp.in_wait_phase && wp.duration_seconds > 0) {
-        const double frac =
-            std::clamp(wp.elapsed_seconds / wp.duration_seconds, 0.0, 1.0);
-        ImGui::ProgressBar(static_cast<float>(frac), ImVec2(-1.0F, 0.0F));
-        ImGui::Text("scheduler - elapsed %.1f s / interval %.1f s",
-                    wp.elapsed_seconds, wp.duration_seconds);
-      } else {
-        ImGui::TextUnformatted(
-            "scheduler - not waiting (immediate tick or tick running)...");
+      if (ImGui::CollapsingHeader("ADB###cfg_adb",
+                                  ImGuiTreeNodeFlags_DefaultOpen)) {
+        ImGui::InputText("adb_path", adb_path_buf, IM_ARRAYSIZE(adb_path_buf));
+        ImGui::InputText("adb_serial", serial_buf, IM_ARRAYSIZE(serial_buf));
+        ImGui::InputText("adb_connect_address", adb_connect_buf,
+                         IM_ARRAYSIZE(adb_connect_buf));
       }
+
+      if (ImGui::CollapsingHeader("Scheduler###cfg_sched",
+                                  ImGuiTreeNodeFlags_DefaultOpen)) {
+        ImGui::Checkbox("scheduler.enabled", &cfg_view.scheduler.enabled);
+        ImGui::SliderInt("interval_s", &cfg_view.scheduler.interval_seconds,
+                         300, 6 * 3600);
+        ImGui::SliderInt("jitter_s", &cfg_view.scheduler.jitter_seconds, 0,
+                         900);
+        ImGui::Checkbox("scheduler.skip_if_busy",
+                        &cfg_view.scheduler.skip_if_busy);
+        if (cfg_view.scheduler.enabled && !scheduler.running()) {
+          ImGui::TextDisabled(
+              "scheduler idle : click run_schedule to arm (not started at "
+              "boot)");
+        }
+        if (cfg_view.scheduler.enabled && scheduler.running()) {
+          const auto wp = scheduler.tick_wait_progress();
+          if (wp.in_wait_phase && wp.duration_seconds > 0) {
+            const double frac = std::clamp(
+                wp.elapsed_seconds / wp.duration_seconds, 0.0, 1.0);
+            ImGui::ProgressBar(static_cast<float>(frac), ImVec2(-1.0F, 0.0F));
+            ImGui::Text("scheduler - elapsed %.1f s / interval %.1f s",
+                        wp.elapsed_seconds, wp.duration_seconds);
+          } else {
+            ImGui::TextUnformatted(
+                "scheduler - not waiting (immediate tick or tick running)...");
+          }
+        }
+      }
+
+      if (ImGui::CollapsingHeader("Run & schedule###cfg_run",
+                                  ImGuiTreeNodeFlags_DefaultOpen)) {
+        if (lock_manual_single) {
+          ImGui::BeginDisabled();
+        }
+
+        auto push_job_snapshot = [&]() {
+          shell_merge_buffer_paths(&cfg_view, cfg_view, adb_path_buf,
+                                   serial_buf, adb_connect_buf);
+          std::lock_guard<std::mutex> lk(cfg_mu);
+          cfg = cfg_view;
+          stzb_live = stzb_ui;
+          ccat_live = ccat_ui;
+        };
+
+        if (ImGui::Button("run_single")) {
+          push_job_snapshot();
+          run_single_job();
+        }
+        if (lock_manual_single) {
+          ImGui::EndDisabled();
+        }
+
+        ImGui::SameLine();
+        if (ImGui::Button("stop cycle")) {
+          stop_requested.store(true);
+          scheduler.stop();
+          append_log("[ui] stop cycle");
+        }
+
+        ImGui::SameLine();
+        if (ImGui::Button("run_schedule")) {
+          cfg_view.scheduler.enabled = true;
+          {
+            push_job_snapshot();
+          }
+          std::string err;
+          bool ok_writ =
+              persist_bundle_to_disk(snapshot_cfg(), snapshot_stzb_live(),
+                                     snapshot_ccat_live(), cfg_path, &err);
+          if (ok_writ) {
+            append_log("[ui] autosaved scheduler flag to " +
+                       cfg_path.string());
+          } else {
+            append_log("[ui] autosave warning: " + err);
+          }
+          refresh_scheduler_locked(true);
+        }
+      }
+      ImGui::Unindent();
     }
 
     ImGui::Separator();
@@ -606,7 +616,7 @@ int main(int argc, char **argv) {
     ImGui::TextUnformatted("log");
     ImGui::Separator();
     for (const auto &line : log_scroll) {
-      ImGui::TextUnformatted(line.c_str());
+      ImGui::TextWrapped("%s", line.c_str());
     }
     if (!log_scroll.empty() &&
         ImGui::GetScrollY() >= ImGui::GetScrollMaxY() - 20.0F) {
@@ -655,82 +665,116 @@ int main(int argc, char **argv) {
     ImGui::Separator();
 
     if (cfg_view.active_script_id == k_stzb_id) {
-      ImGui::TextUnformatted(
-          "STZB profile (stored in separate script JSON file)");
-      static char bundle_dir_buf[512]{};
-      static char res_buf[128]{};
-      std::snprintf(bundle_dir_buf, sizeof(bundle_dir_buf), "%s",
-                    stzb_ui.bundle_dir.string().c_str());
-      std::snprintf(res_buf, sizeof(res_buf), "%s",
-                    stzb_ui.resolution_subdir.c_str());
-      if (ImGui::InputText("bundle_dir (relative to project root)",
-                           bundle_dir_buf, IM_ARRAYSIZE(bundle_dir_buf))) {
-        stzb_ui.bundle_dir = std::filesystem::path(bundle_dir_buf);
-      }
-      if (ImGui::InputText("resolution_subdir", res_buf,
-                           IM_ARRAYSIZE(res_buf))) {
-        stzb_ui.resolution_subdir = res_buf;
-      }
-      ImGui::TextWrapped("PNG directory: %s",
-                         stzb_ui.template_resolution_dir().string().c_str());
+      if (ImGui::CollapsingHeader("STZB bundle###script_stzb_root",
+                                  ImGuiTreeNodeFlags_DefaultOpen)) {
+        ImGui::TextUnformatted(
+            "STZB profile JSON beside shell config (template PNG paths).");
+        ImGui::Indent();
 
-      ImGui::Separator();
-      auto tt_input = [&](const char *label, std::string &dest) {
-        std::vector<char> buf(260);
-        std::snprintf(buf.data(), buf.size(), "%s", dest.c_str());
-        if (ImGui::InputText(label, buf.data(), buf.size())) {
-          dest = buf.data();
+        if (ImGui::CollapsingHeader("Bundle paths###script_stzb_paths",
+                                    ImGuiTreeNodeFlags_DefaultOpen)) {
+        static char bundle_dir_buf[512]{};
+        static char res_buf[128]{};
+        std::snprintf(bundle_dir_buf, sizeof(bundle_dir_buf), "%s",
+                      stzb_ui.bundle_dir.string().c_str());
+        std::snprintf(res_buf, sizeof(res_buf), "%s",
+                      stzb_ui.resolution_subdir.c_str());
+        if (ImGui::InputText("bundle_dir (relative to project root)",
+                             bundle_dir_buf, IM_ARRAYSIZE(bundle_dir_buf))) {
+          stzb_ui.bundle_dir = std::filesystem::path(bundle_dir_buf);
         }
-      };
-      tt_input("dismiss_notice", stzb_ui.templates["dismiss_notice"]);
-      tt_input("game_main", stzb_ui.templates["game_main"]);
-      tt_input("main_menu_anchor", stzb_ui.templates["main_menu_anchor"]);
-      tt_input("enter_city_location", stzb_ui.templates["enter_city_location"]);
-      tt_input("enter_city_city", stzb_ui.templates["enter_city_city"]);
-      tt_input("enter_city_detail", stzb_ui.templates["enter_city_detail"]);
-      tt_input("recruit_detail", stzb_ui.templates["recruit_detail"]);
-      tt_input("recruit_back", stzb_ui.templates["recruit_back"]);
-      tt_input("recruit_back_2", stzb_ui.templates["recruit_back_2"]);
-      tt_input("assemble", stzb_ui.templates["assemble"]);
+        if (ImGui::InputText("resolution_subdir", res_buf,
+                             IM_ARRAYSIZE(res_buf))) {
+          stzb_ui.resolution_subdir = res_buf;
+        }
+        ImGui::TextWrapped("PNG directory: %s",
+                           stzb_ui.template_resolution_dir().string().c_str());
+      }
 
-      ImGui::Separator();
-      ImGui::SliderInt("team_count", &stzb_ui.team_count, 1,
-                       static_cast<int>(stzb_ui.team_rois.size()));
-      ImGui::TextUnformatted("team_rois (normalized xywh)");
-      for (size_t i = 0; i < stzb_ui.team_rois.size(); ++i) {
-        ImGui::PushID(static_cast<int>(i));
-        ImGui::Text("team %zu", i + 1);
-        ImGui::InputScalarN("xywh", ImGuiDataType_Double,
-                            &stzb_ui.team_rois[i].x, 4, nullptr, nullptr,
-                            "%.3f");
-        ImGui::PopID();
+      if (ImGui::CollapsingHeader("Template PNG names###script_stzb_files",
+                                  ImGuiTreeNodeFlags_DefaultOpen)) {
+        auto tt_input = [&](const char *label, std::string &dest) {
+          std::vector<char> buf(260);
+          std::snprintf(buf.data(), buf.size(), "%s", dest.c_str());
+          if (ImGui::InputText(label, buf.data(), buf.size())) {
+            dest = buf.data();
+          }
+        };
+        tt_input("dismiss_notice", stzb_ui.templates["dismiss_notice"]);
+        tt_input("game_main", stzb_ui.templates["game_main"]);
+        tt_input("main_menu_anchor", stzb_ui.templates["main_menu_anchor"]);
+        tt_input("enter_city_location",
+                 stzb_ui.templates["enter_city_location"]);
+        tt_input("enter_city_city", stzb_ui.templates["enter_city_city"]);
+        tt_input("enter_city_detail", stzb_ui.templates["enter_city_detail"]);
+        tt_input("recruit_detail", stzb_ui.templates["recruit_detail"]);
+        tt_input("recruit_back", stzb_ui.templates["recruit_back"]);
+        tt_input("recruit_back_2", stzb_ui.templates["recruit_back_2"]);
+        tt_input("assemble", stzb_ui.templates["assemble"]);
+      }
+
+      if (ImGui::CollapsingHeader("Screenshot crop (ADB)###script_stzb_cap",
+                                  ImGuiTreeNodeFlags_DefaultOpen)) {
+        template_capture_draw_panel(true, cfg_view, &stzb_ui, nullptr,
+                                    lock_manual_single, append_log);
+      }
+
+      if (ImGui::CollapsingHeader("Teams & ROIs###script_stzb_teams")) {
+        ImGui::SliderInt("team_count", &stzb_ui.team_count, 1,
+                         static_cast<int>(stzb_ui.team_rois.size()));
+        ImGui::TextUnformatted("team_rois (normalized xywh)");
+        for (size_t i = 0; i < stzb_ui.team_rois.size(); ++i) {
+          ImGui::PushID(static_cast<int>(i));
+          ImGui::Text("team %zu", i + 1);
+          ImGui::InputScalarN("xywh", ImGuiDataType_Double,
+                              &stzb_ui.team_rois[i].x, 4, nullptr, nullptr,
+                              "%.3f");
+          ImGui::PopID();
+        }
+      }
+      ImGui::Unindent();
       }
     } else if (cfg_view.active_script_id == k_ccat_script_id) {
-      ImGui::TextUnformatted(
-          "CampCat .ccat script - bundle JSON + source next to config/scripts/");
-      static char v_src[512]{};
-      static char v_img[512]{};
-      std::snprintf(v_src, sizeof(v_src), "%s",
-                    ccat_ui.source_rel.c_str());
-      std::snprintf(v_img, sizeof(v_img), "%s",
-                    ccat_ui.images_root_rel.c_str());
-      if (ImGui::InputText("source (.ccat path relative to config dir)",
-                           v_src, IM_ARRAYSIZE(v_src))) {
-        ccat_ui.source_rel = v_src;
+      if (ImGui::CollapsingHeader("CampCat bundle###script_ccat_root",
+                                  ImGuiTreeNodeFlags_DefaultOpen)) {
+        ImGui::TextUnformatted(
+            ".ccat script + bundle JSON under config/scripts/.");
+        ImGui::Indent();
+
+        if (ImGui::CollapsingHeader("Paths###script_ccat_paths",
+                                    ImGuiTreeNodeFlags_DefaultOpen)) {
+        static char v_src[512]{};
+        static char v_img[512]{};
+        std::snprintf(v_src, sizeof(v_src), "%s",
+                      ccat_ui.source_rel.c_str());
+        std::snprintf(v_img, sizeof(v_img), "%s",
+                      ccat_ui.images_root_rel.c_str());
+        if (ImGui::InputText("source (.ccat path relative to config dir)",
+                             v_src, IM_ARRAYSIZE(v_src))) {
+          ccat_ui.source_rel = v_src;
+        }
+        if (ImGui::InputText(
+                "images_root (optional, relative to config dir; empty = use "
+                ".ccat folder)",
+                v_img, IM_ARRAYSIZE(v_img))) {
+          ccat_ui.images_root_rel = v_img;
+        }
+        ImGui::TextWrapped("Resolved PNG search directory: %s",
+                           ccat_ui.images_base(cfg_view.config_home)
+                               .string()
+                               .c_str());
+        ImGui::TextWrapped(
+            "Script path hint: %s",
+            (cfg_view.config_home / ccat_ui.source_rel).string().c_str());
       }
-      if (ImGui::InputText(
-              "images_root (optional, relative to config dir; empty = use "
-              ".ccat folder)",
-              v_img, IM_ARRAYSIZE(v_img))) {
-        ccat_ui.images_root_rel = v_img;
+
+      if (ImGui::CollapsingHeader("Screenshot crop (ADB)###script_ccat_cap",
+                                  ImGuiTreeNodeFlags_DefaultOpen)) {
+        template_capture_draw_panel(false, cfg_view, nullptr, &ccat_ui,
+                                    lock_manual_single, append_log);
       }
-      ImGui::TextWrapped("Resolved PNG search directory: %s",
-                         ccat_ui.images_base(cfg_view.config_home)
-                             .string()
-                             .c_str());
-      ImGui::TextWrapped(
-          "Script path hint: %s",
-          (cfg_view.config_home / ccat_ui.source_rel).string().c_str());
+      ImGui::Unindent();
+      }
     } else {
       ImGui::TextDisabled(
           "Pick a script in the combo to edit its bundle. STZB edits "
@@ -762,7 +806,7 @@ int main(int argc, char **argv) {
     {
       std::lock_guard<std::mutex> lk(cfg_mu);
       shell_merge_buffer_paths(&cfg, cfg_view, adb_path_buf, serial_buf,
-                               adb_connect_buf, dbg_buf);
+                               adb_connect_buf);
       stzb_live = stzb_ui;
       ccat_live = ccat_ui;
     }
@@ -775,6 +819,7 @@ int main(int argc, char **argv) {
     worker_thread.join();
   }
 
+  template_capture_shutdown_gl();
   ImGui_ImplOpenGL3_Shutdown();
   ImGui_ImplGlfw_Shutdown();
   ImGui::DestroyContext();

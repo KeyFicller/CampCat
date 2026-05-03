@@ -79,6 +79,7 @@ target_link_libraries(stzb_core PUBLIC
 
 add_executable(campcat
   src/app/main.cpp
+  src/app/template_capture_ui.cpp
 )
 target_include_directories(campcat PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_link_libraries(campcat PRIVATE stzb_core imgui_lib glfw OpenGL::GL)

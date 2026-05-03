@@ -61,9 +61,6 @@ struct app_config {
   /// Mapping script id → json path resolved relative to `config_home`.
   std::unordered_map<std::string, std::string> script_config_paths;
 
-  bool debug_screenshots = false;
-  std::filesystem::path debug_dir = "debug_captures";
-
   /**
    * @brief Parent of `config_home` interpreted as checkout root (`config/` child layout).
    * @return Project root derived from persisted shell folder; empty before load.
