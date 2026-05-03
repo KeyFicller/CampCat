@@ -1,0 +1,106 @@
+#pragma once
+
+#include <filesystem>
+#include <string>
+#include <unordered_map>
+
+#include <nlohmann/json.hpp>
+
+namespace campcat {
+
+/**
+ * @brief Normalized rectangle `[0,1]^4` referencing whole screenshot geometry.
+ */
+struct rect_norm {
+  double x = 0;
+  double y = 0;
+  double w = 0;
+  double h = 0;
+};
+
+/**
+ * @brief Controls the optional GUI-driven periodic automation worker.
+ */
+struct scheduler_config {
+  bool enabled = false;
+  int interval_seconds = 3600;
+  int jitter_seconds = 90;
+  bool skip_if_busy = true;
+};
+
+/**
+ * @brief Shell JSON document loaded from disk: adb settings, matchers
+ * heuristic defaults, scheduler, active script bookkeeping, persistence paths.
+ */
+struct app_config {
+  int version = 1;
+
+  /// Directory containing the persisted shell `.json`; filled by load_from_file.
+  std::filesystem::path config_home;
+
+  std::string adb_path = "/Applications/MuMuPlayer.app/Contents/MacOS/"
+                         "MuMuEmulator.app/Contents/MacOS/tools/adb";
+  std::string adb_serial;
+  std::string adb_connect_address;
+
+  int tap_delay_ms = 150;
+  int action_gap_ms = 1000;
+  int swipe_duration_ms = 300;
+
+  double match_threshold = 0.82;
+  bool match_multiscale = false;
+
+  int max_step_retries = 12;
+  int step_retry_interval_ms = 500;
+
+  scheduler_config scheduler{};
+
+  /// String id driving `make_game_automation`; `"none"` keeps automation idle.
+  std::string active_script_id = "stzb_auto_assemble";
+
+  /// Mapping script id → json path resolved relative to `config_home`.
+  std::unordered_map<std::string, std::string> script_config_paths;
+
+  bool debug_screenshots = false;
+  std::filesystem::path debug_dir = "debug_captures";
+
+  /**
+   * @brief Parent of `config_home` interpreted as checkout root (`config/` child layout).
+   * @return Project root derived from persisted shell folder; empty before load.
+   */
+  std::filesystem::path project_root() const {
+    return config_home.empty() ? std::filesystem::path{} : config_home.parent_path();
+  }
+
+  /**
+   * @brief Resolve `{config_home}/{script_config_paths[id]}` for known ids.
+   * @param[in] _id Logical script identifier registered inside json.
+   * @return Canonical-ish absolute path token; empty if missing ids/paths.
+   */
+  std::filesystem::path resolve_script_json(const std::string &_id) const;
+
+  /**
+   * @brief Factory defaults mirrored when load_from_file fails.
+   * @return Default shell record with scripted registry scaffolding.
+   */
+  static app_config defaults();
+
+  /**
+   * @brief Parse json from disk merging onto defaults().
+   * @param[in] _path Shell configuration file (`default.json`).
+   * @return Populated shell struct with `config_home` parent bound.
+   */
+  static app_config load_from_file(const std::filesystem::path &_path);
+
+  /**
+   * @brief Persist `*this` to `_path`.
+   * @param[in] _path Destination writable json path on disk.
+   */
+  void save_to_file(const std::filesystem::path &_path) const;
+
+private:
+  static void from_json(const nlohmann::json &_j, app_config &_c);
+  static nlohmann::json to_json(const app_config &_c);
+};
+
+} // namespace campcat

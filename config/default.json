@@ -1,0 +1,25 @@
+{
+  "version": 1,
+  "adb_path": "/Applications/MuMuPlayer.app/Contents/MacOS/MuMuEmulator.app/Contents/MacOS/tools/adb",
+  "adb_serial": "",
+  "adb_connect_address": "127.0.0.1:5555",
+  "tap_delay_ms": 150,
+  "action_gap_ms": 1000,
+  "swipe_duration_ms": 300,
+  "match_threshold": 0.7,
+  "match_multiscale": false,
+  "max_step_retries": 12,
+  "step_retry_interval_ms": 500,
+  "debug_screenshots": false,
+  "debug_dir": "debug_captures",
+  "scheduler": {
+    "enabled": true,
+    "interval_seconds": 300,
+    "jitter_seconds": 7,
+    "skip_if_busy": false
+  },
+  "active_script": "stzb_auto_assemble",
+  "scripts": {
+    "stzb_auto_assemble": "scripts/stzb_auto_assemble.json"
+  }
+}

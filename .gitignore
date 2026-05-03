@@ -1,0 +1,10 @@
+/build
+/cmake-build-*
+/.cache
+compile_commands.json
+debug_captures/
+*.user
+.DS_Store
+imgui.ini
+/.vscode
+/build-opencv-test
