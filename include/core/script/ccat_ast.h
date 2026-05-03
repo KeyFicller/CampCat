@@ -55,6 +55,64 @@ struct LogStmt final : Stmt {
 };
 
 /**
+ * @brief Swipe from first template match center to second on one screenshot.
+ */
+struct SwipeTemplatesStmt final : Stmt {
+  std::string from_image_path;
+  std::string to_image_path;
+};
+
+/**
+ * @brief Tap at normalized coordinates `[0,1]×[0,1]` mapping to current screenshot size.
+ */
+struct TapAtStmt final : Stmt {
+  double nx = 0;
+  double ny = 0;
+};
+
+/**
+ * @brief Swipe between normalized endpoints `(x1,y1)→(x2,y2)` on current resolution.
+ */
+struct SwipeAtStmt final : Stmt {
+  double x1 = 0;
+  double y1 = 0;
+  double x2 = 0;
+  double y2 = 0;
+};
+
+/**
+ * @brief Poll until `image_path` matches or `timeout_ms` elapses.
+ */
+struct WaitUntilStmt final : Stmt {
+  std::string image_path;
+  int timeout_ms = 0;
+};
+
+/**
+ * @brief Execute `body` up to `attempts` times until it succeeds (no error).
+ */
+struct RetryStmt final : Stmt {
+  int attempts = 0;
+  std::unique_ptr<Stmt> body;
+};
+
+/**
+ * @brief Run `body` once then repeat while `condition_image_path` is visible.
+ */
+struct DoWhileStmt final : Stmt {
+  std::unique_ptr<BlockStmt> body;
+  std::string condition_image_path;
+};
+
+/**
+ * @brief Execute `body` exactly `repetitions` times (`loop(n) { ... }`).
+ */
+struct LoopStmt final : Stmt {
+  int repetitions = 0;
+  std::unique_ptr<BlockStmt> body;
+};
+
+/**
  * @brief Root AST container — ordered top-level statements of one parsed script.
  */
 struct Program {

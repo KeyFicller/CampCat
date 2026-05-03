@@ -4,6 +4,7 @@
 #include <cstdlib>
 #include <limits>
 #include <sstream>
+#include <string>
 
 namespace campcat::ccat_lang {
 
@@ -90,6 +91,26 @@ private:
     return value;
   }
 
+  double parse_double_coord(const char *_ctx) {
+    Token t = m_lex.peek();
+    if (t.kind != TokKind::Ident) {
+      std::ostringstream oss;
+      oss << _ctx << " (expected numeric literal near line " << t.line << ")";
+      fail(oss.str());
+    }
+    (void)m_lex.next();
+    try {
+      size_t consumed = 0;
+      const double v = std::stod(t.text, &consumed);
+      if (consumed != t.text.size()) {
+        fail(std::string(_ctx) + ": malformed number");
+      }
+      return v;
+    } catch (const std::exception &) {
+      fail(std::string(_ctx) + ": invalid number");
+    }
+  }
+
   std::string parse_log_operand() { return parse_image_ref(); }
 
   std::unique_ptr<Stmt> parse_stmt() {
@@ -103,10 +124,25 @@ private:
       return parse_wait();
     case TokKind::KwLog:
       return parse_log();
+    case TokKind::KwSwipe:
+      return parse_swipe_templates();
+    case TokKind::KwTapAt:
+      return parse_tap_at();
+    case TokKind::KwSwipeAt:
+      return parse_swipe_at();
+    case TokKind::KwWaitUntil:
+      return parse_wait_until();
+    case TokKind::KwRetry:
+      return parse_retry();
+    case TokKind::KwDo:
+      return parse_do_while();
+    case TokKind::KwLoop:
+      return parse_loop();
     case TokKind::LBrace:
       return parse_block();
     default:
-      fail("expected if, tap, wait, log, or block");
+      fail("expected statement (if, tap, wait, log, swipe, tap_at, swipe_at, "
+           "wait_until, retry, do, loop, or block)");
     }
   }
 
@@ -166,6 +202,103 @@ private:
     expect(TokKind::RParen, "expected ')' after log message");
     auto node = std::make_unique<LogStmt>();
     node->message = std::move(msg);
+    return node;
+  }
+
+  std::unique_ptr<SwipeTemplatesStmt> parse_swipe_templates() {
+    expect(TokKind::KwSwipe, "expected swipe");
+    expect(TokKind::LParen, "expected '(' after swipe");
+    std::string from = parse_image_ref();
+    expect(TokKind::Comma, "expected ',' between swipe templates");
+    std::string to = parse_image_ref();
+    expect(TokKind::RParen, "expected ')' after swipe");
+    auto node = std::make_unique<SwipeTemplatesStmt>();
+    node->from_image_path = std::move(from);
+    node->to_image_path = std::move(to);
+    return node;
+  }
+
+  std::unique_ptr<TapAtStmt> parse_tap_at() {
+    expect(TokKind::KwTapAt, "expected tap_at");
+    expect(TokKind::LParen, "expected '(' after tap_at");
+    const double x = parse_double_coord("tap_at x");
+    expect(TokKind::Comma, "expected ',' after tap_at x");
+    const double y = parse_double_coord("tap_at y");
+    expect(TokKind::RParen, "expected ')' after tap_at");
+    auto node = std::make_unique<TapAtStmt>();
+    node->nx = x;
+    node->ny = y;
+    return node;
+  }
+
+  std::unique_ptr<SwipeAtStmt> parse_swipe_at() {
+    expect(TokKind::KwSwipeAt, "expected swipe_at");
+    expect(TokKind::LParen, "expected '(' after swipe_at");
+    const double x1 = parse_double_coord("swipe_at x1");
+    expect(TokKind::Comma, "expected ','");
+    const double y1 = parse_double_coord("swipe_at y1");
+    expect(TokKind::Comma, "expected ','");
+    const double x2 = parse_double_coord("swipe_at x2");
+    expect(TokKind::Comma, "expected ','");
+    const double y2 = parse_double_coord("swipe_at y2");
+    expect(TokKind::RParen, "expected ')' after swipe_at");
+    auto node = std::make_unique<SwipeAtStmt>();
+    node->x1 = x1;
+    node->y1 = y1;
+    node->x2 = x2;
+    node->y2 = y2;
+    return node;
+  }
+
+  std::unique_ptr<WaitUntilStmt> parse_wait_until() {
+    expect(TokKind::KwWaitUntil, "expected wait_until");
+    expect(TokKind::LParen, "expected '(' after wait_until");
+    std::string img = parse_image_ref();
+    expect(TokKind::Comma, "expected ',' before wait_until timeout");
+    const int ms = parse_non_negative_int("wait_until timeout");
+    if (ms <= 0) {
+      fail("wait_until: timeout must be positive");
+    }
+    expect(TokKind::RParen, "expected ')' after wait_until");
+    auto node = std::make_unique<WaitUntilStmt>();
+    node->image_path = std::move(img);
+    node->timeout_ms = ms;
+    return node;
+  }
+
+  std::unique_ptr<RetryStmt> parse_retry() {
+    expect(TokKind::KwRetry, "expected retry");
+    expect(TokKind::LParen, "expected '(' after retry");
+    const int n = parse_non_negative_int("retry count");
+    if (n <= 0) {
+      fail("retry(n): n must be positive");
+    }
+    expect(TokKind::RParen, "expected ')' after retry count");
+    auto node = std::make_unique<RetryStmt>();
+    node->attempts = n;
+    node->body = parse_stmt();
+    return node;
+  }
+
+  std::unique_ptr<DoWhileStmt> parse_do_while() {
+    expect(TokKind::KwDo, "expected do");
+    auto node = std::make_unique<DoWhileStmt>();
+    node->body = parse_block();
+    expect(TokKind::KwWhile, "expected while after do block");
+    expect(TokKind::LParen, "expected '(' after while");
+    node->condition_image_path = parse_image_ref();
+    expect(TokKind::RParen, "expected ')' after while condition");
+    return node;
+  }
+
+  std::unique_ptr<LoopStmt> parse_loop() {
+    expect(TokKind::KwLoop, "expected loop");
+    expect(TokKind::LParen, "expected '(' after loop");
+    const int n = parse_non_negative_int("loop count");
+    expect(TokKind::RParen, "expected ')' after loop count");
+    auto node = std::make_unique<LoopStmt>();
+    node->repetitions = n;
+    node->body = parse_block();
     return node;
   }
 };

@@ -106,6 +106,30 @@ Token Lexer::lex_ident_or_kw() {
   if (buf == "log") {
     return Token{TokKind::KwLog, std::move(buf), line, col};
   }
+  if (buf == "swipe") {
+    return Token{TokKind::KwSwipe, std::move(buf), line, col};
+  }
+  if (buf == "tap_at") {
+    return Token{TokKind::KwTapAt, std::move(buf), line, col};
+  }
+  if (buf == "swipe_at") {
+    return Token{TokKind::KwSwipeAt, std::move(buf), line, col};
+  }
+  if (buf == "wait_until") {
+    return Token{TokKind::KwWaitUntil, std::move(buf), line, col};
+  }
+  if (buf == "retry") {
+    return Token{TokKind::KwRetry, std::move(buf), line, col};
+  }
+  if (buf == "do") {
+    return Token{TokKind::KwDo, std::move(buf), line, col};
+  }
+  if (buf == "while") {
+    return Token{TokKind::KwWhile, std::move(buf), line, col};
+  }
+  if (buf == "loop") {
+    return Token{TokKind::KwLoop, std::move(buf), line, col};
+  }
   return Token{TokKind::Ident, std::move(buf), line, col};
 }
 
@@ -138,6 +162,10 @@ Token Lexer::next() {
   case ';':
     advance_cursor();
     m_cur = Token{TokKind::Semi, ";", line, col};
+    return m_cur;
+  case ',':
+    advance_cursor();
+    m_cur = Token{TokKind::Comma, ",", line, col};
     return m_cur;
   case '"':
     m_cur = lex_string();

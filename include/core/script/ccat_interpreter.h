@@ -92,6 +92,23 @@ private:
    */
   std::filesystem::path resolve_image_path(const std::string &_rel) const;
 
+  std::optional<std::string>
+  swipe_templates_impl(const std::string &_from_rel,
+                       const std::string &_to_rel,
+                       const std::function<bool()> &_should_stop);
+
+  std::optional<std::string>
+  tap_at_impl(double _nx, double _ny,
+              const std::function<bool()> &_should_stop);
+
+  std::optional<std::string>
+  swipe_at_impl(double _x1, double _y1, double _x2, double _y2,
+                const std::function<bool()> &_should_stop);
+
+  std::optional<std::string>
+  wait_until_impl(const std::string &_rel_path, int _timeout_ms,
+                  const std::function<bool()> &_should_stop);
+
   adb_client *m_adb;
   const app_config *m_cfg;
   template_matcher m_matcher;

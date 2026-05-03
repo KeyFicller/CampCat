@@ -1,15 +1,17 @@
 // CampCat .ccat script. PNG paths are relative to this file's folder
 // unless images_root is set in scripts/ccat_script.json.
 //
-// Examples:
-//   log("hello");
-//   wait(500);
-//   if (game_main.png)
-//     tap(game_main.png);
+// Statements:
+//   tap(img);   tap_at(x, y);           // x,y normalized [0,1] vs screenshot size
+//   swipe(img_from, img_to);           // one screenshot, swipe between match centers
+//   swipe_at(x1,y1,x2,y2);             // normalized endpoints
+//   wait(ms);   wait_until(img, ms);    // poll until template appears
+//   log(msg);   if (img) { } else { }
+//   retry(n) stmt_or_block;
+//   loop(n) { }                       // run block exactly n times (n may be 0)
+//   do { } while (img);                // repeat while template still matches (cap 50k iter)
 
-if(back_2.png) {
-    log("Back founded.")
-}
-else {
-    log("Back not founded.")
+loop(3) {
+    wait(1000)
+    log("Hello world.")
 }
