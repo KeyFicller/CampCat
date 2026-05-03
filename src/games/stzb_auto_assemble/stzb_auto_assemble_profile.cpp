@@ -179,36 +179,4 @@ nlohmann::json stzb_auto_assemble_profile::to_summary_json_for_log() const {
   return j;
 }
 
-stzb_auto_assemble_profile detail::profile_from_legacy_top_level_game(
-    const nlohmann::json &root_document) {
-  stzb_auto_assemble_profile p = stzb_auto_assemble_profile::defaults();
-  if (!root_document.contains("game") || !root_document["game"].is_object()) {
-    return p;
-  }
-  const auto &g = root_document["game"];
-  if (g.contains("templates") && g["templates"].is_object()) {
-    for (const auto &item : g["templates"].items()) {
-      if (item.value().is_string()) {
-        p.templates[item.key()] = item.value().get<std::string>();
-      }
-    }
-  }
-  p.team_count = g.value("team_count", p.team_count);
-  if (g.contains("team_rois") && g["team_rois"].is_array()) {
-    size_t i = 0;
-    for (const auto &item : g["team_rois"]) {
-      if (i >= p.team_rois.size()) {
-        break;
-      }
-      p.team_rois[i++] = parse_roi(item);
-    }
-  }
-  if (root_document.contains("template_root")) {
-    p.bundle_dir = root_document["template_root"].get<std::string>();
-  }
-  p.resolution_subdir =
-      root_document.value("resolution_subdir", p.resolution_subdir);
-  return p;
-}
-
 } // namespace campcat

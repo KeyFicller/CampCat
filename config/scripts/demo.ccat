@@ -1,0 +1,15 @@
+// CampCat .ccat script. PNG paths are relative to this file's folder
+// unless images_root is set in scripts/ccat_script.json.
+//
+// Examples:
+//   log("hello");
+//   wait(500);
+//   if (game_main.png)
+//     tap(game_main.png);
+
+if(back_2.png) {
+    log("Back founded.")
+}
+else {
+    log("Back not founded.")
+}

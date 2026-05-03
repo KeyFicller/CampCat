@@ -1,7 +1,5 @@
 #include "core/app_config.h"
 
-#include "games/stzb_auto_assemble/stzb_auto_assemble_profile.h"
-
 #include <algorithm>
 #include <fstream>
 #include <stdexcept>
@@ -17,37 +15,8 @@ namespace {
 constexpr const char k_stzb_script_id[] = "stzb_auto_assemble";
 constexpr const char k_stzb_script_rel_json[] = "scripts/stzb_auto_assemble.json";
 
-void try_migrate_legacy_main_config_snapshot(
-    const std::filesystem::path &_main_config_path,
-    const nlohmann::json &_raw_root_snapshot, app_config &_c) {
-  if (!_raw_root_snapshot.contains("game") ||
-      !_raw_root_snapshot["game"].is_object()) {
-    return;
-  }
-  const auto &g = _raw_root_snapshot["game"];
-  if (!g.contains("templates") || !g["templates"].is_object()) {
-    return;
-  }
-  if (g["templates"].empty()) {
-    return;
-  }
-  const auto cfg_dir = _main_config_path.parent_path();
-  if (cfg_dir.empty()) {
-    return;
-  }
-  std::filesystem::create_directories(cfg_dir / "scripts");
-  const auto dst = cfg_dir / k_stzb_script_rel_json;
-  if (std::filesystem::exists(dst)) {
-    _c.script_config_paths[k_stzb_script_id] = k_stzb_script_rel_json;
-    return;
-  }
-  const auto project_root = cfg_dir.parent_path();
-  stzb_auto_assemble_profile prof =
-      detail::profile_from_legacy_top_level_game(_raw_root_snapshot);
-  prof.save_to_file(dst, project_root);
-  _c.script_config_paths[k_stzb_script_id] = k_stzb_script_rel_json;
-  _c.active_script_id = k_stzb_script_id;
-}
+constexpr const char k_ccat_script_id[] = "ccat_script";
+constexpr const char k_ccat_script_rel_json[] = "scripts/ccat_script.json";
 
 } // namespace
 
@@ -94,17 +63,8 @@ void app_config::from_json(const nlohmann::json &_j, app_config &_c) {
     }
   }
 
-  if (!_j.contains("active_script")) {
-    if (_j.contains("game") && _j["game"].is_object()) {
-      const auto &g = _j["game"];
-      const std::string ap = g.value("automation_profile", "");
-      if (ap.empty() || ap == "campcat_stzb_auto_assemble" ||
-          ap == "campcat_city") {
-        _c.active_script_id = k_stzb_script_id;
-      } else {
-        _c.active_script_id = "none";
-      }
-    }
+  if (!_c.script_config_paths.contains(k_ccat_script_id)) {
+    _c.script_config_paths[k_ccat_script_id] = k_ccat_script_rel_json;
   }
 }
 
@@ -166,6 +126,7 @@ std::filesystem::path app_config::resolve_script_json(const std::string &_id) co
 app_config app_config::defaults() {
   app_config c;
   c.script_config_paths[k_stzb_script_id] = k_stzb_script_rel_json;
+  c.script_config_paths[k_ccat_script_id] = k_ccat_script_rel_json;
   c.active_script_id = k_stzb_script_id;
   return c;
 }
@@ -188,7 +149,6 @@ app_config app_config::load_from_file(const std::filesystem::path &_path) {
   nlohmann::json j;
   in >> j;
   from_json(j, c);
-  try_migrate_legacy_main_config_snapshot(canon_main, j, c);
   return c;
 }
 

@@ -1,25 +1,26 @@
 {
-  "version": 1,
+  "action_gap_ms": 1000,
+  "active_script": "ccat_script",
+  "adb_connect_address": "127.0.0.1:5555",
   "adb_path": "/Applications/MuMuPlayer.app/Contents/MacOS/MuMuEmulator.app/Contents/MacOS/tools/adb",
   "adb_serial": "",
-  "adb_connect_address": "127.0.0.1:5555",
-  "tap_delay_ms": 150,
-  "action_gap_ms": 1000,
-  "swipe_duration_ms": 300,
-  "match_threshold": 0.7,
-  "match_multiscale": false,
-  "max_step_retries": 12,
-  "step_retry_interval_ms": 500,
-  "debug_screenshots": false,
   "debug_dir": "debug_captures",
+  "debug_screenshots": false,
+  "match_multiscale": false,
+  "match_threshold": 0.7,
+  "max_step_retries": 12,
   "scheduler": {
     "enabled": true,
     "interval_seconds": 300,
     "jitter_seconds": 7,
     "skip_if_busy": false
   },
-  "active_script": "stzb_auto_assemble",
   "scripts": {
+    "ccat_script": "scripts/ccat_script.json",
     "stzb_auto_assemble": "scripts/stzb_auto_assemble.json"
-  }
+  },
+  "step_retry_interval_ms": 500,
+  "swipe_duration_ms": 300,
+  "tap_delay_ms": 150,
+  "version": 1
 }

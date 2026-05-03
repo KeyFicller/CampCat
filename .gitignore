@@ -8,3 +8,4 @@ debug_captures/
 imgui.ini
 /.vscode
 /build-opencv-test
+/config/scripts/*.png

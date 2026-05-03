@@ -12,6 +12,7 @@
 #include <thread>
 #include <utility>
 #include <vector>
+#include <tuple>
 
 #if defined(__APPLE__)
 #define GL_SILENCE_DEPRECATION
@@ -31,6 +32,7 @@
 #include "core/log_buffer.h"
 #include "core/scheduler.h"
 #include "games/stzb_auto_assemble/stzb_auto_assemble_profile.h"
+#include "games/ccat_script/ccat_script_profile.h"
 
 namespace {
 
@@ -63,7 +65,10 @@ std::string script_display_label(const std::string &_id) {
     return "(none)";
   }
   if (_id == "stzb_auto_assemble") {
-    return "STZB · main city / formation";
+    return "STZB - main city / formation";
+  }
+  if (_id == "ccat_script") {
+    return "CampCat script (.ccat)";
   }
   return _id;
 }
@@ -81,19 +86,25 @@ void append_prefixed_multiline_json(
 }
 
 constexpr const char k_stzb_id[] = "stzb_auto_assemble";
+constexpr const char k_ccat_script_id[] = "ccat_script";
 
 bool persist_bundle_to_disk(
     const campcat::app_config &_shell_written,
     const campcat::stzb_auto_assemble_profile &_stzb_snap,
+    const campcat::ccat_script_profile &_ccat_snap,
     const std::filesystem::path &_shell_path,
     std::string *_error_out = nullptr) {
   try {
     std::filesystem::create_directories(_shell_path.parent_path());
     campcat::app_config tmp_shell = _shell_written;
     tmp_shell.save_to_file(_shell_path);
-    const auto pj = _shell_written.resolve_script_json(k_stzb_id);
-    if (!pj.empty()) {
-      _stzb_snap.save_to_file(pj, _shell_written.project_root());
+    const auto pj_stzb = _shell_written.resolve_script_json(k_stzb_id);
+    if (!pj_stzb.empty()) {
+      _stzb_snap.save_to_file(pj_stzb, _shell_written.project_root());
+    }
+    const auto pj_vis = _shell_written.resolve_script_json(k_ccat_script_id);
+    if (!pj_vis.empty()) {
+      _ccat_snap.save_to_bundle_path(pj_vis, _shell_written.config_home);
     }
     return true;
   } catch (const std::exception &ex) {
@@ -121,6 +132,18 @@ int main(int argc, char **argv) {
           pj, cfg.project_root());
     } else {
       stzb_live = campcat::stzb_auto_assemble_profile::defaults();
+    }
+  }
+
+  campcat::ccat_script_profile ccat_live{};
+  {
+    const auto pj = cfg.resolve_script_json(k_ccat_script_id);
+    if (!pj.empty()) {
+      ccat_live =
+          campcat::ccat_script_profile::load_from_bundle_path(pj,
+                                                                  cfg.config_home);
+    } else {
+      ccat_live = campcat::ccat_script_profile::defaults();
     }
   }
 
@@ -157,9 +180,15 @@ int main(int argc, char **argv) {
     return stzb_live;
   };
 
+  auto snapshot_ccat_live = [&]() -> campcat::ccat_script_profile {
+    std::lock_guard<std::mutex> lk(cfg_mu);
+    return ccat_live;
+  };
+
   auto run_automation_thread_body =
       [&](const campcat::app_config _snap_shell,
-          const campcat::stzb_auto_assemble_profile &_snap_stzb) {
+          const campcat::stzb_auto_assemble_profile &_snap_stzb,
+          const campcat::ccat_script_profile &_snap_ccat) {
         auto split_log = [&](const char *prefix, const std::string &block) {
           std::istringstream iss(block);
           std::string line;
@@ -185,15 +214,18 @@ int main(int argc, char **argv) {
             append_log(std::move(line));
           };
 
-          const campcat::stzb_auto_assemble_profile *stzb_arg =
-              (_snap_shell.active_script_id == k_stzb_id) ? &_snap_stzb
-                                                          : nullptr;
+          const campcat::automation_profile *bundle = nullptr;
+          if (_snap_shell.active_script_id == k_stzb_id) {
+            bundle = &_snap_stzb;
+          } else if (_snap_shell.active_script_id == k_ccat_script_id) {
+            bundle = &_snap_ccat;
+          }
           auto automator = campcat::make_game_automation(&adb, &_snap_shell,
-                                                         stzb_arg, log_fn);
+                                                         bundle, log_fn);
           const auto should_stop = [&]() { return stop_requested.load(); };
           const auto res = automator->run_cycle(should_stop);
           append_log(std::string("[fsm] ok=") + (res.ok ? "true" : "false") +
-                     " · " + res.message);
+                     " | " + res.message);
         } catch (const std::exception &ex) {
           append_log(std::string("[fsm] exception: ") + ex.what());
         }
@@ -202,8 +234,9 @@ int main(int argc, char **argv) {
 
   auto capture_bundle_snapshot = [&]() {
     std::lock_guard<std::mutex> lk(cfg_mu);
-    return std::pair<campcat::app_config, campcat::stzb_auto_assemble_profile>(
-        cfg, stzb_live);
+    return std::tuple<campcat::app_config, campcat::stzb_auto_assemble_profile,
+                      campcat::ccat_script_profile>(cfg, stzb_live,
+                                                      ccat_live);
   };
 
   auto run_single_job = [&]() {
@@ -218,10 +251,12 @@ int main(int argc, char **argv) {
     }
 
     auto snap = capture_bundle_snapshot();
-    worker_thread =
-        std::thread([&run_automation_thread_body, shell = std::move(snap.first),
-                     stzb = std::move(snap.second)]() mutable {
-          run_automation_thread_body(std::move(shell), std::move(stzb));
+    worker_thread = std::thread(
+        [&run_automation_thread_body, shell = std::move(std::get<0>(snap)),
+         stzb = std::move(std::get<1>(snap)),
+         ccat_bundle = std::move(std::get<2>(snap))]() mutable {
+          run_automation_thread_body(std::move(shell), std::move(stzb),
+                                     std::move(ccat_bundle));
         });
   };
 
@@ -248,10 +283,10 @@ int main(int argc, char **argv) {
         immediate_first_tick);
 
     if (immediate_first_tick) {
-      append_log("[sched] armed · immediate tick once, then "
+      append_log("[sched] armed - immediate tick once, then "
                  "sleep(interval+jitter) and repeat until exit/disable");
     } else {
-      append_log("[sched] armed · sleep(interval+jitter) then tick, repeat "
+      append_log("[sched] armed - sleep(interval+jitter) then tick, repeat "
                  "until exit/disable");
     }
   };
@@ -277,7 +312,7 @@ int main(int argc, char **argv) {
 #endif
 
   GLFWwindow *window =
-      glfwCreateWindow(1180, 780, "CampCat · Shell", nullptr, nullptr);
+      glfwCreateWindow(1180, 780, "CampCat Shell", nullptr, nullptr);
   if (!window) {
     glfwTerminate();
     return 2;
@@ -305,6 +340,7 @@ int main(int argc, char **argv) {
   static bool buffers_init = false;
 
   campcat::stzb_auto_assemble_profile stzb_ui = snapshot_stzb_live();
+  campcat::ccat_script_profile ccat_ui = snapshot_ccat_live();
 
   static bool script_switch_warmed = false;
   static std::string last_script_seen;
@@ -320,6 +356,16 @@ int main(int argc, char **argv) {
       {
         std::lock_guard<std::mutex> lk(cfg_mu);
         body = stzb_live;
+      }
+      append_prefixed_multiline_json(body.to_summary_json_for_log(),
+                                     "[script cfg] ", append_log);
+      return;
+    }
+    if (sid == k_ccat_script_id) {
+      campcat::ccat_script_profile body;
+      {
+        std::lock_guard<std::mutex> lk(cfg_mu);
+        body = ccat_live;
       }
       append_prefixed_multiline_json(body.to_summary_json_for_log(),
                                      "[script cfg] ", append_log);
@@ -352,6 +398,20 @@ int main(int argc, char **argv) {
                           pj, _view_shell_before_combo.project_root());
           }
           stzb_ui = snapshot_stzb_live();
+        }
+
+        if (_view_shell_before_combo.active_script_id == k_ccat_script_id) {
+          const auto pj =
+              _view_shell_before_combo.resolve_script_json(k_ccat_script_id);
+          {
+            std::lock_guard<std::mutex> lk(cfg_mu);
+            ccat_live =
+                pj.empty()
+                    ? campcat::ccat_script_profile::defaults()
+                    : campcat::ccat_script_profile::load_from_bundle_path(
+                          pj, _view_shell_before_combo.config_home);
+          }
+          ccat_ui = snapshot_ccat_live();
         }
 
         append_log("[script] active_script='" + last_script_seen + "'");
@@ -398,13 +458,19 @@ int main(int argc, char **argv) {
             std::lock_guard<std::mutex> lk(cfg_mu);
             cfg = to_write;
             stzb_live = stzb_ui;
-            ok = persist_bundle_to_disk(cfg, stzb_live, cfg_path, &err);
+            ccat_live = ccat_ui;
+            ok = persist_bundle_to_disk(cfg, stzb_live, ccat_live, cfg_path,
+                                        &err);
           }
           if (ok) {
-            append_log("[ui] saved → shell: " + cfg_path.string());
-            const auto pj = to_write.resolve_script_json(k_stzb_id);
-            if (!pj.empty()) {
-              append_log("[ui] saved → script bundle: " + pj.string());
+            append_log("[ui] saved to shell: " + cfg_path.string());
+            const auto pj_stzb = to_write.resolve_script_json(k_stzb_id);
+            if (!pj_stzb.empty()) {
+              append_log("[ui] saved to STZB bundle: " + pj_stzb.string());
+            }
+            const auto pj_vis = to_write.resolve_script_json(k_ccat_script_id);
+            if (!pj_vis.empty()) {
+              append_log("[ui] saved to ccat bundle: " + pj_vis.string());
             }
             if (!snapshot_cfg().scheduler.enabled) {
               scheduler.stop();
@@ -471,7 +537,8 @@ int main(int argc, char **argv) {
     ImGui::Separator();
 
     const bool busy_now = cycle_running.load();
-    if (busy_now) {
+    const bool lock_manual_single = busy_now || scheduler.running();
+    if (lock_manual_single) {
       ImGui::BeginDisabled();
     }
 
@@ -481,19 +548,22 @@ int main(int argc, char **argv) {
       std::lock_guard<std::mutex> lk(cfg_mu);
       cfg = cfg_view;
       stzb_live = stzb_ui;
+      ccat_live = ccat_ui;
     };
 
     if (ImGui::Button("run_single")) {
       push_job_snapshot();
       run_single_job();
     }
-    if (busy_now) {
+    if (lock_manual_single) {
       ImGui::EndDisabled();
     }
 
     ImGui::SameLine();
     if (ImGui::Button("stop cycle")) {
       stop_requested.store(true);
+      scheduler.stop();
+      append_log("[ui] stop cycle");
     }
 
     ImGui::SameLine();
@@ -503,10 +573,11 @@ int main(int argc, char **argv) {
         push_job_snapshot();
       }
       std::string err;
-      bool ok_writ = persist_bundle_to_disk(
-          snapshot_cfg(), snapshot_stzb_live(), cfg_path, &err);
+      bool ok_writ = persist_bundle_to_disk(snapshot_cfg(), snapshot_stzb_live(),
+                                            snapshot_ccat_live(), cfg_path,
+                                            &err);
       if (ok_writ) {
-        append_log("[ui] autosaved scheduler flag → " + cfg_path.string());
+        append_log("[ui] autosaved scheduler flag to " + cfg_path.string());
       } else {
         append_log("[ui] autosave warning: " + err);
       }
@@ -519,11 +590,11 @@ int main(int argc, char **argv) {
         const double frac =
             std::clamp(wp.elapsed_seconds / wp.duration_seconds, 0.0, 1.0);
         ImGui::ProgressBar(static_cast<float>(frac), ImVec2(-1.0F, 0.0F));
-        ImGui::Text("scheduler · elapsed %.1f s / interval %.1f s",
+        ImGui::Text("scheduler - elapsed %.1f s / interval %.1f s",
                     wp.elapsed_seconds, wp.duration_seconds);
       } else {
         ImGui::TextUnformatted(
-            "scheduler · not waiting (immediate tick or tick running) …");
+            "scheduler - not waiting (immediate tick or tick running)...");
       }
     }
 
@@ -540,6 +611,14 @@ int main(int argc, char **argv) {
     if (!log_scroll.empty() &&
         ImGui::GetScrollY() >= ImGui::GetScrollMaxY() - 20.0F) {
       ImGui::SetScrollHereY(1.0F);
+    }
+    if (ImGui::BeginPopupContextWindow("logpane_ctx",
+                                         ImGuiPopupFlags_MouseButtonRight)) {
+      if (ImGui::MenuItem("Clear log")) {
+        log_lines.clear();
+        log_scroll.clear();
+      }
+      ImGui::EndPopup();
     }
     ImGui::EndChild();
 
@@ -626,10 +705,36 @@ int main(int argc, char **argv) {
                             "%.3f");
         ImGui::PopID();
       }
+    } else if (cfg_view.active_script_id == k_ccat_script_id) {
+      ImGui::TextUnformatted(
+          "CampCat .ccat script - bundle JSON + source next to config/scripts/");
+      static char v_src[512]{};
+      static char v_img[512]{};
+      std::snprintf(v_src, sizeof(v_src), "%s",
+                    ccat_ui.source_rel.c_str());
+      std::snprintf(v_img, sizeof(v_img), "%s",
+                    ccat_ui.images_root_rel.c_str());
+      if (ImGui::InputText("source (.ccat path relative to config dir)",
+                           v_src, IM_ARRAYSIZE(v_src))) {
+        ccat_ui.source_rel = v_src;
+      }
+      if (ImGui::InputText(
+              "images_root (optional, relative to config dir; empty = use "
+              ".ccat folder)",
+              v_img, IM_ARRAYSIZE(v_img))) {
+        ccat_ui.images_root_rel = v_img;
+      }
+      ImGui::TextWrapped("Resolved PNG search directory: %s",
+                         ccat_ui.images_base(cfg_view.config_home)
+                             .string()
+                             .c_str());
+      ImGui::TextWrapped(
+          "Script path hint: %s",
+          (cfg_view.config_home / ccat_ui.source_rel).string().c_str());
     } else {
       ImGui::TextDisabled(
-          "Pick a script in the combo to edit its bundle. Choose STZB to "
-          "edit template keys and ROIs.");
+          "Pick a script in the combo to edit its bundle. STZB edits "
+          "templates; CampCat script edits .ccat paths.");
     }
 
     ImGui::EndChild();
@@ -638,7 +743,7 @@ int main(int argc, char **argv) {
 
     ImGui::Separator();
 
-    ImGui::TextUnformatted(busy_now ? "status: working ~" : "status: idle");
+    ImGui::TextUnformatted(busy_now ? "status: working..." : "status: idle");
 
     ImGui::End();
 
@@ -659,6 +764,7 @@ int main(int argc, char **argv) {
       shell_merge_buffer_paths(&cfg, cfg_view, adb_path_buf, serial_buf,
                                adb_connect_buf, dbg_buf);
       stzb_live = stzb_ui;
+      ccat_live = ccat_ui;
     }
   }
 

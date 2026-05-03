@@ -69,7 +69,14 @@ private:
   std::filesystem::path
   resolve_template(const std::string &relative_name) const;
 
-private:
+  /**
+   * @brief Capture current screen then match `resolved_png` (must exist on disk).
+   * @return True when screencap and correlation succeed above threshold.
+   */
+  bool snapshot_match_relative_template(
+      const std::filesystem::path &resolved_png, cv::Rect roi,
+      double threshold, ::campcat::match_result *out_mr) const;
+
   ::campcat::adb_client *m_adb;
   const ::campcat::app_config *m_cfg;
   const ::campcat::stzb_auto_assemble_profile *m_profile;

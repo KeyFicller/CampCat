@@ -44,11 +44,4 @@ struct stzb_auto_assemble_profile : automation_profile {
   nlohmann::json to_summary_json_for_log() const;
 };
 
-namespace detail {
-
-stzb_auto_assemble_profile profile_from_legacy_top_level_game(
-    const nlohmann::json &root_document);
-
-}
-
 } // namespace campcat

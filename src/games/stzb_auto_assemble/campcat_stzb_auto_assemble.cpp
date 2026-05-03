@@ -5,9 +5,11 @@
 
 #include <algorithm>
 #include <chrono>
+#include <filesystem>
 #include <iomanip>
 #include <sstream>
 #include <stdexcept>
+#include <system_error>
 #include <thread>
 
 #include <opencv2/imgcodecs.hpp>
@@ -97,6 +99,28 @@ campcat_stzb_auto_assemble::resolve_template(const std::string &_relative_name) 
   return m_profile->template_resolution_dir() / _relative_name;
 }
 
+bool campcat_stzb_auto_assemble::snapshot_match_relative_template(
+    const std::filesystem::path &resolved_png, cv::Rect roi, double threshold,
+    match_result *out_mr) const {
+  std::error_code ec;
+  if (!std::filesystem::is_regular_file(resolved_png, ec)) {
+    return false;
+  }
+  cv::Mat screen;
+  if (!m_adb->screencap_png(&screen)) {
+    return false;
+  }
+  const auto mr =
+      m_matcher.match_file(screen, resolved_png.string(), threshold, roi);
+  if (!mr || !mr->found) {
+    return false;
+  }
+  if (out_mr) {
+    *out_mr = *mr;
+  }
+  return true;
+}
+
 bool campcat_stzb_auto_assemble::wait_for_template(
     const std::string &logical_template_key, cv::Rect roi,
     std::chrono::milliseconds timeout,
@@ -172,12 +196,18 @@ bool campcat_stzb_auto_assemble::dismiss_notice_loop(const std::function<bool()>
       return true;
     }
 
+    match_result tap_mr{};
+    if (!snapshot_match_relative_template(path, {}, m_cfg->match_threshold,
+                                          &tap_mr)) {
+      return true;
+    }
+
     std::ostringstream oss;
     oss << "[fsm] closing popup (match=" << std::fixed << std::setprecision(3)
-        << mr->confidence << ")";
+        << tap_mr.confidence << ")";
     m_log(oss.str());
 
-    if (!m_adb->tap(mr->center.x, mr->center.y)) {
+    if (!m_adb->tap(tap_mr.center.x, tap_mr.center.y)) {
       m_log("[fsm] tap failed during popup dismiss");
       return false;
     }
@@ -325,6 +355,15 @@ bool campcat_stzb_auto_assemble::navigate_to_main_city(const std::function<bool(
       return false;
     }
 
+    if (!snapshot_match_relative_template(path, {}, m_cfg->match_threshold,
+                                          &mr)) {
+      std::ostringstream oss;
+      oss << "[fsm] enter-city: '" << step_label
+          << "' not visible at tap time (stale wait)";
+      m_log(oss.str());
+      return false;
+    }
+
     if (!m_adb->tap(mr.center.x, mr.center.y)) {
       std::ostringstream oss;
       oss << "[fsm] enter-city tap failed at step " << step_label;
@@ -414,15 +453,14 @@ bool campcat_stzb_auto_assemble::inspect_team_recruitment_slot(
       if (!asm_rel.empty()) {
         const auto path_asm = resolve_template(asm_rel);
         if (std::filesystem::exists(path_asm)) {
-          if (const auto ma =
-                  m_matcher.match_file(detail_screen, path_asm.string(),
-                                       m_cfg->match_threshold, {})) {
-            if (ma->found) {
-              if (m_adb->tap(ma->center.x, ma->center.y)) {
-                m_log("set to auto assemble.");
-                m_adb->delay_after_action(pause_after_tap(*m_cfg));
-                (void)m_adb->screencap_png(&detail_screen);
-              }
+          match_result asm_mr{};
+          if (snapshot_match_relative_template(path_asm, {},
+                                               m_cfg->match_threshold,
+                                               &asm_mr)) {
+            if (m_adb->tap(asm_mr.center.x, asm_mr.center.y)) {
+              m_log("set to auto assemble.");
+              m_adb->delay_after_action(pause_after_tap(*m_cfg));
+              (void)m_adb->screencap_png(&detail_screen);
             }
           }
         }
@@ -445,48 +483,63 @@ bool campcat_stzb_auto_assemble::inspect_team_recruitment_slot(
         path_ok(m_profile->tmpl("recruit_back_2"));
 
     if (backs_on_disk) {
-      auto tap_back_if_visible = [&](const cv::Mat &scr) -> bool {
-        match_result mr{};
-        if (!pick_best_recruit_back(scr, m_cfg->match_threshold, &mr)) {
+      auto tap_back_if_visible = [&]() -> bool {
+        cv::Mat s1;
+        if (!m_adb->screencap_png(&s1)) {
           return false;
         }
-        return m_adb->tap(mr.center.x, mr.center.y);
+        match_result mr1{};
+        if (!pick_best_recruit_back(s1, m_cfg->match_threshold, &mr1)) {
+          return false;
+        }
+        cv::Mat s2;
+        if (!m_adb->screencap_png(&s2)) {
+          return false;
+        }
+        match_result mr2{};
+        if (!pick_best_recruit_back(s2, m_cfg->match_threshold, &mr2)) {
+          return false;
+        }
+        return m_adb->tap(mr2.center.x, mr2.center.y);
       };
 
-      cv::Mat snap;
-      if (m_adb->screencap_png(&snap)) {
-        closed = tap_back_if_visible(snap);
-      }
+      closed = tap_back_if_visible();
 
       if (!closed) {
         bool anchor_still_visible = true;
         const auto &rd_name = rd;
         if (!rd_name.empty()) {
           const auto path_rd = resolve_template(rd_name);
+          cv::Mat anchor_snap;
           if (std::filesystem::exists(path_rd) &&
-              m_adb->screencap_png(&snap)) {
+              m_adb->screencap_png(&anchor_snap)) {
             anchor_still_visible = false;
             if (const auto rd_hit = m_matcher.match_file(
-                    snap, path_rd.string(), m_cfg->match_threshold, {})) {
+                    anchor_snap, path_rd.string(), m_cfg->match_threshold,
+                    {})) {
               anchor_still_visible = rd_hit->found;
             }
           }
         }
 
         if (!anchor_still_visible) {
-          if (m_adb->screencap_png(&snap)) {
-            closed = tap_back_if_visible(snap);
-          }
+          closed = tap_back_if_visible();
           if (!closed) {
             m_log("[fsm] recruit_detail anchor gone before back "
                   "(e.g. closed by assemble); skip back wait");
             closed = true;
           }
         } else {
-          match_result mr{};
           if (wait_for_recruit_back_visible(std::chrono::seconds(12),
-                                            should_stop, &mr)) {
-            closed = m_adb->tap(mr.center.x, mr.center.y);
+                                            should_stop, nullptr)) {
+            cv::Mat s_tap;
+            if (m_adb->screencap_png(&s_tap)) {
+              match_result mr_tap{};
+              if (pick_best_recruit_back(s_tap, m_cfg->match_threshold,
+                                         &mr_tap)) {
+                closed = m_adb->tap(mr_tap.center.x, mr_tap.center.y);
+              }
+            }
           }
         }
       }
@@ -605,8 +658,7 @@ bool campcat_stzb_auto_assemble::tap_recruit_back_until_gone(
       return false;
     }
 
-    match_result mr{};
-    if (!pick_best_recruit_back(snap, k_back_sweep_threshold, &mr)) {
+    if (!pick_best_recruit_back(snap, k_back_sweep_threshold, nullptr)) {
       if (taps > 0) {
         m_log("[fsm] back buttons gone after " + std::to_string(taps) +
               " tap(s); assuming main UI");
@@ -622,7 +674,22 @@ bool campcat_stzb_auto_assemble::tap_recruit_back_until_gone(
       return false;
     }
 
-    if (!m_adb->tap(mr.center.x, mr.center.y)) {
+    cv::Mat pre_tap;
+    if (!m_adb->screencap_png(&pre_tap)) {
+      m_log("[fsm] screencap failed before verified back tap");
+      return false;
+    }
+    match_result tap_mr{};
+    if (!pick_best_recruit_back(pre_tap, k_back_sweep_threshold, &tap_mr)) {
+      if (taps > 0) {
+        m_log("[fsm] back buttons gone before tap; assuming main UI");
+        return true;
+      }
+      m_log("[fsm] back buttons not visible before tap (unexpected)");
+      return true;
+    }
+
+    if (!m_adb->tap(tap_mr.center.x, tap_mr.center.y)) {
       m_log("[fsm] back tap failed during back-to-main sweep");
       return false;
     }

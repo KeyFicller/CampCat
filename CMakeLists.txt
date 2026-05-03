@@ -60,8 +60,13 @@ add_library(stzb_core STATIC
   src/core/automation/automation_factory.cpp
   src/core/app/scheduler.cpp
   src/core/app/log_buffer.cpp
+  src/core/script/ccat_lexer.cpp
+  src/core/script/ccat_parser.cpp
+  src/core/script/ccat_interpreter.cpp
   src/games/stzb_auto_assemble/campcat_stzb_auto_assemble.cpp
   src/games/stzb_auto_assemble/stzb_auto_assemble_profile.cpp
+  src/games/ccat_script/ccat_script_profile.cpp
+  src/games/ccat_script/ccat_script_automation.cpp
 )
 target_include_directories(stzb_core PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}/include

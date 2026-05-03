@@ -1,25 +1,50 @@
 {
-  "version": 1,
   "bundle_dir": "resources/scripts/stzb_auto_assemble",
   "resolution_subdir": "2560x1440",
+  "team_count": 4,
+  "team_rois": [
+    {
+      "h": 0.2194,
+      "w": 0.1219,
+      "x": 0.1414,
+      "y": 0.6646
+    },
+    {
+      "h": 0.2201,
+      "w": 0.1223,
+      "x": 0.2914,
+      "y": 0.6632
+    },
+    {
+      "h": 0.2201,
+      "w": 0.1223,
+      "x": 0.443,
+      "y": 0.6646
+    },
+    {
+      "h": 0.2201,
+      "w": 0.1223,
+      "x": 0.593,
+      "y": 0.6639
+    },
+    {
+      "h": 0.2201,
+      "w": 0.1223,
+      "x": 0.7441,
+      "y": 0.6639
+    }
+  ],
   "templates": {
     "assemble": "assemble.png",
     "dismiss_notice": "dismiss_notice.png",
-    "game_main": "game_main.png",
     "enter_city_city": "city.png",
     "enter_city_detail": "city_detail.png",
     "enter_city_location": "location.png",
+    "game_main": "game_main.png",
     "main_menu_anchor": "main_menu_anchor.png",
     "recruit_back": "back.png",
     "recruit_back_2": "back_2.png",
     "recruit_detail": "recruit.png"
   },
-  "team_count": 4,
-  "team_rois": [
-    { "x": 0.1414, "y": 0.6646, "w": 0.1219, "h": 0.2194 },
-    { "x": 0.2914, "y": 0.6632, "w": 0.1223, "h": 0.2201 },
-    { "x": 0.443, "y": 0.6646, "w": 0.1223, "h": 0.2201 },
-    { "x": 0.593, "y": 0.6639, "w": 0.1223, "h": 0.2201 },
-    { "x": 0.7441, "y": 0.6639, "w": 0.1223, "h": 0.2201 }
-  ]
+  "version": 1
 }
