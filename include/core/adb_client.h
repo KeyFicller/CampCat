@@ -4,6 +4,7 @@
 
 #include <chrono>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace campcat {
@@ -19,7 +20,7 @@ public:
    * @param[in] _adb_path Filesystem path to the `adb` executable.
    * @param[in] _serial Empty for default transport, or emulator/device serial.
    */
-  adb_client(std::string _adb_path, std::string _serial);
+  adb_client(const std::string &_adb_path, const std::string &_serial);
 
 public:
   /**
@@ -44,7 +45,7 @@ public:
    * @brief Switch target device for subsequent adb calls before `run(...)`.
    * @param[in] _serial Emulator/device serial; empty restores default semantics.
    */
-  void set_serial(std::string _serial) { m_serial = std::move(_serial); }
+  void set_serial(const std::string &_serial) { m_serial = _serial; }
 
   /**
    * @brief Run `adb` with additional arguments forwarded after base prefix.
@@ -56,6 +57,14 @@ public:
    */
   bool run(const std::vector<std::string> &_args, std::string *_stdout_out,
            std::string *_stderr_out, int _timeout_ms);
+
+  /**
+   * @brief When `_address` is non-empty, run `adb connect <address>` (TCP device).
+   * @return True if skipped (empty address) or subprocess exited 0; same contract as `run`.
+   */
+  bool connect_remote(std::string_view _address, int _timeout_ms = 15000,
+                      std::string *_stdout_out = nullptr,
+                      std::string *_stderr_out = nullptr);
 
   /**
    * @brief Tap at normalized screen coordinates understood by adb.

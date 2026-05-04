@@ -18,11 +18,9 @@ public:
    * @param[in] _adb adb_client performing IO-bound gestures/screenshots.
    * @param[in] _cfg Shell knobs forwarded into interpreter layers (thresholds/pacing).
    * @param[in] _profile Loaded bundle describing `.ccat` location plus PNG roots.
-   * @param[in] _log Logging functor bridged into DSL `log(...)` plus interpreter diagnostics.
    */
   explicit ccat_script_automation(adb_client *_adb, const app_config *_cfg,
-                                  const ccat_script_profile *_profile,
-                                  log_fn _log);
+                                  const ccat_script_profile *_profile);
 
   /**
    * @brief Reload `.ccat` bytes from disk, parse once, interpret until completion/stop/failure.
@@ -36,7 +34,6 @@ private:
   adb_client *m_adb;
   const app_config *m_cfg;
   const ccat_script_profile *m_profile;
-  log_fn m_log;
 };
 
 } // namespace campcat

@@ -2,6 +2,7 @@
 
 #include "core/adb_client.h"
 #include "core/app_config.h"
+#include "core/automation_log.h"
 #include "core/script/ccat_interpreter.h"
 #include "core/script/ccat_parser.h"
 #include "core/template_matcher.h"
@@ -38,9 +39,8 @@ std::string load_ccat_source(const app_config &_cfg,
 
 ccat_script_automation::ccat_script_automation(adb_client *_adb,
                                                const app_config *_cfg,
-                                               const ccat_script_profile *_profile,
-                                               log_fn _log)
-    : m_adb(_adb), m_cfg(_cfg), m_profile(_profile), m_log(std::move(_log)) {
+                                               const ccat_script_profile *_profile)
+    : m_adb(_adb), m_cfg(_cfg), m_profile(_profile) {
   if (!m_adb || !m_cfg || !m_profile) {
     throw std::invalid_argument(
         "ccat_script_automation requires adb, cfg, ccat_script_profile");
@@ -57,7 +57,7 @@ automation_cycle_result ccat_script_automation::run_cycle(
         << (m_cfg->config_home / m_profile->source_rel).string();
     r.ok = false;
     r.message = oss.str();
-    m_log(std::string("[ccat] ") + r.message);
+    automation_log::emit(std::string("[ccat] ") + r.message);
     return r;
   }
 
@@ -70,14 +70,13 @@ automation_cycle_result ccat_script_automation::run_cycle(
         << ex.col << ")";
     r.ok = false;
     r.message = oss.str();
-    m_log(std::string("[ccat] ") + r.message);
+    automation_log::emit(std::string("[ccat] ") + r.message);
     return r;
   }
 
   template_matcher matcher(m_cfg->match_threshold, m_cfg->match_multiscale);
   ccat_lang::CcatInterpreter interp(m_adb, m_cfg, std::move(matcher),
-                                   m_profile->images_base(m_cfg->config_home),
-                                   m_log);
+                                    m_profile->images_base(m_cfg->config_home));
   return interp.run(*prog, _should_stop);
 }
 

@@ -60,6 +60,7 @@ add_library(stzb_core STATIC
   src/core/automation/automation_factory.cpp
   src/core/app/scheduler.cpp
   src/core/app/log_buffer.cpp
+  src/core/app/automation_log.cpp
   src/core/script/ccat_lexer.cpp
   src/core/script/ccat_parser.cpp
   src/core/script/ccat_interpreter.cpp

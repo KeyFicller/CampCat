@@ -2,9 +2,9 @@
 
 namespace campcat {
 
-void log_buffer::push(std::string _line) {
+void log_buffer::push(const std::string &_line) {
   std::lock_guard<std::mutex> lk(m_mu);
-  m_lines.push_back(std::move(_line));
+  m_lines.push_back(_line);
   while (m_lines.size() > k_max_lines) {
     m_lines.pop_front();
   }

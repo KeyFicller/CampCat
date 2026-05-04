@@ -17,16 +17,6 @@ std::filesystem::path resolve_under_resolution_dir(
   return _template_resolution_dir / std::string(_relative_name);
 }
 
-void adb_connect_if_configured(adb_client &_adb, const app_config &_cfg,
-                               int _timeout_ms) {
-  if (_cfg.adb_connect_address.empty()) {
-    return;
-  }
-  std::string co, ce;
-  (void)_adb.run({"connect", _cfg.adb_connect_address}, &co, &ce,
-                 _timeout_ms);
-}
-
 } // namespace
 
 screen_template_detect_result detect_template_on_screen(
@@ -48,7 +38,7 @@ screen_template_detect_result detect_template_on_screen(
     return r;
   }
 
-  adb_connect_if_configured(_adb, _shell_timing_only,
+  (void)_adb.connect_remote(_shell_timing_only.adb_connect_address,
                             _opts.adb_connect_timeout_ms);
 
   cv::Mat scr;

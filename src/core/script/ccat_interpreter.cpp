@@ -2,6 +2,7 @@
 
 #include "core/adb_client.h"
 #include "core/app_config.h"
+#include "core/automation_log.h"
 #include "core/template_matcher.h"
 
 #include <algorithm>
@@ -55,10 +56,9 @@ cooperative_sleep_ms(int _ms,
 
 CcatInterpreter::CcatInterpreter(adb_client *_adb, const app_config *_cfg,
                                  template_matcher _matcher,
-                                 std::filesystem::path _images_base,
-                                 game_automation::log_fn _log)
+                                 std::filesystem::path _images_base)
     : m_adb(_adb), m_cfg(_cfg), m_matcher(std::move(_matcher)),
-      m_images_base(std::move(_images_base)), m_log(std::move(_log)) {
+      m_images_base(std::move(_images_base)) {
   if (!m_adb || !m_cfg) {
     throw std::invalid_argument("CcatInterpreter requires adb and cfg");
   }
@@ -79,7 +79,7 @@ bool CcatInterpreter::capture_screen(
     return false;
   }
   if (!m_adb->screencap_png(_out)) {
-    m_log("[ccat] screencap failed");
+    automation_log::emit("[ccat] screencap failed");
     return false;
   }
   return !_should_stop();
@@ -91,7 +91,7 @@ bool CcatInterpreter::image_matches(const std::string &_rel_path,
   const auto abs_path = resolve_image_path(_rel_path);
   std::error_code ec;
   if (!std::filesystem::is_regular_file(abs_path, ec)) {
-    m_log("[ccat] if: template file missing " + abs_path.string());
+    automation_log::emit("[ccat] if: template file missing " + abs_path.string());
     *_found = false;
     return true;
   }
@@ -102,7 +102,8 @@ bool CcatInterpreter::image_matches(const std::string &_rel_path,
   const auto opt =
       m_matcher.match_file(screen, abs_path.string(), m_cfg->match_threshold);
   if (!opt.has_value()) {
-    m_log("[ccat] template unreadable or missing: " + abs_path.string());
+    automation_log::emit("[ccat] template unreadable or missing: " +
+                         abs_path.string());
     *_found = false;
     return true;
   }
@@ -304,121 +305,144 @@ std::optional<std::string> CcatInterpreter::exec_stmt(
   if (_should_stop()) {
     return std::string("stopped");
   }
+  return _stmt->exec(*this, _should_stop);
+}
 
-  if (const auto *blk = dynamic_cast<const BlockStmt *>(_stmt)) {
-    for (const auto &child : blk->body) {
-      if (auto err = exec_stmt(child.get(), _should_stop)) {
-        return err;
+std::optional<std::string>
+BlockStmt::exec(CcatInterpreter &_interp,
+                const std::function<bool()> &_should_stop) const {
+  for (const auto &child : body) {
+    if (auto err = _interp.exec_stmt(child.get(), _should_stop)) {
+      return err;
+    }
+  }
+  return std::nullopt;
+}
+
+std::optional<std::string>
+TapStmt::exec(CcatInterpreter &_interp,
+              const std::function<bool()> &_should_stop) const {
+  return _interp.tap_image(image_path, _should_stop);
+}
+
+std::optional<std::string>
+WaitStmt::exec(CcatInterpreter &_interp,
+               const std::function<bool()> &_should_stop) const {
+  return cooperative_sleep_ms(milliseconds, _should_stop);
+}
+
+std::optional<std::string>
+LogStmt::exec(CcatInterpreter &_interp,
+              const std::function<bool()> &/*_should_stop*/) const {
+  automation_log::emit(std::string("[ccat] ") + message);
+  return std::nullopt;
+}
+
+std::optional<std::string>
+IfStmt::exec(CcatInterpreter &_interp,
+             const std::function<bool()> &_should_stop) const {
+  bool found = false;
+  if (!_interp.image_matches(image_path, _should_stop, &found)) {
+    if (_should_stop()) {
+      return std::string("stopped");
+    }
+    return std::string("screencap failed in if condition");
+  }
+  const Stmt *branch =
+      found ? then_branch.get() : else_branch.get();
+  return _interp.exec_stmt(branch, _should_stop);
+}
+
+std::optional<std::string>
+SwipeTemplatesStmt::exec(CcatInterpreter &_interp,
+                         const std::function<bool()> &_should_stop) const {
+  return _interp.swipe_templates_impl(from_image_path, to_image_path,
+                                      _should_stop);
+}
+
+std::optional<std::string>
+TapAtStmt::exec(CcatInterpreter &_interp,
+                const std::function<bool()> &_should_stop) const {
+  return _interp.tap_at_impl(nx, ny, _should_stop);
+}
+
+std::optional<std::string>
+SwipeAtStmt::exec(CcatInterpreter &_interp,
+                  const std::function<bool()> &_should_stop) const {
+  return _interp.swipe_at_impl(x1, y1, x2, y2, _should_stop);
+}
+
+std::optional<std::string>
+WaitUntilStmt::exec(CcatInterpreter &_interp,
+                    const std::function<bool()> &_should_stop) const {
+  return _interp.wait_until_impl(image_path, timeout_ms, _should_stop);
+}
+
+std::optional<std::string>
+RetryStmt::exec(CcatInterpreter &_interp,
+                const std::function<bool()> &_should_stop) const {
+  std::optional<std::string> last_err;
+  for (int attempt = 0; attempt < attempts; ++attempt) {
+    if (_should_stop()) {
+      return std::string("stopped");
+    }
+    last_err = _interp.exec_stmt(body.get(), _should_stop);
+    if (!last_err.has_value()) {
+      return std::nullopt;
+    }
+    if (attempt + 1 < attempts) {
+      if (auto sl = cooperative_sleep_ms(50, _should_stop)) {
+        return sl;
       }
     }
+  }
+  return last_err;
+}
+
+std::optional<std::string>
+DoWhileStmt::exec(CcatInterpreter &_interp,
+                  const std::function<bool()> &_should_stop) const {
+  if (!body) {
     return std::nullopt;
   }
-
-  if (const auto *tap = dynamic_cast<const TapStmt *>(_stmt)) {
-    return tap_image(tap->image_path, _should_stop);
-  }
-
-  if (const auto *w = dynamic_cast<const WaitStmt *>(_stmt)) {
-    return cooperative_sleep_ms(w->milliseconds, _should_stop);
-  }
-
-  if (const auto *lg = dynamic_cast<const LogStmt *>(_stmt)) {
-    m_log(std::string("[ccat] ") + lg->message);
-    return std::nullopt;
-  }
-
-  if (const auto *ifs = dynamic_cast<const IfStmt *>(_stmt)) {
+  for (int iter = 0;; ++iter) {
+    if (iter >= k_do_while_max_iters) {
+      return std::string("do_while: iteration limit exceeded");
+    }
+    if (_should_stop()) {
+      return std::string("stopped");
+    }
+    if (auto err = _interp.exec_stmt(body.get(), _should_stop)) {
+      return err;
+    }
     bool found = false;
-    if (!image_matches(ifs->image_path, _should_stop, &found)) {
+    if (!_interp.image_matches(condition_image_path, _should_stop, &found)) {
       if (_should_stop()) {
         return std::string("stopped");
       }
-      return std::string("screencap failed in if condition");
+      return std::string("do_while: screencap failed in condition");
     }
-    const Stmt *branch =
-        found ? ifs->then_branch.get() : ifs->else_branch.get();
-    return exec_stmt(branch, _should_stop);
-  }
-
-  if (const auto *sw = dynamic_cast<const SwipeTemplatesStmt *>(_stmt)) {
-    return swipe_templates_impl(sw->from_image_path, sw->to_image_path,
-                                _should_stop);
-  }
-
-  if (const auto *ta = dynamic_cast<const TapAtStmt *>(_stmt)) {
-    return tap_at_impl(ta->nx, ta->ny, _should_stop);
-  }
-
-  if (const auto *sa = dynamic_cast<const SwipeAtStmt *>(_stmt)) {
-    return swipe_at_impl(sa->x1, sa->y1, sa->x2, sa->y2, _should_stop);
-  }
-
-  if (const auto *wu = dynamic_cast<const WaitUntilStmt *>(_stmt)) {
-    return wait_until_impl(wu->image_path, wu->timeout_ms, _should_stop);
-  }
-
-  if (const auto *ry = dynamic_cast<const RetryStmt *>(_stmt)) {
-    std::optional<std::string> last_err;
-    for (int attempt = 0; attempt < ry->attempts; ++attempt) {
-      if (_should_stop()) {
-        return std::string("stopped");
-      }
-      last_err = exec_stmt(ry->body.get(), _should_stop);
-      if (!last_err.has_value()) {
-        return std::nullopt;
-      }
-      if (attempt + 1 < ry->attempts) {
-        if (auto sl = cooperative_sleep_ms(50, _should_stop)) {
-          return sl;
-        }
-      }
+    if (!found) {
+      break;
     }
-    return last_err;
   }
+  return std::nullopt;
+}
 
-  if (const auto *dw = dynamic_cast<const DoWhileStmt *>(_stmt)) {
-    if (!dw->body) {
-      return std::nullopt;
-    }
-    for (int iter = 0;; ++iter) {
-      if (iter >= k_do_while_max_iters) {
-        return std::string("do_while: iteration limit exceeded");
-      }
-      if (_should_stop()) {
-        return std::string("stopped");
-      }
-      if (auto err = exec_stmt(dw->body.get(), _should_stop)) {
-        return err;
-      }
-      bool found = false;
-      if (!image_matches(dw->condition_image_path, _should_stop, &found)) {
-        if (_should_stop()) {
-          return std::string("stopped");
-        }
-        return std::string("do_while: screencap failed in condition");
-      }
-      if (!found) {
-        break;
-      }
-    }
+std::optional<std::string>
+LoopStmt::exec(CcatInterpreter &_interp,
+               const std::function<bool()> &_should_stop) const {
+  if (!body) {
     return std::nullopt;
   }
-
-  if (const auto *lp = dynamic_cast<const LoopStmt *>(_stmt)) {
-    if (!lp->body) {
-      return std::nullopt;
+  for (int i = 0; i < repetitions; ++i) {
+    if (_should_stop()) {
+      return std::string("stopped");
     }
-    for (int i = 0; i < lp->repetitions; ++i) {
-      if (_should_stop()) {
-        return std::string("stopped");
-      }
-      if (auto err = exec_stmt(lp->body.get(), _should_stop)) {
-        return err;
-      }
+    if (auto err = _interp.exec_stmt(body.get(), _should_stop)) {
+      return err;
     }
-    return std::nullopt;
   }
-
   return std::nullopt;
 }
 

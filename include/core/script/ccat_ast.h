@@ -1,16 +1,24 @@
 #pragma once
 
+#include <functional>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
 namespace campcat::ccat_lang {
+
+class CcatInterpreter;
 
 /**
  * @brief Base node for one executable statement in a .ccat program.
  */
 struct Stmt {
   virtual ~Stmt() = default;
+
+  virtual std::optional<std::string>
+  exec(CcatInterpreter &_interp,
+       const std::function<bool()> &_should_stop) const = 0;
 };
 
 /**
@@ -18,6 +26,10 @@ struct Stmt {
  */
 struct BlockStmt final : Stmt {
   std::vector<std::unique_ptr<Stmt>> body;
+
+  std::optional<std::string>
+  exec(CcatInterpreter &_interp,
+       const std::function<bool()> &_should_stop) const override;
 };
 
 /**
@@ -28,6 +40,10 @@ struct IfStmt final : Stmt {
   std::string image_path;
   std::unique_ptr<Stmt> then_branch;
   std::unique_ptr<Stmt> else_branch;
+
+  std::optional<std::string>
+  exec(CcatInterpreter &_interp,
+       const std::function<bool()> &_should_stop) const override;
 };
 
 /**
@@ -36,6 +52,10 @@ struct IfStmt final : Stmt {
 struct TapStmt final : Stmt {
   /** @brief Relative or absolute template path from DSL semantics. */
   std::string image_path;
+
+  std::optional<std::string>
+  exec(CcatInterpreter &_interp,
+       const std::function<bool()> &_should_stop) const override;
 };
 
 /**
@@ -44,6 +64,10 @@ struct TapStmt final : Stmt {
 struct WaitStmt final : Stmt {
   /** @brief Sleep duration in milliseconds (non-negative). */
   int milliseconds = 0;
+
+  std::optional<std::string>
+  exec(CcatInterpreter &_interp,
+       const std::function<bool()> &_should_stop) const override;
 };
 
 /**
@@ -52,6 +76,10 @@ struct WaitStmt final : Stmt {
 struct LogStmt final : Stmt {
   /** @brief User-visible message payload (already decoded from DSL syntax). */
   std::string message;
+
+  std::optional<std::string>
+  exec(CcatInterpreter &_interp,
+       const std::function<bool()> &_should_stop) const override;
 };
 
 /**
@@ -60,6 +88,10 @@ struct LogStmt final : Stmt {
 struct SwipeTemplatesStmt final : Stmt {
   std::string from_image_path;
   std::string to_image_path;
+
+  std::optional<std::string>
+  exec(CcatInterpreter &_interp,
+       const std::function<bool()> &_should_stop) const override;
 };
 
 /**
@@ -68,6 +100,10 @@ struct SwipeTemplatesStmt final : Stmt {
 struct TapAtStmt final : Stmt {
   double nx = 0;
   double ny = 0;
+
+  std::optional<std::string>
+  exec(CcatInterpreter &_interp,
+       const std::function<bool()> &_should_stop) const override;
 };
 
 /**
@@ -78,6 +114,10 @@ struct SwipeAtStmt final : Stmt {
   double y1 = 0;
   double x2 = 0;
   double y2 = 0;
+
+  std::optional<std::string>
+  exec(CcatInterpreter &_interp,
+       const std::function<bool()> &_should_stop) const override;
 };
 
 /**
@@ -86,6 +126,10 @@ struct SwipeAtStmt final : Stmt {
 struct WaitUntilStmt final : Stmt {
   std::string image_path;
   int timeout_ms = 0;
+
+  std::optional<std::string>
+  exec(CcatInterpreter &_interp,
+       const std::function<bool()> &_should_stop) const override;
 };
 
 /**
@@ -94,6 +138,10 @@ struct WaitUntilStmt final : Stmt {
 struct RetryStmt final : Stmt {
   int attempts = 0;
   std::unique_ptr<Stmt> body;
+
+  std::optional<std::string>
+  exec(CcatInterpreter &_interp,
+       const std::function<bool()> &_should_stop) const override;
 };
 
 /**
@@ -102,6 +150,10 @@ struct RetryStmt final : Stmt {
 struct DoWhileStmt final : Stmt {
   std::unique_ptr<BlockStmt> body;
   std::string condition_image_path;
+
+  std::optional<std::string>
+  exec(CcatInterpreter &_interp,
+       const std::function<bool()> &_should_stop) const override;
 };
 
 /**
@@ -110,6 +162,10 @@ struct DoWhileStmt final : Stmt {
 struct LoopStmt final : Stmt {
   int repetitions = 0;
   std::unique_ptr<BlockStmt> body;
+
+  std::optional<std::string>
+  exec(CcatInterpreter &_interp,
+       const std::function<bool()> &_should_stop) const override;
 };
 
 /**

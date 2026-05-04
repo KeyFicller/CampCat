@@ -4,6 +4,8 @@
 #include <memory>
 #include <string>
 
+// Logging uses campcat::automation_log::emit from worker code paths.
+
 namespace campcat {
 
 class adb_client;
@@ -23,8 +25,6 @@ struct automation_cycle_result {
  */
 class game_automation {
 public:
-  using log_fn = std::function<void(std::string)>;
-
   virtual ~game_automation() = default;
 
   /**
@@ -41,12 +41,10 @@ public:
  * @param[in] adb Live adb facade (must outlive automation instance usage).
  * @param[in] cfg Loaded shell persistence snapshot.
  * @param[in] script_bundle Concrete profile type decided by active script id; nullable.
- * @param[in] log Callback forwarded to scripted logging hooks.
  * @return Unique owning pointer honoring `cfg->active_script_id`.
  */
 std::unique_ptr<game_automation>
 make_game_automation(adb_client *adb, const app_config *cfg,
-                     const automation_profile *script_bundle,
-                     game_automation::log_fn log);
+                     const automation_profile *script_bundle);
 
 } // namespace campcat

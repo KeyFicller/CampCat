@@ -2,8 +2,8 @@
 
 #include "core/adb_client.h"
 #include "core/app_config.h"
+#include "core/automation_log.h"
 #include "games/ccat_script/ccat_script_profile.h"
-#include "games/stzb_auto_assemble/stzb_auto_assemble_profile.h"
 
 #include <imgui.h>
 
@@ -42,16 +42,6 @@ int g_sel_x1 = 0;
 int g_sel_y1 = 0;
 
 char g_filename[256] = "template.png";
-int g_stzb_slot = 0;
-
-static const char *k_stzb_keys[] = {
-    "dismiss_notice",   "game_main",        "main_menu_anchor",
-    "enter_city_location", "enter_city_city", "enter_city_detail",
-    "recruit_detail",   "recruit_back",     "recruit_back_2",
-    "assemble",
-};
-static constexpr int k_stzb_key_count =
-    static_cast<int>(sizeof(k_stzb_keys) / sizeof(k_stzb_keys[0]));
 
 void release_tex() {
   if (g_tex != 0) {
@@ -80,15 +70,6 @@ bool upload_bgr(const cv::Mat &_bgr) {
   g_tex_w = rgba.cols;
   g_tex_h = rgba.rows;
   return true;
-}
-
-void adb_maybe_connect(campcat::adb_client &_adb,
-                       const campcat::app_config &_cfg) {
-  if (_cfg.adb_connect_address.empty()) {
-    return;
-  }
-  std::string co, ce;
-  (void)_adb.run({"connect", _cfg.adb_connect_address}, &co, &ce, 15000);
 }
 
 bool safe_leaf_name(const char *_s) {
@@ -142,25 +123,24 @@ ImVec2 screen_from_img_px(int _ix, int _iy, const ImVec2 &_img_min,
                 _img_min.y + v * (_img_max.y - _img_min.y));
 }
 
-void capture_clicked(campcat::app_config &_cfg,
-                     const std::function<void(std::string)> &_log) {
+void capture_clicked(campcat::app_config &_cfg) {
   campcat::adb_client adb(_cfg.adb_path, _cfg.adb_serial);
-  adb_maybe_connect(adb, _cfg);
+  (void)adb.connect_remote(_cfg.adb_connect_address);
   cv::Mat cap;
   std::string diag;
   if (!adb.screencap_png(&cap, 45000, &diag)) {
-    _log("[capture] screencap failed " + diag);
+    campcat::automation_log::emit("[capture] screencap failed " + diag);
     return;
   }
   g_bgr = cap.clone();
   g_dragging = false;
   g_has_sel = false;
   if (!upload_bgr(g_bgr)) {
-    _log("[capture] texture upload failed");
+    campcat::automation_log::emit("[capture] texture upload failed");
     return;
   }
-  _log("[capture] frame " + std::to_string(cap.cols) + "x" +
-       std::to_string(cap.rows));
+  campcat::automation_log::emit("[capture] frame " + std::to_string(cap.cols) +
+                                "x" + std::to_string(cap.rows));
 }
 
 void clear_capture() {
@@ -176,14 +156,16 @@ void template_capture_shutdown_gl() {
   clear_capture();
 }
 
-void template_capture_draw_panel(
-    bool _stzb_mode, campcat::app_config &_cfg,
-    campcat::stzb_auto_assemble_profile *_stzb_ui,
-    campcat::ccat_script_profile *_ccat_ui, bool _disable_capture,
-    const std::function<void(std::string)> &_log) {
+void template_capture_draw_panel(campcat::app_config &_cfg,
+                                 campcat::ccat_script_profile *_ccat_ui,
+                                 bool _disable_capture) {
+  if (!_ccat_ui) {
+    ImGui::TextDisabled("(CampCat bundle missing)");
+    return;
+  }
 
   ImGui::Separator();
-  ImGui::TextUnformatted("Template from screenshot");
+  ImGui::TextUnformatted("Template from screenshot (CampCat)");
   ImGui::TextDisabled(
       "Drag on image after Capture to select ROI. Preview is 1:1 device "
       "pixels; scroll when larger than viewport.");
@@ -192,7 +174,7 @@ void template_capture_draw_panel(
     ImGui::BeginDisabled();
   }
   if (ImGui::Button("Capture##adb_tpl")) {
-    capture_clicked(_cfg, _log);
+    capture_clicked(_cfg);
   }
   if (_disable_capture) {
     ImGui::EndDisabled();
@@ -206,34 +188,11 @@ void template_capture_draw_panel(
   ImGui::InputText("png filename##adb_tpl", g_filename,
                    IM_ARRAYSIZE(g_filename));
 
-  if (_stzb_mode && _stzb_ui) {
-    const char *preview = k_stzb_keys[g_stzb_slot];
-    if (ImGui::BeginCombo("assign slot##adb_tpl", preview)) {
-      for (int i = 0; i < k_stzb_key_count; ++i) {
-        const bool sel = (i == g_stzb_slot);
-        if (ImGui::Selectable(k_stzb_keys[i], sel)) {
-          g_stzb_slot = i;
-          const auto it = _stzb_ui->templates.find(k_stzb_keys[i]);
-          if (it != _stzb_ui->templates.end() && !it->second.empty()) {
-            std::snprintf(g_filename, sizeof(g_filename), "%s",
-                          it->second.c_str());
-          }
-        }
-        if (sel) {
-          ImGui::SetItemDefaultFocus();
-        }
-      }
-      ImGui::EndCombo();
-    }
-  }
-
   if (g_tex == 0 || g_bgr.empty()) {
     ImGui::TextDisabled("(no screenshot)");
     return;
   }
 
-  // 1:1 preview (one UI unit per screenshot pixel) inside a scroll region so
-  // large frames do not blow up the outer layout.
   constexpr float k_viewport_h = 420.0f;
   const float iw = static_cast<float>(g_tex_w);
   const float ih = static_cast<float>(g_tex_h);
@@ -295,55 +254,36 @@ void template_capture_draw_panel(
 
   if (ImGui::Button("Save crop##adb_tpl")) {
     if (!g_has_sel) {
-      _log("[capture] drag on image and release to finalize selection");
+      campcat::automation_log::emit(
+          "[capture] drag on image and release to finalize selection");
     } else if (!safe_leaf_name(g_filename)) {
-      _log("[capture] invalid filename (no path separators)");
+      campcat::automation_log::emit(
+          "[capture] invalid filename (no path separators)");
+    } else if (_cfg.config_home.empty()) {
+      campcat::automation_log::emit(
+          "[capture] CampCat images dir unresolved (config_home)");
     } else {
       const cv::Rect roi = inclusive_rect_to_roi(
           g_sel_x0, g_sel_y0, g_sel_x1, g_sel_y1, g_bgr.cols, g_bgr.rows);
-      std::filesystem::path dir;
-      bool ok = true;
-      if (_stzb_mode) {
-        if (!_stzb_ui || _cfg.project_root().empty()) {
-          _log("[capture] STZB path unresolved (project_root)");
-          ok = false;
-        } else {
-          dir = _cfg.project_root() / _stzb_ui->bundle_dir /
-                _stzb_ui->resolution_subdir;
-        }
+      const std::filesystem::path dir =
+          _ccat_ui->images_base(_cfg.config_home);
+      std::error_code ec;
+      std::filesystem::create_directories(dir, ec);
+      if (ec) {
+        campcat::automation_log::emit("[capture] mkdir failed: " +
+                                      dir.string() + " (" + ec.message() + ")");
       } else {
-        if (!_ccat_ui || _cfg.config_home.empty()) {
-          _log("[capture] CampCat images dir unresolved (config_home)");
-          ok = false;
+        const std::filesystem::path out = dir / g_filename;
+        cv::Mat patch = g_bgr(roi).clone();
+        if (!cv::imwrite(out.string(), patch)) {
+          campcat::automation_log::emit("[capture] imwrite failed: " +
+                                        out.string());
         } else {
-          dir = _ccat_ui->images_base(_cfg.config_home);
-        }
-      }
-      if (ok) {
-        std::error_code ec;
-        std::filesystem::create_directories(dir, ec);
-        if (ec) {
-          _log("[capture] mkdir failed: " + dir.string() + " (" +
-               ec.message() + ")");
-        } else {
-          const std::filesystem::path out = dir / g_filename;
-          cv::Mat patch = g_bgr(roi).clone();
-          if (!cv::imwrite(out.string(), patch)) {
-            _log("[capture] imwrite failed: " + out.string());
-          } else {
-            _log("[capture] wrote " + out.string());
-            if (_stzb_mode && _stzb_ui) {
-              _stzb_ui->templates[k_stzb_keys[g_stzb_slot]] =
-                  std::string(g_filename);
-              _log(std::string("[capture] assigned ") +
-                   k_stzb_keys[g_stzb_slot] + " = " + g_filename);
-            }
-          }
+          campcat::automation_log::emit("[capture] wrote " + out.string());
         }
       }
     }
   }
 
-  ImGui::TextDisabled("last path hint uses bundle_dir / resolution or "
-                      "images_base; Save writes there.");
+  ImGui::TextDisabled("Save writes under resolved PNG directory (images_base).");
 }

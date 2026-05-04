@@ -23,8 +23,7 @@ class campcat_stzb_auto_assemble final : public ::campcat::game_automation {
 public:
   explicit campcat_stzb_auto_assemble(
       ::campcat::adb_client *adb, const ::campcat::app_config *cfg,
-      const ::campcat::stzb_auto_assemble_profile *profile,
-      ::campcat::game_automation::log_fn log);
+      const ::campcat::stzb_auto_assemble_profile *profile);
 
   ::campcat::automation_cycle_result
   run_cycle(const std::function<bool()> &should_stop) override;
@@ -80,7 +79,6 @@ private:
   ::campcat::adb_client *m_adb;
   const ::campcat::app_config *m_cfg;
   const ::campcat::stzb_auto_assemble_profile *m_profile;
-  ::campcat::game_automation::log_fn m_log;
   ::campcat::template_matcher m_matcher;
 };
 

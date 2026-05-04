@@ -20,8 +20,8 @@ public:
    * @param[in] _line Lexical line (1-based) nearest offending lookahead token.
    * @param[in] _col Lexical column (1-based) nearest offending lookahead token.
    */
-  parse_error(std::string _msg, int _line, int _col)
-      : std::runtime_error(std::move(_msg)), line(_line), col(_col) {}
+  parse_error(const std::string &_msg, int _line, int _col)
+      : std::runtime_error(_msg), line(_line), col(_col) {}
 
   /** @brief Mirrors lexer-derived diagnostics surfaced via peek/next failures. */
   int line;

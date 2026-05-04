@@ -16,7 +16,7 @@ public:
    * @brief Push a line to the buffer.
    * @param[in] _line The line to push.
    */
-  void push(std::string _line);
+  void push(const std::string &_line);
 
   /**
    * @brief Drain the buffer to a vector.

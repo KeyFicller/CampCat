@@ -11,7 +11,7 @@
 //   loop(n) { }                       // run block exactly n times (n may be 0)
 //   do { } while (img);                // repeat while template still matches (cap 50k iter)
 
-loop(3) {
-    wait(1000)
-    log("Hello world.")
+// Enter game
+if (stzb.png) {
+    tap(stzb.png)
 }

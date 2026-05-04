@@ -237,8 +237,9 @@ bool run_process_posix(const std::string &exe,
 
 } // namespace
 
-adb_client::adb_client(std::string _adb_path, std::string _serial)
-    : m_adb_path(std::move(_adb_path)), m_serial(std::move(_serial)) {}
+adb_client::adb_client(const std::string &_adb_path,
+                       const std::string &_serial)
+    : m_adb_path(_adb_path), m_serial(_serial) {}
 
 std::vector<std::string> adb_client::base_prefix() const {
   std::vector<std::string> v;
@@ -267,6 +268,16 @@ bool adb_client::run(const std::vector<std::string>& _args,
   (void)_timeout_ms;
   return false;
 #endif
+}
+
+bool adb_client::connect_remote(std::string_view _address, int _timeout_ms,
+                                std::string *_stdout_out,
+                                std::string *_stderr_out) {
+  if (_address.empty()) {
+    return true;
+  }
+  return run({"connect", std::string(_address)}, _stdout_out, _stderr_out,
+             _timeout_ms);
 }
 
 std::vector<std::string> adb_client::list_devices() {

@@ -2,6 +2,8 @@
 
 #include "games/stzb_auto_assemble/campcat_stzb_auto_assemble.h"
 
+#include "core/automation_log.h"
+
 
 #include <algorithm>
 #include <chrono>
@@ -82,8 +84,8 @@ using namespace campcat;
 
 campcat_stzb_auto_assemble::campcat_stzb_auto_assemble(
     adb_client *_adb, const app_config *_cfg,
-    const stzb_auto_assemble_profile *_profile, game_automation::log_fn _log)
-    : m_adb(_adb), m_cfg(_cfg), m_profile(_profile), m_log(std::move(_log)),
+    const stzb_auto_assemble_profile *_profile)
+    : m_adb(_adb), m_cfg(_cfg), m_profile(_profile),
       m_matcher(_cfg ? _cfg->match_threshold : 0.82,
                 _cfg && _cfg->match_multiscale) {
   if (!m_adb || !m_cfg || !m_profile) {
@@ -128,7 +130,7 @@ bool campcat_stzb_auto_assemble::wait_for_template(
   if (rel.empty()) {
     std::ostringstream oss;
     oss << "[fsm] template key \"" << logical_template_key << "\" not set";
-    m_log(oss.str());
+    automation_log::emit(oss.str());
     return false;
   }
   return wait_for_relative_template(rel, roi, timeout, should_stop,
@@ -143,7 +145,7 @@ bool campcat_stzb_auto_assemble::wait_for_relative_template(
   if (!std::filesystem::exists(path)) {
     std::ostringstream oss;
     oss << "[fsm] template missing, skipping wait: " << path.string();
-    m_log(oss.str());
+    automation_log::emit(oss.str());
     return false;
   }
 
@@ -177,7 +179,7 @@ bool campcat_stzb_auto_assemble::dismiss_notice_loop(const std::function<bool()>
   }
   const auto path = resolve_template(m_profile->tmpl("dismiss_notice"));
   if (!std::filesystem::exists(path)) {
-    m_log("[fsm] dismiss_notice template not found; skipping popup sweep");
+    automation_log::emit("[fsm] dismiss_notice template not found; skipping popup sweep");
     return true;
   }
 
@@ -204,29 +206,29 @@ bool campcat_stzb_auto_assemble::dismiss_notice_loop(const std::function<bool()>
     std::ostringstream oss;
     oss << "[fsm] closing popup (match=" << std::fixed << std::setprecision(3)
         << tap_mr.confidence << ")";
-    m_log(oss.str());
+    automation_log::emit(oss.str());
 
     if (!m_adb->tap(tap_mr.center.x, tap_mr.center.y)) {
-      m_log("[fsm] tap failed during popup dismiss");
+      automation_log::emit("[fsm] tap failed during popup dismiss");
       return false;
     }
     m_adb->delay_after_action(pause_after_tap(*m_cfg));
   }
 
-  m_log("[fsm] dismiss_notice loop exceeded retries");
+  automation_log::emit("[fsm] dismiss_notice loop exceeded retries");
   return true;
 }
 
 bool campcat_stzb_auto_assemble::retreat_to_main_ui(const std::function<bool()> &should_stop) {
   const auto &gm_rel = m_profile->tmpl("game_main");
   if (gm_rel.empty()) {
-    m_log("[fsm] game_main unset; skip retreat-to-main");
+    automation_log::emit("[fsm] game_main unset; skip retreat-to-main");
     return true;
   }
 
   const auto gm_path = resolve_template(gm_rel);
   if (!std::filesystem::exists(gm_path)) {
-    m_log("[fsm] game_main template missing; skip retreat-to-main");
+    automation_log::emit("[fsm] game_main template missing; skip retreat-to-main");
     return true;
   }
 
@@ -242,7 +244,7 @@ bool campcat_stzb_auto_assemble::retreat_to_main_ui(const std::function<bool()> 
     return false;
   };
 
-  m_log("[fsm] retreat_to_main_ui: notices / back buttons until game_main");
+  automation_log::emit("[fsm] retreat_to_main_ui: notices / back buttons until game_main");
 
   if (!dismiss_notice_loop(should_stop)) {
     return false;
@@ -251,21 +253,21 @@ bool campcat_stzb_auto_assemble::retreat_to_main_ui(const std::function<bool()> 
     return false;
   }
   if (game_main_visible()) {
-    m_log("[fsm] already on main UI (game_main)");
+    automation_log::emit("[fsm] already on main UI (game_main)");
     return true;
   }
 
   constexpr int k_passes = 12;
   for (int pass = 0; pass < k_passes && !should_stop(); ++pass) {
     if (!tap_recruit_back_until_gone(should_stop)) {
-      m_log("[fsm] retreat_to_main_ui: back sweep failed");
+      automation_log::emit("[fsm] retreat_to_main_ui: back sweep failed");
       return false;
     }
     if (!dismiss_notice_loop(should_stop)) {
       return false;
     }
     if (game_main_visible()) {
-      m_log("[fsm] main UI reached (game_main) after pass " +
+      automation_log::emit("[fsm] main UI reached (game_main) after pass " +
             std::to_string(pass));
       return true;
     }
@@ -273,7 +275,7 @@ bool campcat_stzb_auto_assemble::retreat_to_main_ui(const std::function<bool()> 
         std::chrono::milliseconds(m_cfg->step_retry_interval_ms));
   }
 
-  m_log("[fsm] retreat_to_main_ui: game_main not detected after retries");
+  automation_log::emit("[fsm] retreat_to_main_ui: game_main not detected after retries");
   return false;
 }
 
@@ -286,22 +288,22 @@ bool campcat_stzb_auto_assemble::ensure_main_ui(const std::function<bool()> &sho
                                         std::chrono::seconds(20), should_stop,
                                         nullptr);
       if (!ok || should_stop()) {
-        m_log("[fsm] game_main not detected within timeout");
+        automation_log::emit("[fsm] game_main not detected within timeout");
         return false;
       }
-      m_log("[fsm] main UI confirmed (game_main)");
+      automation_log::emit("[fsm] main UI confirmed (game_main)");
       return true;
     }
   }
 
   if (m_profile->tmpl("main_menu_anchor").empty()) {
-    m_log("[fsm] main_menu_anchor not configured; assuming already in game");
+    automation_log::emit("[fsm] main_menu_anchor not configured; assuming already in game");
     return true;
   }
 
   const auto anchor_path = resolve_template(m_profile->tmpl("main_menu_anchor"));
   if (!std::filesystem::exists(anchor_path)) {
-    m_log("[fsm] main_menu_anchor template missing; skipping detection");
+    automation_log::emit("[fsm] main_menu_anchor template missing; skipping detection");
     return true;
   }
 
@@ -309,11 +311,11 @@ bool campcat_stzb_auto_assemble::ensure_main_ui(const std::function<bool()> &sho
       wait_for_template("main_menu_anchor", {}, std::chrono::seconds(20),
                         should_stop, nullptr);
   if (!ok || should_stop()) {
-    m_log("[fsm] main UI anchor not detected within timeout");
+    automation_log::emit("[fsm] main UI anchor not detected within timeout");
     return false;
   }
 
-  m_log("[fsm] main UI anchor detected");
+  automation_log::emit("[fsm] main UI anchor detected");
   return true;
 }
 
@@ -323,11 +325,11 @@ bool campcat_stzb_auto_assemble::navigate_to_main_city(const std::function<bool(
   const auto &detail = m_profile->tmpl("enter_city_detail");
 
   if (loc.empty() && city.empty() && detail.empty()) {
-    m_log("[fsm] enter-city templates not configured; skipping navigation");
+    automation_log::emit("[fsm] enter-city templates not configured; skipping navigation");
     return true;
   }
   if (loc.empty() || city.empty() || detail.empty()) {
-    m_log("[fsm] enter-city incomplete: need enter_city_location, "
+    automation_log::emit("[fsm] enter-city incomplete: need enter_city_location, "
           "enter_city_city, "
           "enter_city_detail");
     return false;
@@ -340,7 +342,7 @@ bool campcat_stzb_auto_assemble::navigate_to_main_city(const std::function<bool(
       std::ostringstream oss;
       oss << "[fsm] enter-city template missing (" << step_label
           << "): " << path.string();
-      m_log(oss.str());
+      automation_log::emit(oss.str());
       return false;
     }
 
@@ -350,7 +352,7 @@ bool campcat_stzb_auto_assemble::navigate_to_main_city(const std::function<bool(
     if (!ok || should_stop()) {
       std::ostringstream oss;
       oss << "[fsm] enter-city: '" << step_label << "' not found in time";
-      m_log(oss.str());
+      automation_log::emit(oss.str());
       return false;
     }
 
@@ -359,21 +361,21 @@ bool campcat_stzb_auto_assemble::navigate_to_main_city(const std::function<bool(
       std::ostringstream oss;
       oss << "[fsm] enter-city: '" << step_label
           << "' not visible at tap time (stale wait)";
-      m_log(oss.str());
+      automation_log::emit(oss.str());
       return false;
     }
 
     if (!m_adb->tap(mr.center.x, mr.center.y)) {
       std::ostringstream oss;
       oss << "[fsm] enter-city tap failed at step " << step_label;
-      m_log(oss.str());
+      automation_log::emit(oss.str());
       return false;
     }
     m_adb->delay_after_action(pause_after_tap(*m_cfg));
     std::ostringstream oss;
     oss << "[fsm] enter-city: tapped " << step_label << " (match=" << std::fixed
         << std::setprecision(3) << mr.confidence << ")";
-    m_log(oss.str());
+    automation_log::emit(oss.str());
     return true;
   };
 
@@ -387,7 +389,7 @@ bool campcat_stzb_auto_assemble::navigate_to_main_city(const std::function<bool(
     return false;
   }
 
-  m_log("[fsm] navigated to main city");
+  automation_log::emit("[fsm] navigated to main city");
   return true;
 }
 
@@ -400,7 +402,7 @@ bool campcat_stzb_auto_assemble::inspect_team_recruitment_slot(
 
   cv::Mat main_screen;
   if (!m_adb->screencap_png(&main_screen)) {
-    m_log("[fsm] screencap failed before opening team slot");
+    automation_log::emit("[fsm] screencap failed before opening team slot");
     return false;
   }
 
@@ -412,7 +414,7 @@ bool campcat_stzb_auto_assemble::inspect_team_recruitment_slot(
   if (!m_adb->tap(tap_pt.x, tap_pt.y)) {
     std::ostringstream oss;
     oss << "[fsm] team " << (team_index + 1) << ": tap slot center failed";
-    m_log(oss.str());
+    automation_log::emit(oss.str());
     return false;
   }
   m_adb->delay_after_action(pause_after_tap(*m_cfg));
@@ -429,10 +431,10 @@ bool campcat_stzb_auto_assemble::inspect_team_recruitment_slot(
       std::ostringstream oss;
       oss << "[fsm] team " << (team_index + 1)
           << ": recruit_detail missing on disk (" << path_rd.string() << ")";
-      m_log(oss.str());
+      automation_log::emit(oss.str());
     }
   } else {
-    m_log("[fsm] recruit_detail not configured; cannot verify detail page");
+    automation_log::emit("[fsm] recruit_detail not configured; cannot verify detail page");
   }
 
   {
@@ -440,7 +442,7 @@ bool campcat_stzb_auto_assemble::inspect_team_recruitment_slot(
     oss << "[fsm] team " << (team_index + 1) << ": recruitment detail "
         << (on_detail ? "OPEN (recruit_detail matched)"
                       : "NOT confirmed (no template match)");
-    m_log(oss.str());
+    automation_log::emit(oss.str());
   }
 
   if (out_status && on_detail) {
@@ -457,7 +459,7 @@ bool campcat_stzb_auto_assemble::inspect_team_recruitment_slot(
                                                m_cfg->match_threshold,
                                                &asm_mr)) {
             if (m_adb->tap(asm_mr.center.x, asm_mr.center.y)) {
-              m_log("set to auto assemble.");
+              automation_log::emit("set to auto assemble.");
               m_adb->delay_after_action(pause_after_tap(*m_cfg));
               (void)m_adb->screencap_png(&detail_screen);
             }
@@ -524,7 +526,7 @@ bool campcat_stzb_auto_assemble::inspect_team_recruitment_slot(
         if (!anchor_still_visible) {
           closed = tap_back_if_visible();
           if (!closed) {
-            m_log("[fsm] recruit_detail anchor gone before back "
+            automation_log::emit("[fsm] recruit_detail anchor gone before back "
                   "(e.g. closed by assemble); skip back wait");
             closed = true;
           }
@@ -544,7 +546,7 @@ bool campcat_stzb_auto_assemble::inspect_team_recruitment_slot(
       }
 
       if (!closed) {
-        m_log("[fsm] recruit_back / recruit_back_2 not matched / tap failed; "
+        automation_log::emit("[fsm] recruit_back / recruit_back_2 not matched / tap failed; "
               "no fallback (exit manually if stuck on detail)");
       }
     }
@@ -637,9 +639,9 @@ bool campcat_stzb_auto_assemble::tap_recruit_back_until_gone(
   if (!have_b1 && !have_b2) {
     if (m_profile->tmpl("recruit_back").empty() &&
         m_profile->tmpl("recruit_back_2").empty()) {
-      m_log("[fsm] recruit_back / recruit_back_2 unset; skip back-to-main sweep");
+      automation_log::emit("[fsm] recruit_back / recruit_back_2 unset; skip back-to-main sweep");
     } else {
-      m_log("[fsm] recruit_back / recruit_back_2 missing on disk; skip "
+      automation_log::emit("[fsm] recruit_back / recruit_back_2 missing on disk; skip "
             "back-to-main sweep");
     }
     return true;
@@ -653,50 +655,50 @@ bool campcat_stzb_auto_assemble::tap_recruit_back_until_gone(
   while (!should_stop()) {
     cv::Mat snap;
     if (!m_adb->screencap_png(&snap)) {
-      m_log("[fsm] screencap failed during back-to-main sweep");
+      automation_log::emit("[fsm] screencap failed during back-to-main sweep");
       return false;
     }
 
     if (!pick_best_recruit_back(snap, k_back_sweep_threshold, nullptr)) {
       if (taps > 0) {
-        m_log("[fsm] back buttons gone after " + std::to_string(taps) +
+        automation_log::emit("[fsm] back buttons gone after " + std::to_string(taps) +
               " tap(s); assuming main UI");
       } else {
-        m_log("[fsm] back buttons not visible after team loop (already main?)");
+        automation_log::emit("[fsm] back buttons not visible after team loop (already main?)");
       }
       return true;
     }
 
     if (taps >= k_max_steps) {
-      m_log("[fsm] back-to-main sweep: back still matches after " +
+      automation_log::emit("[fsm] back-to-main sweep: back still matches after " +
             std::to_string(k_max_steps) + " taps; giving up");
       return false;
     }
 
     cv::Mat pre_tap;
     if (!m_adb->screencap_png(&pre_tap)) {
-      m_log("[fsm] screencap failed before verified back tap");
+      automation_log::emit("[fsm] screencap failed before verified back tap");
       return false;
     }
     match_result tap_mr{};
     if (!pick_best_recruit_back(pre_tap, k_back_sweep_threshold, &tap_mr)) {
       if (taps > 0) {
-        m_log("[fsm] back buttons gone before tap; assuming main UI");
+        automation_log::emit("[fsm] back buttons gone before tap; assuming main UI");
         return true;
       }
-      m_log("[fsm] back buttons not visible before tap (unexpected)");
+      automation_log::emit("[fsm] back buttons not visible before tap (unexpected)");
       return true;
     }
 
     if (!m_adb->tap(tap_mr.center.x, tap_mr.center.y)) {
-      m_log("[fsm] back tap failed during back-to-main sweep");
+      automation_log::emit("[fsm] back tap failed during back-to-main sweep");
       return false;
     }
     ++taps;
     (void)m_adb->delay_after_action(pause_after_tap(*m_cfg));
   }
 
-  m_log("[fsm] back-to-main sweep aborted (stop requested)");
+  automation_log::emit("[fsm] back-to-main sweep aborted (stop requested)");
   return false;
 }
 
@@ -704,7 +706,7 @@ campcat::automation_cycle_result
 campcat_stzb_auto_assemble::run_cycle(const std::function<bool()> &should_stop) {
   campcat::automation_cycle_result result{};
 
-  m_log("[fsm] --- cycle start ---");
+  automation_log::emit("[fsm] --- cycle start ---");
   if (should_stop()) {
     result.message = "stopped before start";
     return result;
@@ -712,25 +714,25 @@ campcat_stzb_auto_assemble::run_cycle(const std::function<bool()> &should_stop) 
 
   if (!retreat_to_main_ui(should_stop)) {
     result.message = "retreat to main UI failed";
-    m_log("[fsm] cycle aborted: " + result.message);
+    automation_log::emit("[fsm] cycle aborted: " + result.message);
     return result;
   }
 
   if (!dismiss_notice_loop(should_stop)) {
     result.message = "dismiss_notice failed";
-    m_log("[fsm] cycle aborted: " + result.message);
+    automation_log::emit("[fsm] cycle aborted: " + result.message);
     return result;
   }
 
   if (!ensure_main_ui(should_stop)) {
     result.message = "main UI not detected";
-    m_log("[fsm] cycle aborted: " + result.message);
+    automation_log::emit("[fsm] cycle aborted: " + result.message);
     return result;
   }
 
   if (!navigate_to_main_city(should_stop)) {
     result.message = "main city navigation failed";
-    m_log("[fsm] cycle aborted: " + result.message);
+    automation_log::emit("[fsm] cycle aborted: " + result.message);
     return result;
   }
 
@@ -740,19 +742,19 @@ campcat_stzb_auto_assemble::run_cycle(const std::function<bool()> &should_stop) 
   const size_t n_teams = static_cast<size_t>(std::clamp(
       m_profile->team_count, 1,
       static_cast<int>(m_profile->team_rois.size())));
-  m_log("[fsm] team slots to inspect: " + std::to_string(n_teams));
+  automation_log::emit("[fsm] team slots to inspect: " + std::to_string(n_teams));
 
   for (size_t i = 0; i < n_teams; ++i) {
     if (should_stop()) {
       result.message = "stopped during team inspection";
-      m_log("[fsm] cycle aborted: " + result.message);
+      automation_log::emit("[fsm] cycle aborted: " + result.message);
       return result;
     }
 
     team_recruit_status st{};
     if (!inspect_team_recruitment_slot(i, should_stop, &st)) {
       result.message = "team inspection failed (adb)";
-      m_log("[fsm] cycle aborted: " + result.message);
+      automation_log::emit("[fsm] cycle aborted: " + result.message);
       return result;
     }
 
@@ -761,24 +763,24 @@ campcat_stzb_auto_assemble::run_cycle(const std::function<bool()> &should_stop) 
         << " classification: " << state_label(st.state)
         << " (~p=" << std::fixed << std::setprecision(2)
         << st.progress_estimate << ")";
-    m_log(oss.str());
+    automation_log::emit(oss.str());
   }
 
   if (should_stop()) {
     result.message = "stopped before back-to-main";
-    m_log("[fsm] cycle aborted: " + result.message);
+    automation_log::emit("[fsm] cycle aborted: " + result.message);
     return result;
   }
 
   if (!tap_recruit_back_until_gone(should_stop)) {
     result.message = "back-to-main sweep failed";
-    m_log("[fsm] cycle aborted: " + result.message);
+    automation_log::emit("[fsm] cycle aborted: " + result.message);
     return result;
   }
 
   result.ok = true;
   result.message = "ok";
-  m_log("[fsm] --- cycle end ---");
+  automation_log::emit("[fsm] --- cycle end ---");
   return result;
 }
 

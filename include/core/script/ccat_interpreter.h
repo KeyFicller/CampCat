@@ -24,6 +24,19 @@ namespace ccat_lang {
  * @brief Executes an already parsed Program against adb screencap/matcher knobs.
  */
 class CcatInterpreter {
+  friend struct BlockStmt;
+  friend struct IfStmt;
+  friend struct TapStmt;
+  friend struct WaitStmt;
+  friend struct LogStmt;
+  friend struct SwipeTemplatesStmt;
+  friend struct TapAtStmt;
+  friend struct SwipeAtStmt;
+  friend struct WaitUntilStmt;
+  friend struct RetryStmt;
+  friend struct DoWhileStmt;
+  friend struct LoopStmt;
+
 public:
   /**
    * @brief Bind automation primitives reused across DSL ops (threshold lives inside `_matcher`).
@@ -31,12 +44,10 @@ public:
    * @param[in] _cfg Shell knobs controlling matcher thresholds plus pacing hints.
    * @param[in] _matcher Initialized matcher honoring `_cfg` multiscale/threshold intent.
    * @param[in] _images_base Directory resolving relative PNG operands unless overridden elsewhere.
-   * @param[in] _log Channel surfaced alongside worker-thread automation diagnostics.
    */
   CcatInterpreter(adb_client *_adb, const app_config *_cfg,
                   template_matcher _matcher,
-                  std::filesystem::path _images_base,
-                  game_automation::log_fn _log);
+                  std::filesystem::path _images_base);
 
   /**
    * @brief Interpret successive statements until completion or first abnormal outcome.
@@ -113,7 +124,6 @@ private:
   const app_config *m_cfg;
   template_matcher m_matcher;
   std::filesystem::path m_images_base;
-  game_automation::log_fn m_log;
 };
 
 } // namespace ccat_lang
