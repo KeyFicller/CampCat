@@ -4,6 +4,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace campcat::ccat_lang {
@@ -11,12 +12,54 @@ namespace campcat::ccat_lang {
 class CcatInterpreter;
 
 /**
+ * @brief Control-flow result from executing one Stmt subtree (success, loop break,
+ * cooperative stop, or error message).
+ */
+struct stmt_exec_outcome {
+  enum class tag { ok, break_loop, stopped, error };
+
+  tag kind = tag::ok;
+  std::string message;
+
+  bool is_ok() const { return kind == tag::ok; }
+
+  static stmt_exec_outcome make_ok() { return {}; }
+
+  static stmt_exec_outcome make_break() {
+    stmt_exec_outcome o;
+    o.kind = tag::break_loop;
+    return o;
+  }
+
+  static stmt_exec_outcome make_stopped() {
+    stmt_exec_outcome o;
+    o.kind = tag::stopped;
+    o.message = "stopped";
+    return o;
+  }
+
+  static stmt_exec_outcome make_error(std::string _msg) {
+    stmt_exec_outcome o;
+    o.kind = tag::error;
+    o.message = std::move(_msg);
+    return o;
+  }
+};
+
+inline stmt_exec_outcome outcome_from_opt(std::optional<std::string> &&_maybe_err) {
+  if (!_maybe_err) {
+    return stmt_exec_outcome::make_ok();
+  }
+  return stmt_exec_outcome::make_error(std::move(*_maybe_err));
+}
+
+/**
  * @brief Base node for one executable statement in a .ccat program.
  */
 struct Stmt {
   virtual ~Stmt() = default;
 
-  virtual std::optional<std::string>
+  virtual stmt_exec_outcome
   exec(CcatInterpreter &_interp,
        const std::function<bool()> &_should_stop) const = 0;
 };
@@ -27,7 +70,7 @@ struct Stmt {
 struct BlockStmt final : Stmt {
   std::vector<std::unique_ptr<Stmt>> body;
 
-  std::optional<std::string>
+  stmt_exec_outcome
   exec(CcatInterpreter &_interp,
        const std::function<bool()> &_should_stop) const override;
 };
@@ -41,7 +84,16 @@ struct IfStmt final : Stmt {
   std::unique_ptr<Stmt> then_branch;
   std::unique_ptr<Stmt> else_branch;
 
-  std::optional<std::string>
+  stmt_exec_outcome
+  exec(CcatInterpreter &_interp,
+       const std::function<bool()> &_should_stop) const override;
+};
+
+/**
+ * @brief Exit the innermost enclosing `loop`, `do`/`while`, or `retry`.
+ */
+struct BreakStmt final : Stmt {
+  stmt_exec_outcome
   exec(CcatInterpreter &_interp,
        const std::function<bool()> &_should_stop) const override;
 };
@@ -53,7 +105,7 @@ struct TapStmt final : Stmt {
   /** @brief Relative or absolute template path from DSL semantics. */
   std::string image_path;
 
-  std::optional<std::string>
+  stmt_exec_outcome
   exec(CcatInterpreter &_interp,
        const std::function<bool()> &_should_stop) const override;
 };
@@ -65,7 +117,7 @@ struct WaitStmt final : Stmt {
   /** @brief Sleep duration in milliseconds (non-negative). */
   int milliseconds = 0;
 
-  std::optional<std::string>
+  stmt_exec_outcome
   exec(CcatInterpreter &_interp,
        const std::function<bool()> &_should_stop) const override;
 };
@@ -77,7 +129,7 @@ struct LogStmt final : Stmt {
   /** @brief User-visible message payload (already decoded from DSL syntax). */
   std::string message;
 
-  std::optional<std::string>
+  stmt_exec_outcome
   exec(CcatInterpreter &_interp,
        const std::function<bool()> &_should_stop) const override;
 };
@@ -89,7 +141,7 @@ struct SwipeTemplatesStmt final : Stmt {
   std::string from_image_path;
   std::string to_image_path;
 
-  std::optional<std::string>
+  stmt_exec_outcome
   exec(CcatInterpreter &_interp,
        const std::function<bool()> &_should_stop) const override;
 };
@@ -101,7 +153,7 @@ struct TapAtStmt final : Stmt {
   double nx = 0;
   double ny = 0;
 
-  std::optional<std::string>
+  stmt_exec_outcome
   exec(CcatInterpreter &_interp,
        const std::function<bool()> &_should_stop) const override;
 };
@@ -115,7 +167,7 @@ struct SwipeAtStmt final : Stmt {
   double x2 = 0;
   double y2 = 0;
 
-  std::optional<std::string>
+  stmt_exec_outcome
   exec(CcatInterpreter &_interp,
        const std::function<bool()> &_should_stop) const override;
 };
@@ -127,7 +179,7 @@ struct WaitUntilStmt final : Stmt {
   std::string image_path;
   int timeout_ms = 0;
 
-  std::optional<std::string>
+  stmt_exec_outcome
   exec(CcatInterpreter &_interp,
        const std::function<bool()> &_should_stop) const override;
 };
@@ -139,7 +191,7 @@ struct RetryStmt final : Stmt {
   int attempts = 0;
   std::unique_ptr<Stmt> body;
 
-  std::optional<std::string>
+  stmt_exec_outcome
   exec(CcatInterpreter &_interp,
        const std::function<bool()> &_should_stop) const override;
 };
@@ -151,7 +203,7 @@ struct DoWhileStmt final : Stmt {
   std::unique_ptr<BlockStmt> body;
   std::string condition_image_path;
 
-  std::optional<std::string>
+  stmt_exec_outcome
   exec(CcatInterpreter &_interp,
        const std::function<bool()> &_should_stop) const override;
 };
@@ -163,7 +215,7 @@ struct LoopStmt final : Stmt {
   int repetitions = 0;
   std::unique_ptr<BlockStmt> body;
 
-  std::optional<std::string>
+  stmt_exec_outcome
   exec(CcatInterpreter &_interp,
        const std::function<bool()> &_should_stop) const override;
 };

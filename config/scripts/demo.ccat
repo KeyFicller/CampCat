@@ -8,10 +8,13 @@
 //   wait(ms);   wait_until(img, ms);    // poll until template appears
 //   log(msg);   if (img) { } else { }
 //   retry(n) stmt_or_block;
-//   loop(n) { }                       // run block exactly n times (n may be 0)
-//   do { } while (img);                // repeat while template still matches (cap 50k iter)
+//   loop(n) { }                       // run block exactly n times (n may be 0); use `break` to exit early
+//   do { } while (img);                // repeat while template still matches (cap 50k iter); `break` exits
+//   break;                             // exit innermost loop / do-while / retry
 
-// Enter game
-if (stzb.png) {
-    tap(stzb.png)
+
+// Loop test
+loop (5) {
+    log("Break loop test")
+    break
 }

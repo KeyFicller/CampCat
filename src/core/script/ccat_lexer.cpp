@@ -130,6 +130,9 @@ Token Lexer::lex_ident_or_kw() {
   if (buf == "loop") {
     return Token{TokKind::KwLoop, std::move(buf), line, col};
   }
+  if (buf == "break") {
+    return Token{TokKind::KwBreak, std::move(buf), line, col};
+  }
   return Token{TokKind::Ident, std::move(buf), line, col};
 }
 

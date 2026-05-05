@@ -297,101 +297,116 @@ std::optional<std::string> CcatInterpreter::wait_until_impl(
   }
 }
 
-std::optional<std::string> CcatInterpreter::exec_stmt(
+stmt_exec_outcome CcatInterpreter::exec_stmt(
     const Stmt *_stmt, const std::function<bool()> &_should_stop) {
   if (!_stmt) {
-    return std::nullopt;
+    return stmt_exec_outcome::make_ok();
   }
   if (_should_stop()) {
-    return std::string("stopped");
+    return stmt_exec_outcome::make_stopped();
   }
   return _stmt->exec(*this, _should_stop);
 }
 
-std::optional<std::string>
+stmt_exec_outcome
 BlockStmt::exec(CcatInterpreter &_interp,
                 const std::function<bool()> &_should_stop) const {
   for (const auto &child : body) {
-    if (auto err = _interp.exec_stmt(child.get(), _should_stop)) {
-      return err;
+    stmt_exec_outcome o = _interp.exec_stmt(child.get(), _should_stop);
+    if (!o.is_ok()) {
+      return o;
     }
   }
-  return std::nullopt;
+  return stmt_exec_outcome::make_ok();
 }
 
-std::optional<std::string>
+stmt_exec_outcome BreakStmt::exec(CcatInterpreter &,
+                                  const std::function<bool()> &) const {
+  return stmt_exec_outcome::make_break();
+}
+
+stmt_exec_outcome
 TapStmt::exec(CcatInterpreter &_interp,
               const std::function<bool()> &_should_stop) const {
-  return _interp.tap_image(image_path, _should_stop);
+  return outcome_from_opt(_interp.tap_image(image_path, _should_stop));
 }
 
-std::optional<std::string>
+stmt_exec_outcome
 WaitStmt::exec(CcatInterpreter &_interp,
                const std::function<bool()> &_should_stop) const {
-  return cooperative_sleep_ms(milliseconds, _should_stop);
+  return outcome_from_opt(cooperative_sleep_ms(milliseconds, _should_stop));
 }
 
-std::optional<std::string>
+stmt_exec_outcome
 LogStmt::exec(CcatInterpreter &_interp,
               const std::function<bool()> &/*_should_stop*/) const {
   automation_log::emit(std::string("[ccat] ") + message);
-  return std::nullopt;
+  return stmt_exec_outcome::make_ok();
 }
 
-std::optional<std::string>
+stmt_exec_outcome
 IfStmt::exec(CcatInterpreter &_interp,
              const std::function<bool()> &_should_stop) const {
   bool found = false;
   if (!_interp.image_matches(image_path, _should_stop, &found)) {
     if (_should_stop()) {
-      return std::string("stopped");
+      return stmt_exec_outcome::make_stopped();
     }
-    return std::string("screencap failed in if condition");
+    return stmt_exec_outcome::make_error("screencap failed in if condition");
   }
   const Stmt *branch =
       found ? then_branch.get() : else_branch.get();
   return _interp.exec_stmt(branch, _should_stop);
 }
 
-std::optional<std::string>
+stmt_exec_outcome
 SwipeTemplatesStmt::exec(CcatInterpreter &_interp,
                          const std::function<bool()> &_should_stop) const {
-  return _interp.swipe_templates_impl(from_image_path, to_image_path,
-                                      _should_stop);
+  return outcome_from_opt(_interp.swipe_templates_impl(
+      from_image_path, to_image_path, _should_stop));
 }
 
-std::optional<std::string>
+stmt_exec_outcome
 TapAtStmt::exec(CcatInterpreter &_interp,
                 const std::function<bool()> &_should_stop) const {
-  return _interp.tap_at_impl(nx, ny, _should_stop);
+  return outcome_from_opt(_interp.tap_at_impl(nx, ny, _should_stop));
 }
 
-std::optional<std::string>
+stmt_exec_outcome
 SwipeAtStmt::exec(CcatInterpreter &_interp,
                   const std::function<bool()> &_should_stop) const {
-  return _interp.swipe_at_impl(x1, y1, x2, y2, _should_stop);
+  return outcome_from_opt(
+      _interp.swipe_at_impl(x1, y1, x2, y2, _should_stop));
 }
 
-std::optional<std::string>
+stmt_exec_outcome
 WaitUntilStmt::exec(CcatInterpreter &_interp,
                     const std::function<bool()> &_should_stop) const {
-  return _interp.wait_until_impl(image_path, timeout_ms, _should_stop);
+  return outcome_from_opt(
+      _interp.wait_until_impl(image_path, timeout_ms, _should_stop));
 }
 
-std::optional<std::string>
+stmt_exec_outcome
 RetryStmt::exec(CcatInterpreter &_interp,
                 const std::function<bool()> &_should_stop) const {
-  std::optional<std::string> last_err;
+  stmt_exec_outcome last_err = stmt_exec_outcome::make_ok();
   for (int attempt = 0; attempt < attempts; ++attempt) {
     if (_should_stop()) {
-      return std::string("stopped");
+      return stmt_exec_outcome::make_stopped();
     }
-    last_err = _interp.exec_stmt(body.get(), _should_stop);
-    if (!last_err.has_value()) {
-      return std::nullopt;
+    stmt_exec_outcome o = _interp.exec_stmt(body.get(), _should_stop);
+    if (o.kind == stmt_exec_outcome::tag::ok ||
+        o.kind == stmt_exec_outcome::tag::break_loop) {
+      return stmt_exec_outcome::make_ok();
     }
+    if (o.kind == stmt_exec_outcome::tag::stopped) {
+      return o;
+    }
+    last_err = std::move(o);
     if (attempt + 1 < attempts) {
-      if (auto sl = cooperative_sleep_ms(50, _should_stop)) {
+      stmt_exec_outcome sl =
+          outcome_from_opt(cooperative_sleep_ms(50, _should_stop));
+      if (!sl.is_ok()) {
         return sl;
       }
     }
@@ -399,51 +414,62 @@ RetryStmt::exec(CcatInterpreter &_interp,
   return last_err;
 }
 
-std::optional<std::string>
+stmt_exec_outcome
 DoWhileStmt::exec(CcatInterpreter &_interp,
                   const std::function<bool()> &_should_stop) const {
   if (!body) {
-    return std::nullopt;
+    return stmt_exec_outcome::make_ok();
   }
   for (int iter = 0;; ++iter) {
     if (iter >= k_do_while_max_iters) {
-      return std::string("do_while: iteration limit exceeded");
+      return stmt_exec_outcome::make_error(
+          "do_while: iteration limit exceeded");
     }
     if (_should_stop()) {
-      return std::string("stopped");
+      return stmt_exec_outcome::make_stopped();
     }
-    if (auto err = _interp.exec_stmt(body.get(), _should_stop)) {
-      return err;
+    stmt_exec_outcome body_o =
+        _interp.exec_stmt(body.get(), _should_stop);
+    if (body_o.kind == stmt_exec_outcome::tag::break_loop) {
+      return stmt_exec_outcome::make_ok();
+    }
+    if (!body_o.is_ok()) {
+      return body_o;
     }
     bool found = false;
     if (!_interp.image_matches(condition_image_path, _should_stop, &found)) {
       if (_should_stop()) {
-        return std::string("stopped");
+        return stmt_exec_outcome::make_stopped();
       }
-      return std::string("do_while: screencap failed in condition");
+      return stmt_exec_outcome::make_error(
+          "do_while: screencap failed in condition");
     }
     if (!found) {
       break;
     }
   }
-  return std::nullopt;
+  return stmt_exec_outcome::make_ok();
 }
 
-std::optional<std::string>
+stmt_exec_outcome
 LoopStmt::exec(CcatInterpreter &_interp,
                const std::function<bool()> &_should_stop) const {
   if (!body) {
-    return std::nullopt;
+    return stmt_exec_outcome::make_ok();
   }
   for (int i = 0; i < repetitions; ++i) {
     if (_should_stop()) {
-      return std::string("stopped");
+      return stmt_exec_outcome::make_stopped();
     }
-    if (auto err = _interp.exec_stmt(body.get(), _should_stop)) {
-      return err;
+    stmt_exec_outcome o = _interp.exec_stmt(body.get(), _should_stop);
+    if (o.kind == stmt_exec_outcome::tag::break_loop) {
+      return stmt_exec_outcome::make_ok();
+    }
+    if (!o.is_ok()) {
+      return o;
     }
   }
-  return std::nullopt;
+  return stmt_exec_outcome::make_ok();
 }
 
 automation_cycle_result
@@ -451,9 +477,16 @@ CcatInterpreter::run(const Program &_program,
                      const std::function<bool()> &_should_stop) {
   automation_cycle_result r{};
   for (const auto &st : _program.stmts) {
-    if (auto err = exec_stmt(st.get(), _should_stop)) {
+    stmt_exec_outcome o = exec_stmt(st.get(), _should_stop);
+    if (o.kind == stmt_exec_outcome::tag::break_loop) {
       r.ok = false;
-      r.message = std::move(*err);
+      r.message = "break outside loop";
+      return r;
+    }
+    if (!o.is_ok()) {
+      r.ok = false;
+      r.message =
+          o.message.empty() ? std::string("error") : std::move(o.message);
       return r;
     }
   }

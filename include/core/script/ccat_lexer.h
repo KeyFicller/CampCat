@@ -23,6 +23,7 @@ enum class TokKind {
   KwDo,
   KwWhile,
   KwLoop,
+  KwBreak,
   LParen,
   RParen,
   LBrace,

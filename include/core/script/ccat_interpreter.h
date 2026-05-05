@@ -63,9 +63,9 @@ private:
    * @brief Dispatch polymorphic Stmt variants recursively honoring `_should_stop`.
    * @param[in] _stmt Nullable subtree pointer (ignored when nullptr).
    * @param[in] _should_stop Cooperative cancel predicate mirrored from outer worker thread.
-   * @return std::nullopt when subtree succeeds; otherwise textual abort reason (also `"stopped"`).
+   * @return Subtree outcome: ok, break consumed only inside loops, stopped, or error text.
    */
-  std::optional<std::string>
+  stmt_exec_outcome
   exec_stmt(const Stmt *_stmt, const std::function<bool()> &_should_stop);
 
   /**
