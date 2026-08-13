@@ -12,9 +12,6 @@ namespace campcat {
 
 namespace {
 
-constexpr const char k_stzb_script_id[] = "stzb_auto_assemble";
-constexpr const char k_stzb_script_rel_json[] = "scripts/stzb_auto_assemble.json";
-
 constexpr const char k_ccat_script_id[] = "ccat_script";
 constexpr const char k_ccat_script_rel_json[] = "scripts/ccat_script.json";
 
@@ -119,9 +116,8 @@ std::filesystem::path app_config::resolve_script_json(const std::string &_id) co
 
 app_config app_config::defaults() {
   app_config c;
-  c.script_config_paths[k_stzb_script_id] = k_stzb_script_rel_json;
   c.script_config_paths[k_ccat_script_id] = k_ccat_script_rel_json;
-  c.active_script_id = k_stzb_script_id;
+  c.active_script_id = k_ccat_script_id;
   return c;
 }
 

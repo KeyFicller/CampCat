@@ -9,16 +9,6 @@
 namespace campcat {
 
 /**
- * @brief Normalized rectangle `[0,1]^4` referencing whole screenshot geometry.
- */
-struct rect_norm {
-  double x = 0;
-  double y = 0;
-  double w = 0;
-  double h = 0;
-};
-
-/**
  * @brief Controls the optional GUI-driven periodic automation worker.
  */
 struct scheduler_config {
@@ -56,18 +46,10 @@ struct app_config {
   scheduler_config scheduler{};
 
   /// String id driving `make_game_automation`; `"none"` keeps automation idle.
-  std::string active_script_id = "stzb_auto_assemble";
+  std::string active_script_id = "ccat_script";
 
   /// Mapping script id → json path resolved relative to `config_home`.
   std::unordered_map<std::string, std::string> script_config_paths;
-
-  /**
-   * @brief Parent of `config_home` interpreted as checkout root (`config/` child layout).
-   * @return Project root derived from persisted shell folder; empty before load.
-   */
-  std::filesystem::path project_root() const {
-    return config_home.empty() ? std::filesystem::path{} : config_home.parent_path();
-  }
 
   /**
    * @brief Resolve `{config_home}/{script_config_paths[id]}` for known ids.

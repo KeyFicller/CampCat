@@ -14,8 +14,7 @@
     "skip_if_busy": false
   },
   "scripts": {
-    "ccat_script": "scripts/ccat_script.json",
-    "stzb_auto_assemble": "scripts/stzb_auto_assemble.json"
+    "ccat_script": "scripts/ccat_script.json"
   },
   "step_retry_interval_ms": 500,
   "swipe_duration_ms": 300,

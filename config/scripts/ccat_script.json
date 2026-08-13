@@ -1,5 +1,5 @@
 {
-  "images_root": "scripts/stzb/templates",
-  "source": "scripts/stzb/script.ccat",
+  "images_root": "",
+  "source": "scripts/demo.ccat",
   "version": 1
 }

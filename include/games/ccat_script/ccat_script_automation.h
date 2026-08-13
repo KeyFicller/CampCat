@@ -25,7 +25,7 @@ public:
   /**
    * @brief Reload `.ccat` bytes from disk, parse once, interpret until completion/stop/failure.
    * @param[in] _should_stop Cooperative cancellation mirrored from UI/worker atomic flags.
-   * @return Aggregate automation_cycle_result identical semantics to STZB driver messaging.
+   * @return Aggregate automation_cycle_result for Dear ImGui / log telemetry.
    */
   automation_cycle_result
   run_cycle(const std::function<bool()> &_should_stop) override;

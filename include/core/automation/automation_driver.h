@@ -16,7 +16,6 @@ class game_automation;
 namespace shell_script_id {
 
 inline constexpr std::string_view k_none = "none";
-inline constexpr std::string_view k_stzb_auto_assemble = "stzb_auto_assemble";
 inline constexpr std::string_view k_ccat_script = "ccat_script";
 
 } // namespace shell_script_id

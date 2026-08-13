@@ -52,7 +52,7 @@ target_include_directories(imgui_lib PUBLIC
 target_link_libraries(imgui_lib PUBLIC glfw OpenGL::GL)
 
 # Core framework + Dear ImGui shell; game bundles under games/
-add_library(stzb_core STATIC
+add_library(campcat_core STATIC
   src/core/adb/adb_client.cpp
   src/core/vision/template_matcher.cpp
   src/core/vision/screen_template_ops.cpp
@@ -64,16 +64,14 @@ add_library(stzb_core STATIC
   src/core/script/ccat_lexer.cpp
   src/core/script/ccat_parser.cpp
   src/core/script/ccat_interpreter.cpp
-  src/games/stzb_auto_assemble/campcat_stzb_auto_assemble.cpp
-  src/games/stzb_auto_assemble/stzb_auto_assemble_profile.cpp
   src/games/ccat_script/ccat_script_profile.cpp
   src/games/ccat_script/ccat_script_automation.cpp
 )
-target_include_directories(stzb_core PUBLIC
+target_include_directories(campcat_core PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}/include
   ${OpenCV_INCLUDE_DIRS}
 )
-target_link_libraries(stzb_core PUBLIC
+target_link_libraries(campcat_core PUBLIC
   ${OpenCV_LIBS}
   nlohmann_json::nlohmann_json
 )
@@ -83,7 +81,7 @@ add_executable(campcat
   src/app/template_capture_ui.cpp
 )
 target_include_directories(campcat PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
-target_link_libraries(campcat PRIVATE stzb_core imgui_lib glfw OpenGL::GL)
+target_link_libraries(campcat PRIVATE campcat_core imgui_lib glfw OpenGL::GL)
 
 if(APPLE)
   target_link_libraries(campcat PRIVATE "-framework Cocoa" "-framework IOKit" "-framework CoreVideo")
