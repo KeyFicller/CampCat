@@ -34,6 +34,9 @@ public:
  * @param[in] _source Full UTF-8 source identical lifetime semantics as Lexer ctor.
  * @return owning AST rooted at Program — caller frees naturally via unique_ptr.
  * @throws parse_error on malformed grammar.
+ *
+ * Optional leading `defs { }` bindings are expanded while parsing this `_source`
+ * only; they are not retained on the returned Program.
  */
 std::unique_ptr<Program> parse_program(std::string_view _source);
 

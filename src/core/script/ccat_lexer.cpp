@@ -133,6 +133,15 @@ Token Lexer::lex_ident_or_kw() {
   if (buf == "break") {
     return Token{TokKind::KwBreak, std::move(buf), line, col};
   }
+  if (buf == "defs") {
+    return Token{TokKind::KwDefs, std::move(buf), line, col};
+  }
+  if (buf == "true") {
+    return Token{TokKind::KwTrue, std::move(buf), line, col};
+  }
+  if (buf == "false") {
+    return Token{TokKind::KwFalse, std::move(buf), line, col};
+  }
   return Token{TokKind::Ident, std::move(buf), line, col};
 }
 
@@ -169,6 +178,10 @@ Token Lexer::next() {
   case ',':
     advance_cursor();
     m_cur = Token{TokKind::Comma, ",", line, col};
+    return m_cur;
+  case '=':
+    advance_cursor();
+    m_cur = Token{TokKind::Eq, "=", line, col};
     return m_cur;
   case '"':
     m_cur = lex_string();

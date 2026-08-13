@@ -259,6 +259,9 @@ void template_capture_draw_panel(campcat::app_config &_cfg,
     } else if (!safe_leaf_name(g_filename)) {
       campcat::automation_log::emit(
           "[capture] invalid filename (no path separators)");
+    } else if (!_ccat_ui->has_script_source()) {
+      campcat::automation_log::emit(
+          "[capture] set .ccat source path before saving templates");
     } else if (_cfg.config_home.empty()) {
       campcat::automation_log::emit(
           "[capture] CampCat images dir unresolved (config_home)");
@@ -267,23 +270,29 @@ void template_capture_draw_panel(campcat::app_config &_cfg,
           g_sel_x0, g_sel_y0, g_sel_x1, g_sel_y1, g_bgr.cols, g_bgr.rows);
       const std::filesystem::path dir =
           _ccat_ui->images_base(_cfg.config_home);
-      std::error_code ec;
-      std::filesystem::create_directories(dir, ec);
-      if (ec) {
-        campcat::automation_log::emit("[capture] mkdir failed: " +
-                                      dir.string() + " (" + ec.message() + ")");
+      if (dir.empty()) {
+        campcat::automation_log::emit(
+            "[capture] script folder unresolved; check source path");
       } else {
-        const std::filesystem::path out = dir / g_filename;
-        cv::Mat patch = g_bgr(roi).clone();
-        if (!cv::imwrite(out.string(), patch)) {
-          campcat::automation_log::emit("[capture] imwrite failed: " +
-                                        out.string());
+        std::error_code ec;
+        std::filesystem::create_directories(dir, ec);
+        if (ec) {
+          campcat::automation_log::emit(
+              "[capture] mkdir failed: " + dir.string() + " (" + ec.message() +
+              ")");
         } else {
-          campcat::automation_log::emit("[capture] wrote " + out.string());
+          const std::filesystem::path out = dir / g_filename;
+          cv::Mat patch = g_bgr(roi).clone();
+          if (!cv::imwrite(out.string(), patch)) {
+            campcat::automation_log::emit("[capture] imwrite failed: " +
+                                          out.string());
+          } else {
+            campcat::automation_log::emit("[capture] wrote " + out.string());
+          }
         }
       }
     }
   }
 
-  ImGui::TextDisabled("Save writes under resolved PNG directory (images_base).");
+  ImGui::TextDisabled("PNG files are saved next to the .ccat script.");
 }

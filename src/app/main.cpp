@@ -89,6 +89,13 @@ bool persist_bundle_to_disk(
     const campcat::ccat_script_profile &_ccat_snap,
     const std::filesystem::path &_shell_path,
     std::string *_error_out = nullptr) {
+  if (!_ccat_snap.has_script_source()) {
+    if (_error_out) {
+      *_error_out =
+          "ccat script source path is empty; set .ccat path before save";
+    }
+    return false;
+  }
   try {
     std::filesystem::create_directories(_shell_path.parent_path());
     campcat::app_config tmp_shell = _shell_written;
@@ -392,6 +399,10 @@ int main(int argc, char **argv) {
 
     if (ImGui::BeginMenuBar()) {
       if (ImGui::BeginMenu("File")) {
+        const bool can_save = ccat_ui.has_script_source();
+        if (!can_save) {
+          ImGui::BeginDisabled();
+        }
         if (ImGui::MenuItem("Save config")) {
           std::string err;
           campcat::app_config to_write{};
@@ -419,6 +430,10 @@ int main(int argc, char **argv) {
           } else {
             append_log(std::string("[ui] save failed: ") + err);
           }
+        }
+        if (!can_save) {
+          ImGui::EndDisabled();
+          ImGui::TextDisabled("Set .ccat source path before save");
         }
         ImGui::EndMenu();
       }
@@ -616,28 +631,22 @@ int main(int argc, char **argv) {
         if (ImGui::CollapsingHeader("Paths###script_ccat_paths",
                                     ImGuiTreeNodeFlags_DefaultOpen)) {
         static char v_src[512]{};
-        static char v_img[512]{};
         std::snprintf(v_src, sizeof(v_src), "%s",
                       ccat_ui.source_rel.c_str());
-        std::snprintf(v_img, sizeof(v_img), "%s",
-                      ccat_ui.images_root_rel.c_str());
         if (ImGui::InputText("source (.ccat path relative to config dir)",
                              v_src, IM_ARRAYSIZE(v_src))) {
           ccat_ui.source_rel = v_src;
         }
-        if (ImGui::InputText(
-                "images_root (optional, relative to config dir; empty = use "
-                ".ccat folder)",
-                v_img, IM_ARRAYSIZE(v_img))) {
-          ccat_ui.images_root_rel = v_img;
+        if (!ccat_ui.has_script_source()) {
+          ImGui::TextColored(ImVec4(0.95F, 0.45F, 0.35F, 1.0F),
+                             "Script source required (save disabled).");
         }
-        ImGui::TextWrapped("Resolved PNG search directory: %s",
-                           ccat_ui.images_base(cfg_view.config_home)
-                               .string()
-                               .c_str());
         ImGui::TextWrapped(
-            "Script path hint: %s",
+            "Script path: %s",
             (cfg_view.config_home / ccat_ui.source_rel).string().c_str());
+        ImGui::TextWrapped(
+            "PNG search directory (same as script folder): %s",
+            ccat_ui.images_base(cfg_view.config_home).string().c_str());
       }
 
       if (ImGui::CollapsingHeader("Screenshot crop (ADB)###script_ccat_cap",

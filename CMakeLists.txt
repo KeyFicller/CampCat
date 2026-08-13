@@ -11,10 +11,15 @@ find_package(OpenCV REQUIRED COMPONENTS core imgproc imgcodecs)
 
 include(FetchContent)
 
+# Shallow clones: full histories made imgui/json .git dirs ~250MB each and
+# re-cloning missing glfw-src dominated configure time.
 FetchContent_Declare(
   glfw
   GIT_REPOSITORY https://github.com/glfw/glfw.git
   GIT_TAG        3.4
+  GIT_SHALLOW    TRUE
+  GIT_PROGRESS   TRUE
+  GIT_SUBMODULES ""
 )
 set(GLFW_BUILD_DOCS OFF CACHE BOOL "" FORCE)
 set(GLFW_BUILD_TESTS OFF CACHE BOOL "" FORCE)
@@ -25,6 +30,9 @@ FetchContent_Declare(
   imgui
   GIT_REPOSITORY https://github.com/ocornut/imgui.git
   GIT_TAG        v1.91.8
+  GIT_SHALLOW    TRUE
+  GIT_PROGRESS   TRUE
+  GIT_SUBMODULES ""
 )
 FetchContent_MakeAvailable(imgui)
 
@@ -32,6 +40,9 @@ FetchContent_Declare(
   json
   GIT_REPOSITORY https://github.com/nlohmann/json.git
   GIT_TAG        v3.11.3
+  GIT_SHALLOW    TRUE
+  GIT_PROGRESS   TRUE
+  GIT_SUBMODULES ""
 )
 FetchContent_MakeAvailable(json)
 
@@ -88,3 +99,18 @@ if(APPLE)
 endif()
 
 target_compile_definitions(campcat PRIVATE IMGUI_DEFINE_MATH_OPERATORS)
+
+add_executable(campcat_smoke
+  src/tools/campcat_smoke.cpp
+)
+target_include_directories(campcat_smoke PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_link_libraries(campcat_smoke PRIVATE campcat_core)
+
+enable_testing()
+add_test(
+  NAME ccat_smoke
+  COMMAND campcat_smoke
+          --config ${CMAKE_SOURCE_DIR}/config/default.json
+          --cases-dir ${CMAKE_SOURCE_DIR}/tests/smoke/cases
+)
+set_tests_properties(ccat_smoke PROPERTIES WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})

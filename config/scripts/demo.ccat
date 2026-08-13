@@ -1,20 +1,33 @@
-// CampCat .ccat script. PNG paths are relative to this file's folder
-// unless images_root is set in scripts/ccat_script.json.
+// CampCat .ccat script. PNG paths are always relative to this file's folder.
+//
+// Optional top-of-file static constants (parse-time only for this script):
+//   defs {
+//     n = 5
+//     x = 0.5
+//     btn = "button.png"
+//     enabled = true
+//   }
 //
 // Statements:
 //   tap(img);   tap_at(x, y);           // x,y normalized [0,1] vs screenshot size
 //   swipe(img_from, img_to);           // one screenshot, swipe between match centers
 //   swipe_at(x1,y1,x2,y2);             // normalized endpoints
 //   wait(ms);   wait_until(img, ms);    // poll until template appears
-//   log(msg);   if (img) { } else { }
+//   log(msg);   if (img) { } else { }   // if (bool_def) is folded at parse time
 //   retry(n) stmt_or_block;
 //   loop(n) { }                       // run block exactly n times (n may be 0); use `break` to exit early
 //   do { } while (img);                // repeat while template still matches (cap 50k iter); `break` exits
 //   break;                             // exit innermost loop / do-while / retry
 
+defs {
+  loops = 5
+  msg = "Break loop test"
+  enabled = true
+}
 
-// Loop test
-loop (5) {
-    log("Break loop test")
+if (enabled) {
+  loop(loops) {
+    log(msg)
     break
+  }
 }

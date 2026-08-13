@@ -4,9 +4,9 @@ Mac（及部分 POSIX）下、面向 **Android 模拟器** 的挂机小助手：
 
 - **脚本驱动**：仅保留 `ccat_script`；流程写在 `config/scripts/` 下的 `.ccat`，由 `ccat_script.json` 指定源文件与模板目录。
 - **定时调度**：可配置间隔与可选抖动，周期性执行当前脚本。
-- **Dear ImGui**：ADB、匹配阈值、`scheduler`、脚本路径可调；提供「ADB 截图裁剪」将 ROI 存为模板 PNG（写入脚本 `images_base`）。
+- **Dear ImGui**：ADB、匹配阈值、`scheduler`、`.ccat` 路径可调；「ADB 截图裁剪」把 ROI 存为与脚本同目录的 PNG。未指定脚本路径时禁止 Save。
 
-语句含 `if (模板.png)`、`tap(...)`、`tap_at(x,y)`、`wait(毫秒)`、`wait_until(...)`、`loop` / `do…while`、`break`、`retry`、`log(...)` 及 `{ ... }` 块等。
+语句含可选顶栏 `defs { name = 字面量 }`（数字 / 字符串 / 布尔，仅在解析该脚本时展开）、`if (模板.png)`、`tap(...)`、`tap_at(x,y)`、`wait(毫秒)`、`wait_until(...)`、`loop` / `do…while`、`break`、`retry`、`log(...)` 及 `{ ... }` 块等。
 
 ## 依赖
 
