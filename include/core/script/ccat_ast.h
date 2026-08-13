@@ -13,10 +13,10 @@ class CcatInterpreter;
 
 /**
  * @brief Control-flow result from executing one Stmt subtree (success, loop break,
- * cooperative stop, or error message).
+ * script return, cooperative stop, or error message).
  */
 struct stmt_exec_outcome {
-  enum class tag { ok, break_loop, stopped, error };
+  enum class tag { ok, break_loop, returned, stopped, error };
 
   tag kind = tag::ok;
   std::string message;
@@ -28,6 +28,12 @@ struct stmt_exec_outcome {
   static stmt_exec_outcome make_break() {
     stmt_exec_outcome o;
     o.kind = tag::break_loop;
+    return o;
+  }
+
+  static stmt_exec_outcome make_returned() {
+    stmt_exec_outcome o;
+    o.kind = tag::returned;
     return o;
   }
 
@@ -93,6 +99,15 @@ struct IfStmt final : Stmt {
  * @brief Exit the innermost enclosing `loop`, `do`/`while`, or `retry`.
  */
 struct BreakStmt final : Stmt {
+  stmt_exec_outcome
+  exec(CcatInterpreter &_interp,
+       const std::function<bool()> &_should_stop) const override;
+};
+
+/**
+ * @brief End the entire script successfully (`return`).
+ */
+struct ReturnStmt final : Stmt {
   stmt_exec_outcome
   exec(CcatInterpreter &_interp,
        const std::function<bool()> &_should_stop) const override;

@@ -1,0 +1,5 @@
+loop(3) {
+  log("GATE_PASS")
+  return
+}
+log("GATE_FAIL")

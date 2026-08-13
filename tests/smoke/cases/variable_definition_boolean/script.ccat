@@ -1,0 +1,14 @@
+// Variable definition
+
+defs {
+   VARTRUE = true
+   VARFALSE = false
+}
+
+if (VARFALSE) {
+    log("GATE_FAIL")
+}
+
+if (VARTRUE) {
+    log("GATE_PASS")
+}

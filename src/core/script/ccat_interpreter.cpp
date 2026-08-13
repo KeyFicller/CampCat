@@ -325,6 +325,11 @@ stmt_exec_outcome BreakStmt::exec(CcatInterpreter &,
   return stmt_exec_outcome::make_break();
 }
 
+stmt_exec_outcome ReturnStmt::exec(CcatInterpreter &,
+                                   const std::function<bool()> &) const {
+  return stmt_exec_outcome::make_returned();
+}
+
 stmt_exec_outcome
 TapStmt::exec(CcatInterpreter &_interp,
               const std::function<bool()> &_should_stop) const {
@@ -399,7 +404,8 @@ RetryStmt::exec(CcatInterpreter &_interp,
         o.kind == stmt_exec_outcome::tag::break_loop) {
       return stmt_exec_outcome::make_ok();
     }
-    if (o.kind == stmt_exec_outcome::tag::stopped) {
+    if (o.kind == stmt_exec_outcome::tag::returned ||
+        o.kind == stmt_exec_outcome::tag::stopped) {
       return o;
     }
     last_err = std::move(o);
@@ -478,6 +484,11 @@ CcatInterpreter::run(const Program &_program,
   automation_cycle_result r{};
   for (const auto &st : _program.stmts) {
     stmt_exec_outcome o = exec_stmt(st.get(), _should_stop);
+    if (o.kind == stmt_exec_outcome::tag::returned) {
+      r.ok = true;
+      r.message = "ok";
+      return r;
+    }
     if (o.kind == stmt_exec_outcome::tag::break_loop) {
       r.ok = false;
       r.message = "break outside loop";

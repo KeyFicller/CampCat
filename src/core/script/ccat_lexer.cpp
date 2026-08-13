@@ -133,6 +133,9 @@ Token Lexer::lex_ident_or_kw() {
   if (buf == "break") {
     return Token{TokKind::KwBreak, std::move(buf), line, col};
   }
+  if (buf == "return") {
+    return Token{TokKind::KwReturn, std::move(buf), line, col};
+  }
   if (buf == "defs") {
     return Token{TokKind::KwDefs, std::move(buf), line, col};
   }

@@ -300,11 +300,13 @@ private:
       return parse_loop();
     case TokKind::KwBreak:
       return parse_break();
+    case TokKind::KwReturn:
+      return parse_return();
     case TokKind::LBrace:
       return parse_block();
     default:
       fail("expected statement (if, tap, wait, log, swipe, tap_at, swipe_at, "
-           "wait_until, retry, do, loop, break, or block)");
+           "wait_until, retry, do, loop, break, return, or block)");
     }
   }
 
@@ -496,6 +498,11 @@ private:
   std::unique_ptr<BreakStmt> parse_break() {
     expect(TokKind::KwBreak, "expected break");
     return std::make_unique<BreakStmt>();
+  }
+
+  std::unique_ptr<ReturnStmt> parse_return() {
+    expect(TokKind::KwReturn, "expected return");
+    return std::make_unique<ReturnStmt>();
   }
 };
 

@@ -24,6 +24,7 @@ enum class TokKind {
   KwWhile,
   KwLoop,
   KwBreak,
+  KwReturn,
   KwDefs,
   KwTrue,
   KwFalse,
