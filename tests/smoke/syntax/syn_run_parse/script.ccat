@@ -1,0 +1,4 @@
+// expect: pass
+log("GATE_PASS")
+return
+run("does_not_matter.ccat")

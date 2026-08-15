@@ -1,0 +1,2 @@
+// expect: pass
+run("../syn_run_callee/script.ccat")

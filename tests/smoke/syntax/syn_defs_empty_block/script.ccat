@@ -1,0 +1,4 @@
+// expect: pass
+defs {
+}
+log("GATE_PASS")

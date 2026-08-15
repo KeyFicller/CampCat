@@ -1,0 +1,2 @@
+// expect: parse_error: expected
+tap_at(0.5)

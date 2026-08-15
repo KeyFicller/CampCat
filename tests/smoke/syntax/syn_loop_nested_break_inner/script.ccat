@@ -1,0 +1,9 @@
+// expect: pass
+loop(2) {
+  loop(2) {
+    break
+    log("GATE_FAIL")
+  }
+  log("GATE_PASS")
+  break
+}

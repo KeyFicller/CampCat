@@ -1,0 +1,4 @@
+// expect: pass
+defs { z = 0 }
+loop(z) { log("GATE_FAIL") }
+log("GATE_PASS")

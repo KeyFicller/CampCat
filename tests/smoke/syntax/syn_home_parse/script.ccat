@@ -1,0 +1,5 @@
+// expect: pass
+// home is parsed but not executed (return first)
+log("GATE_PASS")
+return
+home

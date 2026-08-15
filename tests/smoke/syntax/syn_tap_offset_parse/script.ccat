@@ -1,0 +1,4 @@
+// expect: pass
+log("GATE_PASS")
+return
+tap_offset(x.png, 0.02, -0.01)

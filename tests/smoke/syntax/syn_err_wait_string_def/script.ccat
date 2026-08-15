@@ -1,0 +1,6 @@
+// expect: parse_error: wrong type
+
+defs {
+  ms = "nope"
+}
+wait(ms)

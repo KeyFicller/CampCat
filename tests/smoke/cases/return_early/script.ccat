@@ -1,4 +1,0 @@
-// return ends script successfully; trailing fail must not run
-log("GATE_PASS")
-return
-log("GATE_FAIL")

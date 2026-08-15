@@ -1,0 +1,2 @@
+// expect: parse_error: expected
+wait_until(a.png)

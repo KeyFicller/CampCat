@@ -1,9 +1,11 @@
 #include <algorithm>
+#include <cctype>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <mutex>
+#include <optional>
 #include <sstream>
 #include <string>
 #include <string_view>
@@ -28,14 +30,24 @@ struct options {
   fs::path cases_dir = "tests/smoke/cases";
   std::string only_case;
   bool require_device = false;
+  bool offline = false;
+};
+
+enum class expect_kind { none, pass, parse_error };
+
+struct case_expect {
+  expect_kind kind = expect_kind::none;
+  std::string parse_error_substr;
+  bool malformed = false;
 };
 
 void print_usage(const char *_argv0) {
   std::cerr
       << "Usage: " << _argv0
-      << " [--config path] [--cases-dir path] [--case name] [--require-device]\n"
+      << " [--config path] [--cases-dir path] [--case name] [--require-device] "
+         "[--offline]\n"
       << "Env: CAMPCAT_SMOKE_REQUIRE_DEVICE=1 forces failure when no ADB "
-         "device.\n";
+         "device (ignored with --offline).\n";
 }
 
 bool parse_args(int _argc, char **_argv, options *_out) {
@@ -47,6 +59,10 @@ bool parse_args(int _argc, char **_argv, options *_out) {
     }
     if (arg == "--require-device") {
       _out->require_device = true;
+      continue;
+    }
+    if (arg == "--offline") {
+      _out->offline = true;
       continue;
     }
     if (arg == "--config" && i + 1 < _argc) {
@@ -82,6 +98,61 @@ std::string read_file(const fs::path &_path) {
   std::ostringstream oss;
   oss << in.rdbuf();
   return oss.str();
+}
+
+std::string trim(std::string_view _s) {
+  while (!_s.empty() &&
+         std::isspace(static_cast<unsigned char>(_s.front()))) {
+    _s.remove_prefix(1);
+  }
+  while (!_s.empty() && std::isspace(static_cast<unsigned char>(_s.back()))) {
+    _s.remove_suffix(1);
+  }
+  return std::string(_s);
+}
+
+case_expect parse_expect_directive(const std::string &_source) {
+  case_expect out;
+  std::istringstream in(_source);
+  std::string line;
+  while (std::getline(in, line)) {
+    const std::string t = trim(line);
+    if (t.empty()) {
+      continue;
+    }
+    if (!t.starts_with("//")) {
+      break;
+    }
+    const std::string body = trim(std::string_view(t).substr(2));
+    if (!body.starts_with("expect:")) {
+      continue;
+    }
+    if (out.kind != expect_kind::none) {
+      out.malformed = true;
+      return out;
+    }
+    std::string rest = trim(std::string_view(body).substr(7));
+    if (rest == "pass") {
+      out.kind = expect_kind::pass;
+      continue;
+    }
+    if (rest == "parse_error") {
+      out.kind = expect_kind::parse_error;
+      continue;
+    }
+    constexpr std::string_view k_pe = "parse_error:";
+    if (rest.starts_with(k_pe)) {
+      out.kind = expect_kind::parse_error;
+      out.parse_error_substr = trim(std::string_view(rest).substr(k_pe.size()));
+      if (out.parse_error_substr.empty()) {
+        out.malformed = true;
+      }
+      continue;
+    }
+    out.malformed = true;
+    return out;
+  }
+  return out;
 }
 
 std::vector<fs::path> discover_cases(const fs::path &_cases_dir,
@@ -160,29 +231,33 @@ int main(int argc, char **argv) {
     std::cout << "  " << line << '\n';
   });
 
-  campcat::adb_client adb(cfg.adb_path, cfg.adb_serial);
-  {
-    std::string co;
-    std::string ce;
-    (void)adb.connect_remote(cfg.adb_connect_address, 15000, &co, &ce);
-  }
-
-  const auto devices = adb.list_devices();
-  if (devices.empty()) {
-    campcat::automation_log::clear_sink();
-    if (opt.require_device) {
-      std::cerr << "[smoke] no ADB device (require-device)\n";
-      return 1;
+  std::optional<campcat::adb_client> adb;
+  if (!opt.offline) {
+    adb.emplace(cfg.adb_path, cfg.adb_serial);
+    {
+      std::string co;
+      std::string ce;
+      (void)adb->connect_remote(cfg.adb_connect_address, 15000, &co, &ce);
     }
-    std::cout << "[smoke] no ADB device — skipping cases\n";
-    return 0;
+    const auto devices = adb->list_devices();
+    if (devices.empty()) {
+      campcat::automation_log::clear_sink();
+      if (opt.require_device) {
+        std::cerr << "[smoke] no ADB device (require-device)\n";
+        return 1;
+      }
+      std::cout << "[smoke] no ADB device — skipping cases\n";
+      return 0;
+    }
+    std::cout << "[smoke] devices:";
+    for (const auto &d : devices) {
+      std::cout << ' ' << d;
+    }
+    std::cout << '\n';
+  } else {
+    std::cout << "[smoke] offline mode (no ADB)\n";
+    adb.emplace(cfg.adb_path, cfg.adb_serial);
   }
-
-  std::cout << "[smoke] devices:";
-  for (const auto &d : devices) {
-    std::cout << ' ' << d;
-  }
-  std::cout << '\n';
 
   const auto cases = discover_cases(opt.cases_dir, opt.only_case);
   if (cases.empty()) {
@@ -203,8 +278,15 @@ int main(int argc, char **argv) {
     }
 
     const std::string source = read_file(script_path);
-    if (source.empty()) {
+    if (source.empty() && !fs::is_regular_file(script_path)) {
       std::cout << "[smoke] " << name << " ERROR cannot read script\n";
+      ++failed;
+      continue;
+    }
+
+    const case_expect expect = parse_expect_directive(source);
+    if (expect.malformed) {
+      std::cout << "[smoke] " << name << " ERROR malformed expect\n";
       ++failed;
       continue;
     }
@@ -212,30 +294,53 @@ int main(int argc, char **argv) {
     case_verdict verdict = case_verdict::error;
     try {
       auto prog = campcat::ccat_lang::parse_program(source);
-      campcat::template_matcher matcher(cfg.match_threshold,
-                                        cfg.match_multiscale);
-      // PNGs resolve beside script.ccat (case directory).
-      campcat::ccat_lang::CcatInterpreter interp(&adb, &cfg, std::move(matcher),
-                                                 case_dir);
-      const auto res = interp.run(*prog, [] { return false; });
-      std::vector<std::string> lines;
-      {
-        std::lock_guard<std::mutex> lk(log_mu);
-        lines = case_logs;
-      }
-      verdict = judge_logs(lines);
-      if (verdict == case_verdict::pass && !res.ok) {
-        // Markers win; still note soft interpreter failure in message.
-        std::cout << "  [smoke] note: interpreter ok=false msg=" << res.message
-                  << '\n';
-      }
-      if (verdict != case_verdict::pass && !res.ok) {
-        std::cout << "  [smoke] interpreter: " << res.message << '\n';
+      if (expect.kind == expect_kind::parse_error) {
+        std::cout << "  expected parse_error but parse succeeded\n";
+        verdict = case_verdict::fail;
+      } else {
+        campcat::template_matcher matcher(cfg.match_threshold,
+                                          cfg.match_multiscale);
+        campcat::ccat_lang::CcatInterpreter interp(&*adb, &cfg,
+                                                   std::move(matcher),
+                                                   case_dir, script_path);
+        const auto res = interp.run(*prog, [] { return false; });
+        std::vector<std::string> lines;
+        {
+          std::lock_guard<std::mutex> lk(log_mu);
+          lines = case_logs;
+        }
+        verdict = judge_logs(lines);
+        if (expect.kind == expect_kind::pass) {
+          if (verdict == case_verdict::pass && !res.ok) {
+            std::cout << "  [smoke] note: interpreter ok=false msg="
+                      << res.message << '\n';
+          }
+          if (verdict != case_verdict::pass && !res.ok) {
+            std::cout << "  [smoke] interpreter: " << res.message << '\n';
+          }
+        } else {
+          // no expect: GATE markers only
+          if (verdict != case_verdict::pass && !res.ok) {
+            std::cout << "  [smoke] interpreter: " << res.message << '\n';
+          }
+        }
       }
     } catch (const campcat::ccat_lang::parse_error &ex) {
       std::cout << "  parse error: " << ex.what() << " (line " << ex.line
                 << ", col " << ex.col << ")\n";
-      verdict = case_verdict::error;
+      if (expect.kind == expect_kind::parse_error) {
+        if (!expect.parse_error_substr.empty() &&
+            std::string_view(ex.what()).find(expect.parse_error_substr) ==
+                std::string_view::npos) {
+          std::cout << "  expected substring missing: "
+                    << expect.parse_error_substr << '\n';
+          verdict = case_verdict::fail;
+        } else {
+          verdict = case_verdict::pass;
+        }
+      } else {
+        verdict = case_verdict::error;
+      }
     } catch (const std::exception &ex) {
       std::cout << "  exception: " << ex.what() << '\n';
       verdict = case_verdict::error;

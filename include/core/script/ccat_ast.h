@@ -114,6 +114,26 @@ struct ReturnStmt final : Stmt {
 };
 
 /**
+ * @brief Return to launcher and force-stop recent apps (`home`).
+ */
+struct HomeStmt final : Stmt {
+  stmt_exec_outcome
+  exec(CcatInterpreter &_interp,
+       const std::function<bool()> &_should_stop) const override;
+};
+
+/**
+ * @brief Run another `.ccat` relative to the current script directory (`run`).
+ */
+struct RunStmt final : Stmt {
+  std::string script_rel;
+
+  stmt_exec_outcome
+  exec(CcatInterpreter &_interp,
+       const std::function<bool()> &_should_stop) const override;
+};
+
+/**
  * @brief Tap the screen at best template match center (`tap(image)`).
  */
 struct TapStmt final : Stmt {
@@ -167,6 +187,19 @@ struct SwipeTemplatesStmt final : Stmt {
 struct TapAtStmt final : Stmt {
   double nx = 0;
   double ny = 0;
+
+  stmt_exec_outcome
+  exec(CcatInterpreter &_interp,
+       const std::function<bool()> &_should_stop) const override;
+};
+
+/**
+ * @brief Tap template match center plus screen-normalized offset `(dx, dy)`.
+ */
+struct TapOffsetStmt final : Stmt {
+  std::string image_path;
+  double dx = 0;
+  double dy = 0;
 
   stmt_exec_outcome
   exec(CcatInterpreter &_interp,

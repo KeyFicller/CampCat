@@ -74,9 +74,18 @@ automation_cycle_result ccat_script_automation::run_cycle(
     return r;
   }
 
+  std::error_code ec;
+  const std::filesystem::path script_path =
+      m_cfg->config_home / m_profile->source_rel;
+  const std::filesystem::path canon =
+      std::filesystem::weakly_canonical(script_path, ec);
+  const std::filesystem::path script_abs =
+      ec ? script_path.lexically_normal() : canon;
+
   template_matcher matcher(m_cfg->match_threshold, m_cfg->match_multiscale);
   ccat_lang::CcatInterpreter interp(m_adb, m_cfg, std::move(matcher),
-                                    m_profile->images_base(m_cfg->config_home));
+                                    m_profile->images_base(m_cfg->config_home),
+                                    script_abs);
   return interp.run(*prog, _should_stop);
 }
 

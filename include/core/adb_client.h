@@ -86,6 +86,20 @@ public:
   bool swipe(int _x1, int _y1, int _x2, int _y2, int _duration_ms);
 
   /**
+   * @brief Send an Android keyevent (`adb shell input keyevent <code>`).
+   * @param[in] _keycode Android KEYCODE_* integer (e.g. 3 = HOME).
+   * @return False when adb execution fails or returns error.
+   */
+  bool keyevent(int _keycode);
+
+  /**
+   * @brief HOME, then `am force-stop` every non-home package in recents.
+   * @param[in] _gap_ms Delay after HOME before dumpsys / force-stop.
+   * @return False when HOME or dumpsys fails, or any force-stop fails.
+   */
+  bool home_and_kill_all(int _gap_ms);
+
+  /**
    * @brief Pipe `adb exec-out screencap -p` into an OpenCV BGR decode.
    * @param[out] _bgr_out Output buffer written on success.
    * @param[in] _timeout_ms adb wait budget.

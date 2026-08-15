@@ -114,3 +114,12 @@ add_test(
           --cases-dir ${CMAKE_SOURCE_DIR}/tests/smoke/cases
 )
 set_tests_properties(ccat_smoke PROPERTIES WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+
+add_test(
+  NAME ccat_syntax
+  COMMAND campcat_smoke
+          --offline
+          --config ${CMAKE_SOURCE_DIR}/config/default.json
+          --cases-dir ${CMAKE_SOURCE_DIR}/tests/smoke/syntax
+)
+set_tests_properties(ccat_syntax PROPERTIES WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})

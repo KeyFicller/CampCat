@@ -6,6 +6,8 @@ compile_commands.json
 .DS_Store
 imgui.ini
 /.vscode
-/config/scripts/*.png
+/config/scripts/
+!/config/scripts/demo.ccat
 /.summary
 /docs
+/tests/smoke/user

@@ -6,7 +6,7 @@ Mac（及部分 POSIX）下、面向 **Android 模拟器** 的挂机小助手：
 - **定时调度**：可配置间隔与可选抖动，周期性执行当前脚本。
 - **Dear ImGui**：ADB、匹配阈值、`scheduler`、`.ccat` 路径可调；「ADB 截图裁剪」把 ROI 存为与脚本同目录的 PNG。未指定脚本路径时禁止 Save。
 
-语句含可选顶栏 `defs { name = 字面量 }`（数字 / 字符串 / 布尔，仅在解析该脚本时展开）、`if (模板.png)`、`tap(...)`、`tap_at(x,y)`、`wait(毫秒)`、`wait_until(...)`、`loop` / `do…while`、`break`、`retry`、`log(...)` 及 `{ ... }` 块等。
+语句含可选顶栏 `defs { name = 字面量 }`（数字 / 字符串 / 布尔，仅在解析该脚本时展开）、`if (模板.png)`、`tap(...)`、`tap_at(x,y)`、`tap_offset(图, dx, dy)`（中心 + 整屏归一化偏移）、`wait(毫秒)`、`wait_until(...)`、`loop` / `do…while`、`break`、`return`、`home`（回桌面并对近期任务 `am force-stop`）、`run("其它.ccat")`（相对当前脚本目录，可用 `..`）、`retry`、`log(...)` 及 `{ ... }` 块等。
 
 ## 依赖
 

@@ -12,6 +12,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <vector>
 
 namespace campcat {
 
@@ -31,11 +32,14 @@ class CcatInterpreter {
   friend struct LogStmt;
   friend struct SwipeTemplatesStmt;
   friend struct TapAtStmt;
+  friend struct TapOffsetStmt;
   friend struct SwipeAtStmt;
   friend struct WaitUntilStmt;
   friend struct RetryStmt;
   friend struct DoWhileStmt;
   friend struct LoopStmt;
+  friend struct HomeStmt;
+  friend struct RunStmt;
 
 public:
   /**
@@ -43,11 +47,13 @@ public:
    * @param[in] _adb Live adb façade polling screenshots/taps.
    * @param[in] _cfg Shell knobs controlling matcher thresholds plus pacing hints.
    * @param[in] _matcher Initialized matcher honoring `_cfg` multiscale/threshold intent.
-   * @param[in] _images_base Directory resolving relative PNG operands unless overridden elsewhere.
+   * @param[in] _images_base Directory resolving relative PNG / `run` paths.
+   * @param[in] _script_path Absolute path of the entry `.ccat` (for `run` cycle detection).
    */
   CcatInterpreter(adb_client *_adb, const app_config *_cfg,
                   template_matcher _matcher,
-                  std::filesystem::path _images_base);
+                  std::filesystem::path _images_base,
+                  std::filesystem::path _script_path = {});
 
   /**
    * @brief Interpret successive statements until completion or first abnormal outcome.
@@ -113,6 +119,10 @@ private:
               const std::function<bool()> &_should_stop);
 
   std::optional<std::string>
+  tap_offset_impl(const std::string &_rel_path, double _dx, double _dy,
+                  const std::function<bool()> &_should_stop);
+
+  std::optional<std::string>
   swipe_at_impl(double _x1, double _y1, double _x2, double _y2,
                 const std::function<bool()> &_should_stop);
 
@@ -120,10 +130,26 @@ private:
   wait_until_impl(const std::string &_rel_path, int _timeout_ms,
                   const std::function<bool()> &_should_stop);
 
+  std::optional<std::string>
+  home_impl(const std::function<bool()> &_should_stop);
+
+  std::optional<std::string>
+  run_script_impl(const std::string &_rel,
+                  const std::function<bool()> &_should_stop);
+
+  stmt_exec_outcome
+  exec_program_stmts(const Program &_program,
+                     const std::function<bool()> &_should_stop);
+
+  std::filesystem::path
+  resolve_script_path(const std::string &_rel) const;
+
   adb_client *m_adb;
   const app_config *m_cfg;
   template_matcher m_matcher;
   std::filesystem::path m_images_base;
+  std::filesystem::path m_script_path;
+  std::vector<std::filesystem::path> m_run_stack;
 };
 
 } // namespace ccat_lang

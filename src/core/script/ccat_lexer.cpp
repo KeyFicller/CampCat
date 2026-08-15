@@ -112,6 +112,9 @@ Token Lexer::lex_ident_or_kw() {
   if (buf == "tap_at") {
     return Token{TokKind::KwTapAt, std::move(buf), line, col};
   }
+  if (buf == "tap_offset") {
+    return Token{TokKind::KwTapOffset, std::move(buf), line, col};
+  }
   if (buf == "swipe_at") {
     return Token{TokKind::KwSwipeAt, std::move(buf), line, col};
   }
@@ -135,6 +138,12 @@ Token Lexer::lex_ident_or_kw() {
   }
   if (buf == "return") {
     return Token{TokKind::KwReturn, std::move(buf), line, col};
+  }
+  if (buf == "home") {
+    return Token{TokKind::KwHome, std::move(buf), line, col};
+  }
+  if (buf == "run") {
+    return Token{TokKind::KwRun, std::move(buf), line, col};
   }
   if (buf == "defs") {
     return Token{TokKind::KwDefs, std::move(buf), line, col};

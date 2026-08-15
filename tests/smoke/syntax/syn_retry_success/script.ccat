@@ -1,0 +1,4 @@
+// expect: pass
+retry(3) {
+  log("GATE_PASS")
+}

@@ -1,0 +1,6 @@
+// expect: parse_error: wrong type
+
+defs {
+  n = "x"
+}
+loop(n) { }

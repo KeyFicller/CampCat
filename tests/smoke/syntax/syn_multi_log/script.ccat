@@ -1,0 +1,4 @@
+// expect: pass
+log("a")
+log("b")
+log("GATE_PASS")

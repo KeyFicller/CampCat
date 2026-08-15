@@ -3,10 +3,13 @@
 #include <opencv2/imgcodecs.hpp>
 
 #include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <sstream>
 #include <string_view>
 #include <thread>
+#include <unordered_set>
+#include <vector>
 
 #ifndef _WIN32
 #include <fcntl.h>
@@ -389,6 +392,85 @@ bool adb_client::swipe(int _x1, int _y1, int _x2, int _y2, int _duration_ms) {
                                    std::to_string(_y2),
                                    std::to_string(_duration_ms)};
   return run(args, nullptr, nullptr, 12000);
+}
+
+bool adb_client::keyevent(int _keycode) {
+  std::vector<std::string> args = {"shell", "input", "keyevent",
+                                   std::to_string(_keycode)};
+  return run(args, nullptr, nullptr, 8000);
+}
+
+namespace {
+
+/** Packages from `dumpsys activity recents` Task headers (skip type=home). */
+std::vector<std::string>
+packages_from_recents_dump(const std::string &_dump) {
+  std::vector<std::string> pkgs;
+  std::unordered_set<std::string> seen;
+  std::istringstream iss(_dump);
+  std::string line;
+  while (std::getline(iss, line)) {
+    if (line.find("Recent #") == std::string::npos ||
+        line.find("Task{") == std::string::npos) {
+      continue;
+    }
+    if (line.find("type=home") != std::string::npos) {
+      continue;
+    }
+    const auto apos = line.find("A=");
+    if (apos == std::string::npos) {
+      continue;
+    }
+    const auto colon = line.find(':', apos + 2);
+    if (colon == std::string::npos) {
+      continue;
+    }
+    size_t i = colon + 1;
+    size_t j = i;
+    while (j < line.size()) {
+      const unsigned char c = static_cast<unsigned char>(line[j]);
+      if (std::isalnum(c) || c == '.' || c == '_') {
+        ++j;
+      } else {
+        break;
+      }
+    }
+    if (i >= j) {
+      continue;
+    }
+    std::string pkg = line.substr(i, j - i);
+    if (seen.insert(pkg).second) {
+      pkgs.push_back(std::move(pkg));
+    }
+  }
+  return pkgs;
+}
+
+} // namespace
+
+bool adb_client::home_and_kill_all(int _gap_ms) {
+  // KEYCODE_HOME == 3
+  if (!keyevent(3)) {
+    return false;
+  }
+  if (_gap_ms > 0) {
+    (void)delay_after_action(std::chrono::milliseconds(_gap_ms));
+  }
+
+  // am kill-all only drops cached processes; recent apps stay alive on MuMu.
+  // force-stop each non-home package listed in recents instead.
+  std::string dump;
+  if (!run({"shell", "dumpsys", "activity", "recents"}, &dump, nullptr,
+           20000)) {
+    return false;
+  }
+  const auto pkgs = packages_from_recents_dump(dump);
+  for (const auto &pkg : pkgs) {
+    if (!run({"shell", "am", "force-stop", pkg}, nullptr, nullptr, 15000)) {
+      return false;
+    }
+  }
+  return keyevent(3);
 }
 
 bool adb_client::delay_after_action(std::chrono::milliseconds _tap_delay) const {

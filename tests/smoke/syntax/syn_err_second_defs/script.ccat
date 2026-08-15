@@ -1,0 +1,8 @@
+// expect: parse_error: defs must be the first
+
+defs {
+  a = 1
+}
+defs {
+  b = 2
+}

@@ -1,0 +1,4 @@
+// expect: pass
+log("GATE_PASS")
+return
+log("GATE_FAIL")

@@ -259,6 +259,18 @@ private:
     }
   }
 
+  /** Number literal / number def, optional leading `-` (Ident "-"). */
+  double parse_signed_double(const char *_ctx) {
+    bool neg = false;
+    Token t = m_lex.peek();
+    if (t.kind == TokKind::Ident && t.text == "-") {
+      (void)m_lex.next();
+      neg = true;
+    }
+    const double v = parse_double_coord(_ctx);
+    return neg ? -v : v;
+  }
+
   std::string parse_log_operand() {
     Token t = m_lex.peek();
     if (t.kind == TokKind::Ident) {
@@ -288,6 +300,8 @@ private:
       return parse_swipe_templates();
     case TokKind::KwTapAt:
       return parse_tap_at();
+    case TokKind::KwTapOffset:
+      return parse_tap_offset();
     case TokKind::KwSwipeAt:
       return parse_swipe_at();
     case TokKind::KwWaitUntil:
@@ -302,11 +316,16 @@ private:
       return parse_break();
     case TokKind::KwReturn:
       return parse_return();
+    case TokKind::KwHome:
+      return parse_home();
+    case TokKind::KwRun:
+      return parse_run();
     case TokKind::LBrace:
       return parse_block();
     default:
-      fail("expected statement (if, tap, wait, log, swipe, tap_at, swipe_at, "
-           "wait_until, retry, do, loop, break, return, or block)");
+      fail("expected statement (if, tap, wait, log, swipe, tap_at, tap_offset, "
+           "swipe_at, wait_until, retry, do, loop, break, return, home, run, "
+           "or block)");
     }
   }
 
@@ -424,6 +443,22 @@ private:
     return node;
   }
 
+  std::unique_ptr<TapOffsetStmt> parse_tap_offset() {
+    expect(TokKind::KwTapOffset, "expected tap_offset");
+    expect(TokKind::LParen, "expected '(' after tap_offset");
+    std::string img = parse_image_ref();
+    expect(TokKind::Comma, "expected ',' after tap_offset image");
+    const double dx = parse_signed_double("tap_offset dx");
+    expect(TokKind::Comma, "expected ',' after tap_offset dx");
+    const double dy = parse_signed_double("tap_offset dy");
+    expect(TokKind::RParen, "expected ')' after tap_offset");
+    auto node = std::make_unique<TapOffsetStmt>();
+    node->image_path = std::move(img);
+    node->dx = dx;
+    node->dy = dy;
+    return node;
+  }
+
   std::unique_ptr<SwipeAtStmt> parse_swipe_at() {
     expect(TokKind::KwSwipeAt, "expected swipe_at");
     expect(TokKind::LParen, "expected '(' after swipe_at");
@@ -503,6 +538,21 @@ private:
   std::unique_ptr<ReturnStmt> parse_return() {
     expect(TokKind::KwReturn, "expected return");
     return std::make_unique<ReturnStmt>();
+  }
+
+  std::unique_ptr<HomeStmt> parse_home() {
+    expect(TokKind::KwHome, "expected home");
+    return std::make_unique<HomeStmt>();
+  }
+
+  std::unique_ptr<RunStmt> parse_run() {
+    expect(TokKind::KwRun, "expected run");
+    expect(TokKind::LParen, "expected '(' after run");
+    std::string path = parse_log_operand();
+    expect(TokKind::RParen, "expected ')' after run path");
+    auto node = std::make_unique<RunStmt>();
+    node->script_rel = std::move(path);
+    return node;
   }
 };
 

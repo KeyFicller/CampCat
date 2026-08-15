@@ -1,0 +1,8 @@
+// expect: parse_error: if
+
+defs {
+  n = 1
+}
+if (n) {
+  log("x")
+}

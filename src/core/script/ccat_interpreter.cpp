@@ -5,9 +5,12 @@
 #include "core/automation_log.h"
 #include "core/template_matcher.h"
 
+#include "core/script/ccat_parser.h"
+
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <fstream>
 #include <filesystem>
 #include <sstream>
 #include <stdexcept>
@@ -19,6 +22,17 @@ namespace campcat::ccat_lang {
 namespace {
 
 constexpr int k_do_while_max_iters = 50000;
+constexpr int k_run_max_depth = 16;
+
+std::string read_text_file(const std::filesystem::path &_path) {
+  std::ifstream in(_path, std::ios::binary);
+  if (!in) {
+    return {};
+  }
+  std::ostringstream oss;
+  oss << in.rdbuf();
+  return oss.str();
+}
 
 std::chrono::milliseconds pause_after_tap(const app_config &_cfg) {
   return std::chrono::milliseconds(
@@ -56,9 +70,11 @@ cooperative_sleep_ms(int _ms,
 
 CcatInterpreter::CcatInterpreter(adb_client *_adb, const app_config *_cfg,
                                  template_matcher _matcher,
-                                 std::filesystem::path _images_base)
+                                 std::filesystem::path _images_base,
+                                 std::filesystem::path _script_path)
     : m_adb(_adb), m_cfg(_cfg), m_matcher(std::move(_matcher)),
-      m_images_base(std::move(_images_base)) {
+      m_images_base(std::move(_images_base)),
+      m_script_path(std::move(_script_path)) {
   if (!m_adb || !m_cfg) {
     throw std::invalid_argument("CcatInterpreter requires adb and cfg");
   }
@@ -233,6 +249,71 @@ std::optional<std::string> CcatInterpreter::tap_at_impl(
   return std::nullopt;
 }
 
+std::optional<std::string> CcatInterpreter::tap_offset_impl(
+    const std::string &_rel_path, double _dx, double _dy,
+    const std::function<bool()> &_should_stop) {
+  const auto abs_path = resolve_image_path(_rel_path);
+  std::error_code ec;
+  if (!std::filesystem::is_regular_file(abs_path, ec)) {
+    std::ostringstream oss;
+    oss << "tap_offset: template file missing " << abs_path.string();
+    return oss.str();
+  }
+  cv::Mat screen;
+  if (!capture_screen(&screen, _should_stop)) {
+    if (_should_stop()) {
+      return std::string("stopped");
+    }
+    return std::string("tap_offset: screencap failed before match");
+  }
+  const auto opt =
+      m_matcher.match_file(screen, abs_path.string(), m_cfg->match_threshold);
+  if (!opt.has_value()) {
+    std::ostringstream oss;
+    oss << "tap_offset: unreadable template " << abs_path.string();
+    return oss.str();
+  }
+  if (!opt->found) {
+    std::ostringstream oss;
+    oss << "tap_offset: image not found " << abs_path.string()
+        << " (threshold=" << m_cfg->match_threshold << ")";
+    return oss.str();
+  }
+
+  cv::Mat screen_tap;
+  if (!capture_screen(&screen_tap, _should_stop)) {
+    if (_should_stop()) {
+      return std::string("stopped");
+    }
+    return std::string("tap_offset: screencap failed before tap");
+  }
+  const auto verify = m_matcher.match_file(screen_tap, abs_path.string(),
+                                           m_cfg->match_threshold);
+  if (!verify.has_value() || !verify->found) {
+    std::ostringstream oss;
+    oss << "tap_offset: image not found at tap time " << abs_path.string();
+    return oss.str();
+  }
+
+  const int px =
+      verify->center.x +
+      static_cast<int>(std::lround(_dx * static_cast<double>(screen_tap.cols)));
+  const int py =
+      verify->center.y +
+      static_cast<int>(std::lround(_dy * static_cast<double>(screen_tap.rows)));
+  if (px < 0 || px >= screen_tap.cols || py < 0 || py >= screen_tap.rows) {
+    std::ostringstream oss;
+    oss << "tap_offset: point (" << px << "," << py << ") out of screen "
+        << screen_tap.cols << "x" << screen_tap.rows;
+    return oss.str();
+  }
+  if (!m_adb->tap(px, py)) {
+    return std::string("tap_offset: adb tap failed");
+  }
+  std::this_thread::sleep_for(pause_after_tap(*m_cfg));
+  return std::nullopt;
+}
+
 std::optional<std::string> CcatInterpreter::swipe_at_impl(
     double _x1, double _y1, double _x2, double _y2,
     const std::function<bool()> &_should_stop) {
@@ -256,6 +337,104 @@ std::optional<std::string> CcatInterpreter::swipe_at_impl(
   }
   std::this_thread::sleep_for(pause_after_tap(*m_cfg));
   return std::nullopt;
+}
+
+std::optional<std::string>
+CcatInterpreter::home_impl(const std::function<bool()> &_should_stop) {
+  if (_should_stop()) {
+    return std::string("stopped");
+  }
+  const int gap_ms = std::max(0, m_cfg->tap_delay_ms);
+  if (!m_adb->home_and_kill_all(gap_ms)) {
+    return std::string(
+        "home: KEYCODE_HOME / dumpsys recents / am force-stop failed");
+  }
+  if (_should_stop()) {
+    return std::string("stopped");
+  }
+  return std::nullopt;
+}
+
+std::filesystem::path
+CcatInterpreter::resolve_script_path(const std::string &_rel) const {
+  std::filesystem::path p(_rel);
+  if (!p.is_absolute()) {
+    p = m_images_base / p;
+  }
+  std::error_code ec;
+  const std::filesystem::path canon =
+      std::filesystem::weakly_canonical(p, ec);
+  return ec ? p.lexically_normal() : canon;
+}
+
+stmt_exec_outcome CcatInterpreter::exec_program_stmts(
+    const Program &_program, const std::function<bool()> &_should_stop) {
+  for (const auto &st : _program.stmts) {
+    stmt_exec_outcome o = exec_stmt(st.get(), _should_stop);
+    if (o.kind == stmt_exec_outcome::tag::returned) {
+      return o;
+    }
+    if (o.kind == stmt_exec_outcome::tag::break_loop) {
+      return stmt_exec_outcome::make_error("break outside loop");
+    }
+    if (!o.is_ok()) {
+      return o;
+    }
+  }
+  return stmt_exec_outcome::make_ok();
+}
+
+std::optional<std::string>
+CcatInterpreter::run_script_impl(const std::string &_rel,
+                                 const std::function<bool()> &_should_stop) {
+  if (_should_stop()) {
+    return std::string("stopped");
+  }
+  if (static_cast<int>(m_run_stack.size()) >= k_run_max_depth) {
+    return std::string("run: max call depth exceeded");
+  }
+
+  const std::filesystem::path abs = resolve_script_path(_rel);
+  for (const auto &frame : m_run_stack) {
+    if (frame == abs) {
+      return std::string("run: cyclic call to ") + abs.string();
+    }
+  }
+
+  if (!std::filesystem::is_regular_file(abs)) {
+    return std::string("run: cannot read ") + abs.string();
+  }
+  const std::string source = read_text_file(abs);
+
+  std::unique_ptr<Program> prog;
+  try {
+    prog = parse_program(source);
+  } catch (const parse_error &ex) {
+    std::ostringstream oss;
+    oss << "run: parse error in " << abs.string() << ": " << ex.what()
+        << " (line " << ex.line << ", col " << ex.col << ")";
+    return oss.str();
+  }
+
+  const std::filesystem::path saved_base = m_images_base;
+  const std::filesystem::path saved_script = m_script_path;
+  m_images_base = abs.parent_path();
+  m_script_path = abs;
+  m_run_stack.push_back(abs);
+
+  stmt_exec_outcome o = exec_program_stmts(*prog, _should_stop);
+
+  m_run_stack.pop_back();
+  m_images_base = saved_base;
+  m_script_path = saved_script;
+
+  if (o.kind == stmt_exec_outcome::tag::returned || o.is_ok()) {
+    return std::nullopt;
+  }
+  if (o.kind == stmt_exec_outcome::tag::stopped) {
+    return std::string("stopped");
+  }
+  return o.message.empty() ? std::string("run: error") : std::move(o.message);
 }
 
 std::optional<std::string> CcatInterpreter::wait_until_impl(
@@ -331,6 +510,19 @@ stmt_exec_outcome ReturnStmt::exec(CcatInterpreter &,
 }
 
 stmt_exec_outcome
+HomeStmt::exec(CcatInterpreter &_interp,
+               const std::function<bool()> &_should_stop) const {
+  return outcome_from_opt(_interp.home_impl(_should_stop));
+}
+
+stmt_exec_outcome
+RunStmt::exec(CcatInterpreter &_interp,
+              const std::function<bool()> &_should_stop) const {
+  return outcome_from_opt(
+      _interp.run_script_impl(script_rel, _should_stop));
+}
+
+stmt_exec_outcome
 TapStmt::exec(CcatInterpreter &_interp,
               const std::function<bool()> &_should_stop) const {
   return outcome_from_opt(_interp.tap_image(image_path, _should_stop));
@@ -375,6 +567,13 @@ stmt_exec_outcome
 TapAtStmt::exec(CcatInterpreter &_interp,
                 const std::function<bool()> &_should_stop) const {
   return outcome_from_opt(_interp.tap_at_impl(nx, ny, _should_stop));
+}
+
+stmt_exec_outcome
+TapOffsetStmt::exec(CcatInterpreter &_interp,
+                    const std::function<bool()> &_should_stop) const {
+  return outcome_from_opt(
+      _interp.tap_offset_impl(image_path, dx, dy, _should_stop));
 }
 
 stmt_exec_outcome
@@ -482,27 +681,24 @@ automation_cycle_result
 CcatInterpreter::run(const Program &_program,
                      const std::function<bool()> &_should_stop) {
   automation_cycle_result r{};
-  for (const auto &st : _program.stmts) {
-    stmt_exec_outcome o = exec_stmt(st.get(), _should_stop);
-    if (o.kind == stmt_exec_outcome::tag::returned) {
-      r.ok = true;
-      r.message = "ok";
-      return r;
-    }
-    if (o.kind == stmt_exec_outcome::tag::break_loop) {
-      r.ok = false;
-      r.message = "break outside loop";
-      return r;
-    }
-    if (!o.is_ok()) {
-      r.ok = false;
-      r.message =
-          o.message.empty() ? std::string("error") : std::move(o.message);
-      return r;
-    }
+  const bool pushed_entry = !m_script_path.empty();
+  if (pushed_entry) {
+    m_run_stack.push_back(m_script_path);
   }
-  r.ok = true;
-  r.message = "ok";
+
+  stmt_exec_outcome o = exec_program_stmts(_program, _should_stop);
+
+  if (pushed_entry && !m_run_stack.empty()) {
+    m_run_stack.pop_back();
+  }
+
+  if (o.kind == stmt_exec_outcome::tag::returned || o.is_ok()) {
+    r.ok = true;
+    r.message = "ok";
+    return r;
+  }
+  r.ok = false;
+  r.message = o.message.empty() ? std::string("error") : std::move(o.message);
   return r;
 }
 

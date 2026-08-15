@@ -1,0 +1,2 @@
+// expect: pass
+log("GATE_PASS") // trailing comment ok in source line? lexer skips // from next line only

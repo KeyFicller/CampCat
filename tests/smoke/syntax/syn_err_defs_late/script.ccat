@@ -1,0 +1,6 @@
+// expect: parse_error: defs must be the first
+
+log("x")
+defs {
+  a = 1
+}

@@ -1,2 +1,0 @@
-// Smoke harness self-check: no UI / templates required.
-log("GATE_PASS")

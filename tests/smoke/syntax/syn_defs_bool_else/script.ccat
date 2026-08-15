@@ -1,0 +1,9 @@
+// expect: pass
+defs {
+  flag = false
+}
+if (flag) {
+  log("GATE_FAIL")
+} else {
+  log("GATE_PASS")
+}
