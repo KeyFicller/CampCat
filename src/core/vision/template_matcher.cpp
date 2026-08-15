@@ -3,6 +3,9 @@
 #include <opencv2/imgcodecs.hpp>
 #include <opencv2/imgproc.hpp>
 
+#include <algorithm>
+#include <cstdio>
+
 namespace campcat {
 
 template_matcher::template_matcher(double _default_threshold, bool _multiscale)
@@ -35,17 +38,15 @@ match_result template_matcher::match_once(const cv::Mat& _screen_bgr,
 
   match_result mr;
   mr.confidence = max_val;
-  if (max_val >= _threshold) {
-    mr.found = true;
-    const int cx =
-        max_loc.x + _templ_bgr.cols / 2 + (_roi.area() > 0 ? _roi.x : 0);
-    const int cy =
-        max_loc.y + _templ_bgr.rows / 2 + (_roi.area() > 0 ? _roi.y : 0);
-    mr.center = {cx, cy};
-    mr.bbox = cv::Rect(max_loc.x + (_roi.area() > 0 ? _roi.x : 0),
-                       max_loc.y + (_roi.area() > 0 ? _roi.y : 0),
-                       _templ_bgr.cols, _templ_bgr.rows);
-  }
+  const int cx =
+      max_loc.x + _templ_bgr.cols / 2 + (_roi.area() > 0 ? _roi.x : 0);
+  const int cy =
+      max_loc.y + _templ_bgr.rows / 2 + (_roi.area() > 0 ? _roi.y : 0);
+  mr.center = {cx, cy};
+  mr.bbox = cv::Rect(max_loc.x + (_roi.area() > 0 ? _roi.x : 0),
+                     max_loc.y + (_roi.area() > 0 ? _roi.y : 0),
+                     _templ_bgr.cols, _templ_bgr.rows);
+  mr.found = max_val >= _threshold;
   return mr;
 }
 
@@ -109,6 +110,26 @@ cv::Mat template_matcher::annotate(const cv::Mat& _screen_bgr,
   }
   cv::rectangle(out, _r.bbox, _color, 2);
   cv::drawMarker(out, _r.center, _color, cv::MARKER_CROSS, 14, 2);
+  return out;
+}
+
+cv::Mat template_matcher::annotate_debug(const cv::Mat &_screen_bgr,
+                                         const match_result &_r) {
+  cv::Mat out = _screen_bgr.clone();
+  const cv::Scalar color =
+      _r.found ? cv::Scalar(0, 255, 0) : cv::Scalar(0, 0, 255);
+  if (_r.bbox.area() > 0) {
+    cv::rectangle(out, _r.bbox, color, 2);
+  }
+  cv::drawMarker(out, _r.center, color, cv::MARKER_CROSS, 20, 2);
+  char buf[96];
+  std::snprintf(buf, sizeof(buf), "%s conf=%.3f @(%d,%d)",
+                _r.found ? "HIT" : "MISS", _r.confidence, _r.center.x,
+                _r.center.y);
+  const int tx = std::max(8, _r.bbox.x);
+  const int ty = std::max(24, _r.bbox.y - 8);
+  cv::putText(out, buf, cv::Point(tx, ty), cv::FONT_HERSHEY_SIMPLEX, 0.8,
+              color, 2);
   return out;
 }
 

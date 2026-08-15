@@ -40,6 +40,11 @@ struct app_config {
   double match_threshold = 0.82;
   bool match_multiscale = false;
 
+  /// When true, dump annotated screencaps for each template match under `match_debug_dir`.
+  bool match_debug = false;
+  /// Relative to `config_home` (e.g. `match_debug`).
+  std::string match_debug_dir = "match_debug";
+
   int max_step_retries = 12;
   int step_retry_interval_ms = 500;
 

@@ -320,12 +320,14 @@ private:
       return parse_home();
     case TokKind::KwRun:
       return parse_run();
+    case TokKind::Dollar:
+      return parse_debug_directive();
     case TokKind::LBrace:
       return parse_block();
     default:
       fail("expected statement (if, tap, wait, log, swipe, tap_at, tap_offset, "
            "swipe_at, wait_until, retry, do, loop, break, return, home, run, "
-           "or block)");
+           "$Debug, or block)");
     }
   }
 
@@ -552,6 +554,25 @@ private:
     expect(TokKind::RParen, "expected ')' after run path");
     auto node = std::make_unique<RunStmt>();
     node->script_rel = std::move(path);
+    return node;
+  }
+
+  std::unique_ptr<DebugStmt> parse_debug_directive() {
+    expect(TokKind::Dollar, "expected '$'");
+    Token name = m_lex.peek();
+    if (name.kind != TokKind::Ident || name.text != "Debug") {
+      fail("expected $Debug On|Off");
+    }
+    (void)m_lex.next();
+    Token flag = m_lex.peek();
+    if (flag.kind != TokKind::Ident ||
+        (flag.text != "On" && flag.text != "Off" && flag.text != "on" &&
+         flag.text != "off")) {
+      fail("expected $Debug On or $Debug Off");
+    }
+    (void)m_lex.next();
+    auto node = std::make_unique<DebugStmt>();
+    node->enabled = (flag.text == "On" || flag.text == "on");
     return node;
   }
 };

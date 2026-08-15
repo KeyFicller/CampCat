@@ -40,6 +40,7 @@ class CcatInterpreter {
   friend struct LoopStmt;
   friend struct HomeStmt;
   friend struct RunStmt;
+  friend struct DebugStmt;
 
 public:
   /**
@@ -90,7 +91,8 @@ private:
    * @return False only when screencap plumbing aborts; unreadable PNG yields *_found=false yet true return.
    */
   bool image_matches(const std::string &_rel_path,
-                     const std::function<bool()> &_should_stop, bool *_found);
+                     const std::function<bool()> &_should_stop, bool *_found,
+                     bool _dump_debug = true);
 
   /**
    * @brief Locate `_rel_path`, tap correlation peak, then honor tap pacing hints from `_cfg`.
@@ -144,12 +146,17 @@ private:
   std::filesystem::path
   resolve_script_path(const std::string &_rel) const;
 
+  void dump_match_debug(const char *_op, const std::filesystem::path &_templ,
+                        const cv::Mat &_screen, const match_result &_r);
+
   adb_client *m_adb;
   const app_config *m_cfg;
   template_matcher m_matcher;
   std::filesystem::path m_images_base;
   std::filesystem::path m_script_path;
   std::vector<std::filesystem::path> m_run_stack;
+  int m_match_debug_seq = 0;
+  bool m_match_debug_enabled = false;
 };
 
 } // namespace ccat_lang

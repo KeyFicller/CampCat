@@ -6,6 +6,8 @@
   "adb_serial": "",
   "match_multiscale": false,
   "match_threshold": 0.7,
+  "match_debug": false,
+  "match_debug_dir": "match_debug",
   "max_step_retries": 12,
   "scheduler": {
     "enabled": true,

@@ -71,6 +71,12 @@ public:
   static cv::Mat annotate(const cv::Mat &_screen_bgr, const match_result &_r,
                           const cv::Scalar &_color);
 
+  /**
+   * @brief Annotate even when below threshold (uses best peak center/bbox).
+   */
+  static cv::Mat annotate_debug(const cv::Mat &_screen_bgr,
+                                const match_result &_r);
+
 private:
   match_result match_once(const cv::Mat &_screen_bgr,
                           const cv::Mat &_templ_bgr, double _threshold,

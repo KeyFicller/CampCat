@@ -195,6 +195,10 @@ Token Lexer::next() {
     advance_cursor();
     m_cur = Token{TokKind::Eq, "=", line, col};
     return m_cur;
+  case '$':
+    advance_cursor();
+    m_cur = Token{TokKind::Dollar, "$", line, col};
+    return m_cur;
   case '"':
     m_cur = lex_string();
     return m_cur;

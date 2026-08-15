@@ -38,6 +38,7 @@ enum class TokKind {
   Semi,
   Comma,
   Eq,
+  Dollar,
   Str,
   Ident,
 };

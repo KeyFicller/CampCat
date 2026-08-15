@@ -7,11 +7,15 @@
 
 #include "core/script/ccat_parser.h"
 
+#include <opencv2/imgcodecs.hpp>
+
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstdio>
 #include <fstream>
 #include <filesystem>
+#include <iomanip>
 #include <sstream>
 #include <stdexcept>
 #include <system_error>
@@ -74,7 +78,8 @@ CcatInterpreter::CcatInterpreter(adb_client *_adb, const app_config *_cfg,
                                  std::filesystem::path _script_path)
     : m_adb(_adb), m_cfg(_cfg), m_matcher(std::move(_matcher)),
       m_images_base(std::move(_images_base)),
-      m_script_path(std::move(_script_path)) {
+      m_script_path(std::move(_script_path)),
+      m_match_debug_enabled(_cfg && _cfg->match_debug) {
   if (!m_adb || !m_cfg) {
     throw std::invalid_argument("CcatInterpreter requires adb and cfg");
   }
@@ -103,7 +108,7 @@ bool CcatInterpreter::capture_screen(
 
 bool CcatInterpreter::image_matches(const std::string &_rel_path,
                                     const std::function<bool()> &_should_stop,
-                                    bool *_found) {
+                                    bool *_found, bool _dump_debug) {
   const auto abs_path = resolve_image_path(_rel_path);
   std::error_code ec;
   if (!std::filesystem::is_regular_file(abs_path, ec)) {
@@ -123,8 +128,50 @@ bool CcatInterpreter::image_matches(const std::string &_rel_path,
     *_found = false;
     return true;
   }
+  if (_dump_debug) {
+    dump_match_debug("if", abs_path, screen, *opt);
+  }
   *_found = opt->found;
   return true;
+}
+
+void CcatInterpreter::dump_match_debug(const char *_op,
+                                       const std::filesystem::path &_templ,
+                                       const cv::Mat &_screen,
+                                       const match_result &_r) {
+  if (!m_cfg || !m_match_debug_enabled || _screen.empty()) {
+    return;
+  }
+  std::filesystem::path dir = m_cfg->match_debug_dir;
+  if (dir.empty()) {
+    dir = "match_debug";
+  }
+  if (!dir.is_absolute()) {
+    dir = m_cfg->config_home / dir;
+  }
+  std::error_code ec;
+  std::filesystem::create_directories(dir, ec);
+
+  const int seq = ++m_match_debug_seq;
+  char conf_buf[32];
+  std::snprintf(conf_buf, sizeof(conf_buf), "%.3f", _r.confidence);
+  std::ostringstream name;
+  name << std::setw(4) << std::setfill('0') << seq << '_' << _op << '_'
+       << _templ.stem().string() << '_' << (_r.found ? "HIT" : "MISS") << "_c"
+       << conf_buf << "_x" << _r.center.x << "_y" << _r.center.y << ".png";
+
+  const cv::Mat annotated = template_matcher::annotate_debug(_screen, _r);
+  const std::filesystem::path out = dir / name.str();
+  if (!cv::imwrite(out.string(), annotated)) {
+    automation_log::emit(std::string("[ccat] match_debug write failed: ") +
+                         out.string());
+    return;
+  }
+  std::ostringstream log;
+  log << "[ccat] match_debug " << _op << ' ' << _templ.filename().string()
+      << (_r.found ? " HIT" : " MISS") << " conf=" << _r.confidence << " at ("
+      << _r.center.x << ',' << _r.center.y << ") -> " << out.string();
+  automation_log::emit(log.str());
 }
 
 std::optional<std::string>
@@ -151,35 +198,16 @@ CcatInterpreter::tap_image(const std::string &_rel_path,
     oss << "tap: unreadable template " << abs_path.string();
     return oss.str();
   }
+  dump_match_debug("tap", abs_path, screen, *opt);
   if (!opt->found) {
     std::ostringstream oss;
     oss << "tap: image not found " << abs_path.string()
-        << " (threshold=" << m_cfg->match_threshold << ")";
+        << " (best=" << opt->confidence
+        << " threshold=" << m_cfg->match_threshold << ")";
     return oss.str();
   }
 
-  cv::Mat screen_tap;
-  if (!capture_screen(&screen_tap, _should_stop)) {
-    if (_should_stop()) {
-      return std::string("stopped");
-    }
-    return std::string("screencap failed before tap verify");
-  }
-  const auto verify =
-      m_matcher.match_file(screen_tap, abs_path.string(), m_cfg->match_threshold);
-  if (!verify.has_value()) {
-    std::ostringstream oss;
-    oss << "tap: unreadable template at tap time " << abs_path.string();
-    return oss.str();
-  }
-  if (!verify->found) {
-    std::ostringstream oss;
-    oss << "tap: image not found at tap time " << abs_path.string()
-        << " (threshold=" << m_cfg->match_threshold << ")";
-    return oss.str();
-  }
-
-  if (!m_adb->tap(verify->center.x, verify->center.y)) {
+  if (!m_adb->tap(opt->center.x, opt->center.y)) {
     return std::string("tap: adb tap failed");
   }
   std::this_thread::sleep_for(pause_after_tap(*m_cfg));
@@ -273,38 +301,25 @@ std::optional<std::string> CcatInterpreter::tap_offset_impl(
     oss << "tap_offset: unreadable template " << abs_path.string();
     return oss.str();
   }
+  dump_match_debug("tap_offset", abs_path, screen, *opt);
   if (!opt->found) {
     std::ostringstream oss;
     oss << "tap_offset: image not found " << abs_path.string()
-        << " (threshold=" << m_cfg->match_threshold << ")";
-    return oss.str();
-  }
-
-  cv::Mat screen_tap;
-  if (!capture_screen(&screen_tap, _should_stop)) {
-    if (_should_stop()) {
-      return std::string("stopped");
-    }
-    return std::string("tap_offset: screencap failed before tap");
-  }
-  const auto verify = m_matcher.match_file(screen_tap, abs_path.string(),
-                                           m_cfg->match_threshold);
-  if (!verify.has_value() || !verify->found) {
-    std::ostringstream oss;
-    oss << "tap_offset: image not found at tap time " << abs_path.string();
+        << " (best=" << opt->confidence
+        << " threshold=" << m_cfg->match_threshold << ")";
     return oss.str();
   }
 
   const int px =
-      verify->center.x +
-      static_cast<int>(std::lround(_dx * static_cast<double>(screen_tap.cols)));
+      opt->center.x +
+      static_cast<int>(std::lround(_dx * static_cast<double>(screen.cols)));
   const int py =
-      verify->center.y +
-      static_cast<int>(std::lround(_dy * static_cast<double>(screen_tap.rows)));
-  if (px < 0 || px >= screen_tap.cols || py < 0 || py >= screen_tap.rows) {
+      opt->center.y +
+      static_cast<int>(std::lround(_dy * static_cast<double>(screen.rows)));
+  if (px < 0 || px >= screen.cols || py < 0 || py >= screen.rows) {
     std::ostringstream oss;
     oss << "tap_offset: point (" << px << "," << py << ") out of screen "
-        << screen_tap.cols << "x" << screen_tap.rows;
+        << screen.cols << "x" << screen.rows;
     return oss.str();
   }
   if (!m_adb->tap(px, py)) {
@@ -455,19 +470,23 @@ std::optional<std::string> CcatInterpreter::wait_until_impl(
       return std::string("stopped");
     }
     if (std::chrono::steady_clock::now() >= deadline) {
+      bool ignored = false;
+      (void)image_matches(_rel_path, _should_stop, &ignored,
+                          /*_dump_debug=*/true);
       std::ostringstream oss;
       oss << "wait_until: timeout after " << _timeout_ms << " ms for "
           << _rel_path;
       return oss.str();
     }
     bool found = false;
-    if (!image_matches(_rel_path, _should_stop, &found)) {
+    if (!image_matches(_rel_path, _should_stop, &found, /*_dump_debug=*/false)) {
       if (_should_stop()) {
         return std::string("stopped");
       }
       return std::string("wait_until: screencap failed");
     }
     if (found) {
+      (void)image_matches(_rel_path, _should_stop, &found, /*_dump_debug=*/true);
       return std::nullopt;
     }
     if (auto sl = cooperative_sleep_ms(50, _should_stop)) {
@@ -513,6 +532,15 @@ stmt_exec_outcome
 HomeStmt::exec(CcatInterpreter &_interp,
                const std::function<bool()> &_should_stop) const {
   return outcome_from_opt(_interp.home_impl(_should_stop));
+}
+
+stmt_exec_outcome
+DebugStmt::exec(CcatInterpreter &_interp,
+                const std::function<bool()> &/*_should_stop*/) const {
+  _interp.m_match_debug_enabled = enabled;
+  automation_log::emit(std::string("[ccat] $Debug ") +
+                       (enabled ? "On" : "Off"));
+  return stmt_exec_outcome::make_ok();
 }
 
 stmt_exec_outcome

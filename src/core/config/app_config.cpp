@@ -28,6 +28,8 @@ void app_config::from_json(const nlohmann::json &_j, app_config &_c) {
   _c.swipe_duration_ms = _j.value("swipe_duration_ms", _c.swipe_duration_ms);
   _c.match_threshold = _j.value("match_threshold", _c.match_threshold);
   _c.match_multiscale = _j.value("match_multiscale", _c.match_multiscale);
+  _c.match_debug = _j.value("match_debug", _c.match_debug);
+  _c.match_debug_dir = _j.value("match_debug_dir", _c.match_debug_dir);
   _c.max_step_retries = _j.value("max_step_retries", _c.max_step_retries);
   _c.step_retry_interval_ms =
       _j.value("step_retry_interval_ms", _c.step_retry_interval_ms);
@@ -72,6 +74,8 @@ nlohmann::json app_config::to_json(const app_config &_c) {
   j["swipe_duration_ms"] = _c.swipe_duration_ms;
   j["match_threshold"] = _c.match_threshold;
   j["match_multiscale"] = _c.match_multiscale;
+  j["match_debug"] = _c.match_debug;
+  j["match_debug_dir"] = _c.match_debug_dir;
   j["max_step_retries"] = _c.max_step_retries;
   j["step_retry_interval_ms"] = _c.step_retry_interval_ms;
 

@@ -134,6 +134,17 @@ struct RunStmt final : Stmt {
 };
 
 /**
+ * @brief Toggle match-debug screenshot dumps (`$Debug On` / `$Debug Off`).
+ */
+struct DebugStmt final : Stmt {
+  bool enabled = false;
+
+  stmt_exec_outcome
+  exec(CcatInterpreter &_interp,
+       const std::function<bool()> &_should_stop) const override;
+};
+
+/**
  * @brief Tap the screen at best template match center (`tap(image)`).
  */
 struct TapStmt final : Stmt {
