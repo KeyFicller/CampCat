@@ -34,7 +34,7 @@
 #include "core/log_buffer.h"
 #include "core/scheduler.h"
 #include "app/template_capture_ui.h"
-#include "games/ccat_script/ccat_script_profile.h"
+#include "ccat_script/ccat_script_profile.h"
 
 namespace {
 

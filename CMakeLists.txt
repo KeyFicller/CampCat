@@ -62,7 +62,7 @@ target_include_directories(imgui_lib PUBLIC
 )
 target_link_libraries(imgui_lib PUBLIC glfw OpenGL::GL)
 
-# Core framework + Dear ImGui shell; game bundles under games/
+# Core framework + Dear ImGui shell + ccat_script driver
 add_library(campcat_core STATIC
   src/core/adb/adb_client.cpp
   src/core/vision/template_matcher.cpp
@@ -75,8 +75,8 @@ add_library(campcat_core STATIC
   src/core/script/ccat_lexer.cpp
   src/core/script/ccat_parser.cpp
   src/core/script/ccat_interpreter.cpp
-  src/games/ccat_script/ccat_script_profile.cpp
-  src/games/ccat_script/ccat_script_automation.cpp
+  src/ccat_script/ccat_script_profile.cpp
+  src/ccat_script/ccat_script_automation.cpp
 )
 target_include_directories(campcat_core PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}/include

@@ -1,4 +1,4 @@
-#include "games/ccat_script/ccat_script_profile.h"
+#include "ccat_script/ccat_script_profile.h"
 
 #include <cctype>
 #include <fstream>

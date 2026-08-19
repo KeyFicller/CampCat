@@ -1,12 +1,12 @@
-#include "games/ccat_script/ccat_script_automation.h"
+#include "ccat_script/ccat_script_automation.h"
 
+#include "ccat_script/ccat_script_profile.h"
 #include "core/adb_client.h"
 #include "core/app_config.h"
 #include "core/automation_log.h"
 #include "core/script/ccat_interpreter.h"
 #include "core/script/ccat_parser.h"
 #include "core/template_matcher.h"
-#include "games/ccat_script/ccat_script_profile.h"
 
 #include <filesystem>
 #include <fstream>
