@@ -4,10 +4,10 @@
   "adb_connect_address": "127.0.0.1:5555",
   "adb_path": "/Applications/MuMuPlayer.app/Contents/MacOS/MuMuEmulator.app/Contents/MacOS/tools/adb",
   "adb_serial": "",
-  "match_multiscale": false,
-  "match_threshold": 0.7,
   "match_debug": false,
   "match_debug_dir": "match_debug",
+  "match_multiscale": false,
+  "match_threshold": 0.7,
   "max_step_retries": 12,
   "scheduler": {
     "enabled": true,

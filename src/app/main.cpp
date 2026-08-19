@@ -302,6 +302,45 @@ int main(int argc, char **argv) {
   ImGuiIO &io = ImGui::GetIO();
   io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
   ImGui::StyleColorsDark();
+  {
+    ImGuiStyle &style = ImGui::GetStyle();
+    style.WindowRounding = 0.0F;
+    style.ChildRounding = 4.0F;
+    style.FrameRounding = 4.0F;
+    style.GrabRounding = 3.0F;
+    style.ScrollbarRounding = 4.0F;
+    style.WindowPadding = ImVec2(10.0F, 10.0F);
+    style.FramePadding = ImVec2(10.0F, 6.0F);
+    style.ItemSpacing = ImVec2(10.0F, 8.0F);
+    style.ItemInnerSpacing = ImVec2(8.0F, 5.0F);
+    ImVec4 *colors = style.Colors;
+    colors[ImGuiCol_WindowBg] = ImVec4(0.09F, 0.10F, 0.11F, 1.0F);
+    colors[ImGuiCol_ChildBg] = ImVec4(0.11F, 0.12F, 0.13F, 1.0F);
+    colors[ImGuiCol_Border] = ImVec4(0.22F, 0.24F, 0.26F, 1.0F);
+    colors[ImGuiCol_FrameBg] = ImVec4(0.16F, 0.17F, 0.19F, 1.0F);
+    colors[ImGuiCol_Button] = ImVec4(0.22F, 0.35F, 0.48F, 1.0F);
+    colors[ImGuiCol_ButtonHovered] = ImVec4(0.28F, 0.44F, 0.58F, 1.0F);
+    colors[ImGuiCol_ButtonActive] = ImVec4(0.18F, 0.30F, 0.42F, 1.0F);
+    colors[ImGuiCol_Header] = ImVec4(0.20F, 0.32F, 0.42F, 0.85F);
+    colors[ImGuiCol_HeaderHovered] = ImVec4(0.26F, 0.40F, 0.52F, 0.95F);
+    colors[ImGuiCol_HeaderActive] = ImVec4(0.22F, 0.36F, 0.48F, 1.0F);
+  }
+
+  ImFont *font_body = io.Fonts->AddFontFromFileTTF(
+      "/System/Library/Fonts/Supplemental/Arial.ttf", 16.0F);
+  ImFont *font_bold = io.Fonts->AddFontFromFileTTF(
+      "/System/Library/Fonts/Supplemental/Arial Bold.ttf", 16.0F);
+  ImFont *font_title = io.Fonts->AddFontFromFileTTF(
+      "/System/Library/Fonts/Supplemental/Arial Bold.ttf", 20.0F);
+  if (font_body == nullptr) {
+    font_body = io.Fonts->AddFontDefault();
+  }
+  if (font_bold == nullptr) {
+    font_bold = font_body;
+  }
+  if (font_title == nullptr) {
+    font_title = font_bold;
+  }
 
   ImGui_ImplGlfw_InitForOpenGL(window, true);
   ImGui_ImplOpenGL3_Init(glsl_version);
@@ -433,16 +472,12 @@ int main(int argc, char **argv) {
         }
         if (!can_save) {
           ImGui::EndDisabled();
-          ImGui::TextDisabled("Set .ccat source path before save");
+          ImGui::TextDisabled("Set a .ccat script path before saving.");
         }
         ImGui::EndMenu();
       }
       ImGui::EndMenuBar();
     }
-
-    ImGui::TextDisabled("%s", cfg_path.string().c_str());
-
-    ImGui::Separator();
 
     {
       std::vector<std::string> drained;
@@ -457,78 +492,129 @@ int main(int argc, char **argv) {
 
     const bool busy_now = cycle_running.load();
     const bool lock_manual_single = busy_now || scheduler.running();
+    const char *status_label = busy_now ? "Running" : "Idle";
 
+    enum class shell_page : int { Run = 0, Script, Settings };
+    static shell_page page = shell_page::Run;
     static double min_th = 0.35;
     static double max_th = 1.0;
 
-    if (ImGui::CollapsingHeader("Shell configuration###cfg_shell_root",
-                                ImGuiTreeNodeFlags_DefaultOpen)) {
-      ImGui::Indent();
-      if (ImGui::CollapsingHeader("Timing & template match###cfg_timing",
-                                  ImGuiTreeNodeFlags_DefaultOpen)) {
-        ImGui::SliderInt("tap_delay_ms", &cfg_view.tap_delay_ms, 40, 800);
-        ImGui::SliderInt("action_gap_ms (min pause between ops)",
-                         &cfg_view.action_gap_ms, 1000, 5000);
-        ImGui::SliderInt("swipe_duration_ms", &cfg_view.swipe_duration_ms, 50,
-                         2000);
-        ImGui::SliderScalar("match_threshold", ImGuiDataType_Double,
-                            &cfg_view.match_threshold, &min_th, &max_th,
-                            "%.3f");
-        ImGui::Checkbox("match_multiscale", &cfg_view.match_multiscale);
-      }
+    auto push_job_snapshot = [&]() {
+      shell_merge_buffer_paths(&cfg_view, cfg_view, adb_path_buf, serial_buf,
+                               adb_connect_buf);
+      std::lock_guard<std::mutex> lk(cfg_mu);
+      cfg = cfg_view;
+      ccat_live = ccat_ui;
+    };
 
-      if (ImGui::CollapsingHeader("ADB###cfg_adb",
-                                  ImGuiTreeNodeFlags_DefaultOpen)) {
-        ImGui::InputText("adb_path", adb_path_buf, IM_ARRAYSIZE(adb_path_buf));
-        ImGui::InputText("adb_serial", serial_buf, IM_ARRAYSIZE(serial_buf));
-        ImGui::InputText("adb_connect_address", adb_connect_buf,
-                         IM_ARRAYSIZE(adb_connect_buf));
+    auto nav_item = [&](const char *label, shell_page target) {
+      const bool selected = (page == target);
+      if (selected) {
+        ImGui::PushStyleColor(ImGuiCol_Button,
+                              ImVec4(0.28F, 0.45F, 0.58F, 1.0F));
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered,
+                              ImVec4(0.32F, 0.50F, 0.64F, 1.0F));
+        ImGui::PushStyleColor(ImGuiCol_ButtonActive,
+                              ImVec4(0.24F, 0.40F, 0.52F, 1.0F));
+      } else {
+        ImGui::PushStyleColor(ImGuiCol_Button,
+                              ImVec4(0.16F, 0.17F, 0.19F, 1.0F));
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered,
+                              ImVec4(0.22F, 0.24F, 0.27F, 1.0F));
+        ImGui::PushStyleColor(ImGuiCol_ButtonActive,
+                              ImVec4(0.20F, 0.22F, 0.25F, 1.0F));
       }
+      ImGui::PushFont(font_bold);
+      if (ImGui::Button(label, ImVec2(-1.0F, 0.0F))) {
+        page = target;
+      }
+      ImGui::PopFont();
+      ImGui::PopStyleColor(3);
+    };
 
-      if (ImGui::CollapsingHeader("Scheduler###cfg_sched",
-                                  ImGuiTreeNodeFlags_DefaultOpen)) {
-        ImGui::Checkbox("scheduler.enabled", &cfg_view.scheduler.enabled);
-        ImGui::SliderInt("interval_s", &cfg_view.scheduler.interval_seconds,
-                         300, 6 * 3600);
-        ImGui::SliderInt("jitter_s", &cfg_view.scheduler.jitter_seconds, 0,
-                         900);
-        ImGui::Checkbox("scheduler.skip_if_busy",
-                        &cfg_view.scheduler.skip_if_busy);
-        if (cfg_view.scheduler.enabled && !scheduler.running()) {
-          ImGui::TextDisabled(
-              "scheduler idle : click run_schedule to arm (not started at "
-              "boot)");
+    constexpr float k_nav_w = 176.0F;
+    constexpr float k_log_h = 220.0F;
+    const float body_h = ImGui::GetContentRegionAvail().y;
+    const float top_h =
+        std::max(120.0F, body_h - k_log_h - ImGui::GetStyle().ItemSpacing.y);
+
+    if (ImGui::BeginTable(
+            "shell_layout", 2,
+            ImGuiTableFlags_BordersInnerV | ImGuiTableFlags_NoPadOuterX |
+                ImGuiTableFlags_SizingStretchProp,
+            ImVec2(-1.0F, top_h))) {
+      ImGui::TableSetupColumn("nav", ImGuiTableColumnFlags_WidthFixed,
+                              k_nav_w);
+      ImGui::TableSetupColumn("content", ImGuiTableColumnFlags_WidthStretch);
+      ImGui::TableNextRow(ImGuiTableRowFlags_None, top_h);
+      ImGui::TableSetColumnIndex(0);
+
+      ImGui::BeginChild("shell_nav", ImVec2(k_nav_w - 8.0F, top_h - 4.0F),
+                        ImGuiChildFlags_Borders);
+      ImGui::Spacing();
+      ImGui::PushFont(font_title);
+      ImGui::TextUnformatted("CampCat");
+      ImGui::PopFont();
+      ImGui::TextDisabled("Shell");
+      ImGui::Spacing();
+      ImGui::Separator();
+      ImGui::Spacing();
+      nav_item("Run", shell_page::Run);
+      nav_item("Script", shell_page::Script);
+      ImGui::Spacing();
+      ImGui::Separator();
+      ImGui::Spacing();
+      nav_item("Settings", shell_page::Settings);
+      ImGui::EndChild();
+
+      ImGui::TableSetColumnIndex(1);
+      ImGui::BeginChild("shell_content", ImVec2(0.0F, top_h - 4.0F),
+                        ImGuiChildFlags_Borders);
+
+      {
+        const char *page_title = "Run";
+        switch (page) {
+        case shell_page::Script:
+          page_title = "Script";
+          break;
+        case shell_page::Settings:
+          page_title = "Settings";
+          break;
+        case shell_page::Run:
+        default:
+          page_title = "Run";
+          break;
         }
-        if (cfg_view.scheduler.enabled && scheduler.running()) {
-          const auto wp = scheduler.tick_wait_progress();
-          if (wp.in_wait_phase && wp.duration_seconds > 0) {
-            const double frac = std::clamp(
-                wp.elapsed_seconds / wp.duration_seconds, 0.0, 1.0);
-            ImGui::ProgressBar(static_cast<float>(frac), ImVec2(-1.0F, 0.0F));
-            ImGui::Text("scheduler - elapsed %.1f s / interval %.1f s",
-                        wp.elapsed_seconds, wp.duration_seconds);
-          } else {
-            ImGui::TextUnformatted(
-                "scheduler - not waiting (immediate tick or tick running)...");
-          }
+        ImGui::PushFont(font_title);
+        ImGui::TextUnformatted(page_title);
+        ImGui::PopFont();
+        ImGui::PushFont(font_bold);
+        {
+          const float status_w = ImGui::CalcTextSize(status_label).x;
+          ImGui::SameLine(ImGui::GetWindowContentRegionMax().x - status_w);
         }
+        if (busy_now) {
+          ImGui::TextColored(ImVec4(0.45F, 0.85F, 0.55F, 1.0F), "%s",
+                             status_label);
+        } else {
+          ImGui::TextDisabled("%s", status_label);
+        }
+        ImGui::PopFont();
+        ImGui::Separator();
+        ImGui::Spacing();
       }
 
-      if (ImGui::CollapsingHeader("Run & schedule###cfg_run",
-                                  ImGuiTreeNodeFlags_DefaultOpen)) {
+      if (page == shell_page::Run) {
+        ImGui::TextWrapped(
+            "Run a single automation cycle, stop the current cycle, or arm "
+            "the scheduler.");
+        ImGui::Spacing();
+
         if (lock_manual_single) {
           ImGui::BeginDisabled();
         }
-
-        auto push_job_snapshot = [&]() {
-          shell_merge_buffer_paths(&cfg_view, cfg_view, adb_path_buf,
-                                   serial_buf, adb_connect_buf);
-          std::lock_guard<std::mutex> lk(cfg_mu);
-          cfg = cfg_view;
-          ccat_live = ccat_ui;
-        };
-
-        if (ImGui::Button("run_single")) {
+        ImGui::PushFont(font_bold);
+        if (ImGui::Button("Run once")) {
           push_job_snapshot();
           run_single_job();
         }
@@ -537,22 +623,19 @@ int main(int argc, char **argv) {
         }
 
         ImGui::SameLine();
-        if (ImGui::Button("stop cycle")) {
+        if (ImGui::Button("Stop")) {
           stop_requested.store(true);
           scheduler.stop();
           append_log("[ui] stop cycle");
         }
 
         ImGui::SameLine();
-        if (ImGui::Button("run_schedule")) {
+        if (ImGui::Button("Start schedule")) {
           cfg_view.scheduler.enabled = true;
-          {
-            push_job_snapshot();
-          }
+          push_job_snapshot();
           std::string err;
-          bool ok_writ =
-              persist_bundle_to_disk(snapshot_cfg(), snapshot_ccat_live(),
-                                     cfg_path, &err);
+          bool ok_writ = persist_bundle_to_disk(
+              snapshot_cfg(), snapshot_ccat_live(), cfg_path, &err);
           if (ok_writ) {
             append_log("[ui] autosaved scheduler flag to " +
                        cfg_path.string());
@@ -561,17 +644,156 @@ int main(int argc, char **argv) {
           }
           refresh_scheduler_locked(true);
         }
+        ImGui::PopFont();
+
+        ImGui::Spacing();
+        ImGui::Separator();
+        ImGui::Spacing();
+
+        ImGui::PushFont(font_bold);
+        ImGui::TextUnformatted("Scheduler");
+        ImGui::PopFont();
+        if (!cfg_view.scheduler.enabled) {
+          ImGui::TextDisabled(
+              "Scheduler is off. Use Start schedule to enable and arm it.");
+        } else if (!scheduler.running()) {
+          ImGui::TextDisabled(
+              "Scheduler is enabled but not armed. Use Start schedule.");
+        } else {
+          const auto wp = scheduler.tick_wait_progress();
+          if (wp.in_wait_phase && wp.duration_seconds > 0) {
+            const double frac = std::clamp(
+                wp.elapsed_seconds / wp.duration_seconds, 0.0, 1.0);
+            ImGui::ProgressBar(static_cast<float>(frac), ImVec2(-1.0F, 0.0F));
+            ImGui::Text("Waiting — %.1f s / %.1f s", wp.elapsed_seconds,
+                        wp.duration_seconds);
+          } else {
+            ImGui::TextUnformatted("Running a cycle…");
+          }
+        }
+      } else if (page == shell_page::Script) {
+        std::vector<std::string> script_ids;
+        script_ids.reserve(cfg_view.script_config_paths.size() + 1);
+        script_ids.push_back("none");
+        for (const auto &kv : cfg_view.script_config_paths) {
+          script_ids.push_back(kv.first);
+        }
+        std::sort(script_ids.begin() + 1, script_ids.end());
+
+        const std::string preview_str =
+            script_display_label(cfg_view.active_script_id);
+        ImGui::TextUnformatted("Active script");
+        ImGui::SetNextItemWidth(-1.0F);
+        if (ImGui::BeginCombo("##active_script", preview_str.c_str())) {
+          for (const std::string &sid : script_ids) {
+            const bool selected = (sid == cfg_view.active_script_id);
+            const auto label_full =
+                script_display_label(sid) + "###sid_" + sid;
+            if (ImGui::Selectable(label_full.c_str(), selected)) {
+              cfg_view.active_script_id = sid;
+              maybe_handle_script_combo_change(cfg_view);
+            }
+            if (selected) {
+              ImGui::SetItemDefaultFocus();
+            }
+          }
+          ImGui::EndCombo();
+        }
+
+        ImGui::Spacing();
+        ImGui::Separator();
+        ImGui::Spacing();
+
+        if (cfg_view.active_script_id == shell_sid::k_ccat_script) {
+          ImGui::TextWrapped(
+              "CampCat uses a .ccat script and a bundle JSON under "
+              "config/scripts/.");
+          ImGui::Spacing();
+
+          if (ImGui::CollapsingHeader("Paths###script_ccat_paths",
+                                      ImGuiTreeNodeFlags_DefaultOpen)) {
+            static char v_src[512]{};
+            std::snprintf(v_src, sizeof(v_src), "%s",
+                          ccat_ui.source_rel.c_str());
+            if (ImGui::InputText("Script path (.ccat, relative to config)",
+                                 v_src, IM_ARRAYSIZE(v_src))) {
+              ccat_ui.source_rel = v_src;
+            }
+            if (!ccat_ui.has_script_source()) {
+              ImGui::TextColored(ImVec4(0.95F, 0.45F, 0.35F, 1.0F),
+                                 "Set a .ccat script path before saving.");
+            }
+            ImGui::TextWrapped(
+                "Resolved script: %s",
+                (cfg_view.config_home / ccat_ui.source_rel).string().c_str());
+            ImGui::TextWrapped(
+                "Template folder: %s",
+                ccat_ui.images_base(cfg_view.config_home).string().c_str());
+          }
+
+          if (ImGui::CollapsingHeader(
+                  "Screenshot crop (ADB)###script_ccat_cap",
+                  ImGuiTreeNodeFlags_DefaultOpen)) {
+            template_capture_draw_panel(cfg_view, &ccat_ui,
+                                        lock_manual_single);
+          }
+        } else {
+          ImGui::TextDisabled("Choose CampCat to edit script paths.");
+        }
+      } else if (page == shell_page::Settings) {
+        ImGui::TextDisabled("%s", cfg_path.string().c_str());
+        ImGui::Spacing();
+
+        if (ImGui::CollapsingHeader("Timing & match###cfg_timing",
+                                    ImGuiTreeNodeFlags_DefaultOpen)) {
+          ImGui::SliderInt("Tap delay (ms)", &cfg_view.tap_delay_ms, 40, 800);
+          ImGui::SliderInt("Action gap (ms)", &cfg_view.action_gap_ms, 1000,
+                           5000);
+          ImGui::SliderInt("Swipe duration (ms)", &cfg_view.swipe_duration_ms,
+                           50, 2000);
+          ImGui::SliderScalar("Match threshold", ImGuiDataType_Double,
+                              &cfg_view.match_threshold, &min_th, &max_th,
+                              "%.3f");
+          ImGui::Checkbox("Multi-scale match", &cfg_view.match_multiscale);
+        }
+
+        if (ImGui::CollapsingHeader("ADB###cfg_adb",
+                                    ImGuiTreeNodeFlags_DefaultOpen)) {
+          ImGui::InputText("ADB path", adb_path_buf,
+                           IM_ARRAYSIZE(adb_path_buf));
+          ImGui::InputText("Device serial", serial_buf,
+                           IM_ARRAYSIZE(serial_buf));
+          ImGui::InputText("Connect address", adb_connect_buf,
+                           IM_ARRAYSIZE(adb_connect_buf));
+        }
+
+        if (ImGui::CollapsingHeader("Scheduler###cfg_sched",
+                                    ImGuiTreeNodeFlags_DefaultOpen)) {
+          ImGui::Checkbox("Enable scheduler", &cfg_view.scheduler.enabled);
+          ImGui::SliderInt("Interval (s)",
+                           &cfg_view.scheduler.interval_seconds, 300,
+                           6 * 3600);
+          ImGui::SliderInt("Jitter (s)", &cfg_view.scheduler.jitter_seconds, 0,
+                           900);
+          ImGui::Checkbox("Skip if busy", &cfg_view.scheduler.skip_if_busy);
+          ImGui::TextDisabled(
+              "Arm the scheduler from the Run page with Start schedule.");
+        }
       }
-      ImGui::Unindent();
+
+      ImGui::EndChild();
+      ImGui::EndTable();
     }
 
+    ImGui::BeginChild("shell_log", ImVec2(0.0F, k_log_h),
+                      ImGuiChildFlags_Borders);
+    ImGui::PushFont(font_bold);
+    ImGui::TextUnformatted("Log");
+    ImGui::PopFont();
+    ImGui::SameLine();
+    ImGui::TextDisabled("Right-click to clear");
     ImGui::Separator();
-
-    ImGui::Columns(2, nullptr, true);
-
-    ImGui::BeginChild("logpane", ImVec2(0, -52), true);
-    ImGui::TextUnformatted("log");
-    ImGui::Separator();
+    ImGui::BeginChild("logpane", ImVec2(0.0F, 0.0F), ImGuiChildFlags_None);
     for (const auto &line : log_scroll) {
       ImGui::TextWrapped("%s", line.c_str());
     }
@@ -580,7 +802,7 @@ int main(int argc, char **argv) {
       ImGui::SetScrollHereY(1.0F);
     }
     if (ImGui::BeginPopupContextWindow("logpane_ctx",
-                                         ImGuiPopupFlags_MouseButtonRight)) {
+                                       ImGuiPopupFlags_MouseButtonRight)) {
       if (ImGui::MenuItem("Clear log")) {
         log_lines.clear();
         log_scroll.clear();
@@ -588,86 +810,7 @@ int main(int argc, char **argv) {
       ImGui::EndPopup();
     }
     ImGui::EndChild();
-
-    ImGui::NextColumn();
-
-    ImGui::BeginChild("scriptpane", ImVec2(0, -52), true);
-    ImGui::TextUnformatted("Script bundle");
-
-    std::vector<std::string> script_ids;
-    script_ids.reserve(cfg_view.script_config_paths.size() + 1);
-    script_ids.push_back("none");
-    for (const auto &kv : cfg_view.script_config_paths) {
-      script_ids.push_back(kv.first);
-    }
-    std::sort(script_ids.begin() + 1, script_ids.end());
-
-    const std::string preview_str =
-        script_display_label(cfg_view.active_script_id);
-    if (ImGui::BeginCombo("script##script_combo_box", preview_str.c_str())) {
-      for (const std::string &sid : script_ids) {
-        const bool selected = (sid == cfg_view.active_script_id);
-        const auto label_full = script_display_label(sid) + "###sid_" + sid;
-        if (ImGui::Selectable(label_full.c_str(), selected)) {
-          cfg_view.active_script_id = sid;
-          maybe_handle_script_combo_change(cfg_view);
-        }
-        if (selected) {
-          ImGui::SetItemDefaultFocus();
-        }
-      }
-      ImGui::EndCombo();
-    }
-
-    ImGui::Separator();
-
-    if (cfg_view.active_script_id == shell_sid::k_ccat_script) {
-      if (ImGui::CollapsingHeader("CampCat bundle###script_ccat_root",
-                                  ImGuiTreeNodeFlags_DefaultOpen)) {
-        ImGui::TextUnformatted(
-            ".ccat script + bundle JSON under config/scripts/.");
-        ImGui::Indent();
-
-        if (ImGui::CollapsingHeader("Paths###script_ccat_paths",
-                                    ImGuiTreeNodeFlags_DefaultOpen)) {
-        static char v_src[512]{};
-        std::snprintf(v_src, sizeof(v_src), "%s",
-                      ccat_ui.source_rel.c_str());
-        if (ImGui::InputText("source (.ccat path relative to config dir)",
-                             v_src, IM_ARRAYSIZE(v_src))) {
-          ccat_ui.source_rel = v_src;
-        }
-        if (!ccat_ui.has_script_source()) {
-          ImGui::TextColored(ImVec4(0.95F, 0.45F, 0.35F, 1.0F),
-                             "Script source required (save disabled).");
-        }
-        ImGui::TextWrapped(
-            "Script path: %s",
-            (cfg_view.config_home / ccat_ui.source_rel).string().c_str());
-        ImGui::TextWrapped(
-            "PNG search directory (same as script folder): %s",
-            ccat_ui.images_base(cfg_view.config_home).string().c_str());
-      }
-
-      if (ImGui::CollapsingHeader("Screenshot crop (ADB)###script_ccat_cap",
-                                  ImGuiTreeNodeFlags_DefaultOpen)) {
-        template_capture_draw_panel(cfg_view, &ccat_ui, lock_manual_single);
-      }
-      ImGui::Unindent();
-      }
-    } else {
-      ImGui::TextDisabled(
-          "Pick a script in the combo to edit its bundle. CampCat: .ccat "
-          "paths and screenshot crop for templates.");
-    }
-
     ImGui::EndChild();
-
-    ImGui::Columns(1);
-
-    ImGui::Separator();
-
-    ImGui::TextUnformatted(busy_now ? "status: working..." : "status: idle");
 
     ImGui::End();
 

@@ -1,14 +1,21 @@
-Mac（及部分 POSIX）下、面向 **Android 模拟器** 的挂机小助手：通过 **ADB 截图 + OpenCV 模板匹配**，由 **CampCat（`.ccat`）脚本** 驱动自动化点击与等待逻辑。
+# CampCat
 
-## 功能概要
+Mac 上跑 Android 模拟器的挂机壳子：ADB 截图 + OpenCV 模板匹配，用 `.ccat` 脚本驱动点击与等待。
 
-- **脚本驱动**：仅保留 `ccat_script`；流程写在 `config/scripts/` 下的 `.ccat`，由 `ccat_script.json` 指定源文件与模板目录。
-- **定时调度**：可配置间隔与可选抖动，周期性执行当前脚本。
-- **Dear ImGui**：ADB、匹配阈值、`scheduler`、`.ccat` 路径可调；「ADB 截图裁剪」把 ROI 存为与脚本同目录的 PNG。未指定脚本路径时禁止 Save。
+## 能干什么
 
-语句含可选顶栏 `defs { name = 字面量 }`（数字 / 字符串 / 布尔，仅在解析该脚本时展开）、`if (模板.png)`、`tap(...)`、`tap_at(x,y)`、`tap_offset(图, dx, dy)`（中心 + 整屏归一化偏移）、`wait(毫秒)`、`wait_until(...)`、`loop` / `do…while`、`break`、`return`、`home`（回桌面并对近期任务 `am force-stop`）、`run("其它.ccat")`（相对当前脚本目录，可用 `..`）、`$Debug On` / `$Debug Off`（匹配调试截图）、`retry`、`log(...)` 及 `{ ... }` 块等。
+- **脚本自动化**：流程写在 `config/scripts/*.ccat`；`if` / `tap` / `tap_offset` / `swipe` / `wait` / `loop` / `retry` / `home` / `run("…")` 等。
+- **定时调度**：间隔 + 抖动，周期跑当前脚本。
+- **ImGui 壳**：Run / Script / Settings + 底部常驻 Log；调 ADB、匹配参数、脚本路径；截图裁 ROI 存成与脚本同目录的 PNG。
 
-## 依赖
+## 构建
 
-- **OpenCV**（建议 Homebrew：`brew install opencv`）。若 CMake 找不到 OpenCV，可指定：`cmake .. -DOpenCV_DIR=/opt/homebrew/lib/cmake/opencv4`。
-- **GLFW、Dear ImGui、nlohmann/json** 由 CMake `FetchContent` 自动拉取。
+依赖：Homebrew OpenCV；GLFW / ImGui / nlohmann/json 由 CMake 拉取。
+
+```bash
+cmake -S . -B build -DOpenCV_DIR=/opt/homebrew/lib/cmake/opencv4
+cmake --build build --target campcat
+./build/campcat
+```
+
+离线语法冒烟：`ctest --test-dir build -R ccat_syntax`
