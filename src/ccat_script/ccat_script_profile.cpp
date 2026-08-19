@@ -53,7 +53,7 @@ ccat_script_profile::images_base(const std::filesystem::path &_config_home) cons
 ccat_script_profile ccat_script_profile::defaults() {
   ccat_script_profile p;
   p.version = 1;
-  p.source_rel = "scripts/demo.ccat";
+  p.source_rel.clear();
   return p;
 }
 

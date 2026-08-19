@@ -34,6 +34,7 @@
 #include "core/log_buffer.h"
 #include "core/scheduler.h"
 #include "app/template_capture_ui.h"
+#include "app/native_file_dialog.h"
 #include "ccat_script/ccat_script_profile.h"
 
 namespace {
@@ -715,10 +716,52 @@ int main(int argc, char **argv) {
             static char v_src[512]{};
             std::snprintf(v_src, sizeof(v_src), "%s",
                           ccat_ui.source_rel.c_str());
-            if (ImGui::InputText("Script path (.ccat, relative to config)",
-                                 v_src, IM_ARRAYSIZE(v_src))) {
+            ImGui::SetNextItemWidth(
+                ImGui::GetContentRegionAvail().x - 88.0F);
+            if (ImGui::InputText("##script_path_ccat", v_src,
+                                 IM_ARRAYSIZE(v_src))) {
               ccat_ui.source_rel = v_src;
             }
+            ImGui::SameLine();
+            if (ImGui::Button("Browse##script_path_ccat", ImVec2(80.0F, 0.0F))) {
+              std::filesystem::path start = cfg_view.config_home / "scripts";
+              if (ccat_ui.has_script_source()) {
+                const auto resolved =
+                    cfg_view.config_home / ccat_ui.source_rel;
+                const auto parent = resolved.parent_path();
+                if (!parent.empty()) {
+                  start = parent;
+                }
+              }
+              std::error_code ec;
+              if (!std::filesystem::is_directory(start, ec)) {
+                start = cfg_view.config_home;
+              }
+              auto picked = campcat::pick_open_file(
+                  start, "ccat", "Select CampCat script");
+              if (picked) {
+                std::error_code rel_ec;
+                const auto home_canon = std::filesystem::weakly_canonical(
+                    cfg_view.config_home, rel_ec);
+                const auto file_canon =
+                    std::filesystem::weakly_canonical(*picked, rel_ec);
+                const auto rel = std::filesystem::relative(
+                    file_canon, home_canon, rel_ec);
+                if (rel_ec || rel.empty() ||
+                    (!rel.begin()->empty() && *rel.begin() == "..")) {
+                  append_log(
+                      "[ui] pick a .ccat file under the config directory: " +
+                      cfg_view.config_home.string());
+                } else {
+                  ccat_ui.source_rel = rel.generic_string();
+                  std::snprintf(v_src, sizeof(v_src), "%s",
+                                ccat_ui.source_rel.c_str());
+                  append_log("[ui] script path: " + ccat_ui.source_rel);
+                }
+              }
+            }
+            ImGui::TextDisabled(
+                "Script path (.ccat, relative to config)");
             if (!ccat_ui.has_script_source()) {
               ImGui::TextColored(ImVec4(0.95F, 0.45F, 0.35F, 1.0F),
                                  "Set a .ccat script path before saving.");

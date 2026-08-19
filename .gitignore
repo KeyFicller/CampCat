@@ -7,7 +7,6 @@ compile_commands.json
 imgui.ini
 /.vscode
 /config/scripts/
-!/config/scripts/demo.ccat
 /config/match_debug
 /.summary
 /docs

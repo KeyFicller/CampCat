@@ -46,6 +46,19 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(json)
 
+# Header-only native file dialogs (Win / macOS / Linux).
+# Their CMakeLists still declares an old cmake_minimum_required; force policy floor.
+set(CMAKE_POLICY_VERSION_MINIMUM 3.5)
+FetchContent_Declare(
+  portable_file_dialogs
+  GIT_REPOSITORY https://github.com/samhocevar/portable-file-dialogs.git
+  GIT_TAG        c12ea8c9a727f5320a2b4570aee863bbede2a204
+  GIT_SHALLOW    TRUE
+  GIT_PROGRESS   TRUE
+  GIT_SUBMODULES ""
+)
+FetchContent_MakeAvailable(portable_file_dialogs)
+
 find_package(OpenGL REQUIRED)
 
 add_library(imgui_lib STATIC
@@ -90,8 +103,12 @@ target_link_libraries(campcat_core PUBLIC
 add_executable(campcat
   src/app/main.cpp
   src/app/template_capture_ui.cpp
+  src/app/native_file_dialog.cpp
 )
-target_include_directories(campcat PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_include_directories(campcat PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}/include
+  ${portable_file_dialogs_SOURCE_DIR}
+)
 target_link_libraries(campcat PRIVATE campcat_core imgui_lib glfw OpenGL::GL)
 
 if(APPLE)

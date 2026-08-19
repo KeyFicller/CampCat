@@ -51,7 +51,7 @@ struct ccat_script_profile final : automation_profile {
   bool has_script_source() const;
 
   /**
-   * @brief Factory defaults mirroring repository sample layout (`scripts/demo.ccat`).
+   * @brief Factory defaults (empty script path until the user sets one).
    */
   static ccat_script_profile defaults();
 
