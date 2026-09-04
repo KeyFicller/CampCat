@@ -6,7 +6,8 @@ Mac 上跑 Android 模拟器的挂机壳子：ADB 截图 + OpenCV 模板匹配�
 
 - **脚本自动化**：流程写在 `config/scripts/*.ccat`；语法见 [CCAT.md](CCAT.md)。
 - **定时调度**：间隔 + 抖动，周期跑当前脚本。
-- **ImGui 壳**：Run / Script / Settings + 底部常驻 Log；调 ADB、匹配参数、脚本路径；截图裁 ROI 存成与脚本同目录的 PNG。
+- **Console**：ImGui 内交互输入 `.ccat` 片段（`>>>` / `...` 多行），真机执行；与 cycle 互斥。
+- **ImGui 壳**：Run / Script / Console / Settings + 底部常驻 Log；调 ADB、匹配参数、脚本路径；截图裁 ROI 存成与脚本同目录的 PNG。
 
 ## 构建
 

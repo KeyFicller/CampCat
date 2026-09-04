@@ -11,11 +11,27 @@ find_package(OpenCV REQUIRED COMPONENTS core imgproc imgcodecs)
 
 include(FetchContent)
 
+# GitHub often unreachable; prefix FetchContent clones via a mirror.
+# Direct:  cmake -DGITHUB_MIRROR=
+# Alts:    https://ghproxy.net/https://github.com
+#          https://hub.gitmirror.com/https://github.com
+set(GITHUB_MIRROR "https://ghfast.top/https://github.com" CACHE STRING
+  "Prefix for GitHub FetchContent URLs (empty = https://github.com)")
+
+function(campcat_github_url out_var repo_path)
+  if(GITHUB_MIRROR STREQUAL "")
+    set(${out_var} "https://github.com/${repo_path}" PARENT_SCOPE)
+  else()
+    set(${out_var} "${GITHUB_MIRROR}/${repo_path}" PARENT_SCOPE)
+  endif()
+endfunction()
+
 # Shallow clones: full histories made imgui/json .git dirs ~250MB each and
 # re-cloning missing glfw-src dominated configure time.
+campcat_github_url(_glfw_git glfw/glfw.git)
 FetchContent_Declare(
   glfw
-  GIT_REPOSITORY https://github.com/glfw/glfw.git
+  GIT_REPOSITORY ${_glfw_git}
   GIT_TAG        3.4
   GIT_SHALLOW    TRUE
   GIT_PROGRESS   TRUE
@@ -26,9 +42,10 @@ set(GLFW_BUILD_TESTS OFF CACHE BOOL "" FORCE)
 set(GLFW_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
 FetchContent_MakeAvailable(glfw)
 
+campcat_github_url(_imgui_git ocornut/imgui.git)
 FetchContent_Declare(
   imgui
-  GIT_REPOSITORY https://github.com/ocornut/imgui.git
+  GIT_REPOSITORY ${_imgui_git}
   GIT_TAG        v1.91.8
   GIT_SHALLOW    TRUE
   GIT_PROGRESS   TRUE
@@ -36,9 +53,10 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(imgui)
 
+campcat_github_url(_json_git nlohmann/json.git)
 FetchContent_Declare(
   json
-  GIT_REPOSITORY https://github.com/nlohmann/json.git
+  GIT_REPOSITORY ${_json_git}
   GIT_TAG        v3.11.3
   GIT_SHALLOW    TRUE
   GIT_PROGRESS   TRUE
@@ -49,9 +67,10 @@ FetchContent_MakeAvailable(json)
 # Header-only native file dialogs (Win / macOS / Linux).
 # Their CMakeLists still declares an old cmake_minimum_required; force policy floor.
 set(CMAKE_POLICY_VERSION_MINIMUM 3.5)
+campcat_github_url(_pfd_git samhocevar/portable-file-dialogs.git)
 FetchContent_Declare(
   portable_file_dialogs
-  GIT_REPOSITORY https://github.com/samhocevar/portable-file-dialogs.git
+  GIT_REPOSITORY ${_pfd_git}
   GIT_TAG        c12ea8c9a727f5320a2b4570aee863bbede2a204
   GIT_SHALLOW    TRUE
   GIT_PROGRESS   TRUE
@@ -88,8 +107,10 @@ add_library(campcat_core STATIC
   src/core/script/ccat_lexer.cpp
   src/core/script/ccat_parser.cpp
   src/core/script/ccat_interpreter.cpp
+  src/core/script/ccat_repl.cpp
   src/ccat_script/ccat_script_profile.cpp
   src/ccat_script/ccat_script_automation.cpp
+  src/ccat_script/ccat_program_runner.cpp
 )
 target_include_directories(campcat_core PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}/include
@@ -140,3 +161,11 @@ add_test(
           --cases-dir ${CMAKE_SOURCE_DIR}/tests/smoke/syntax
 )
 set_tests_properties(ccat_syntax PROPERTIES WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+
+add_executable(ccat_repl_test
+  src/tools/ccat_repl_test.cpp
+)
+target_include_directories(ccat_repl_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_link_libraries(ccat_repl_test PRIVATE campcat_core)
+
+add_test(NAME ccat_repl COMMAND ccat_repl_test)

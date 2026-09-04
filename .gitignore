@@ -1,4 +1,6 @@
 /build
+/build-release
+/build-repl
 /cmake-build-*
 /.cache
 compile_commands.json
@@ -11,3 +13,5 @@ imgui.ini
 /.summary
 /docs
 /tests/smoke/user
+
+.worktrees/

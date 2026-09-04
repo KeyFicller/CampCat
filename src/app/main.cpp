@@ -36,6 +36,9 @@
 #include "app/template_capture_ui.h"
 #include "app/native_file_dialog.h"
 #include "ccat_script/ccat_script_profile.h"
+#include "ccat_script/ccat_program_runner.h"
+#include "core/script/ccat_parser.h"
+#include "core/script/ccat_repl.h"
 
 namespace {
 
@@ -235,6 +238,47 @@ int main(int argc, char **argv) {
          ccat_bundle = std::move(std::get<1>(snap))]() mutable {
           run_automation_thread_body(std::move(shell),
                                      std::move(ccat_bundle));
+        });
+  };
+
+  campcat::ccat_lang::CcatRepl console_repl;
+  char console_input[1024] = {};
+
+  auto run_console_source_job = [&](std::string source) {
+    if (!acquire_cycle(cycle_running)) {
+      append_log("[console] busy");
+      return;
+    }
+    stop_requested.store(false);
+    if (worker_thread.joinable()) {
+      worker_thread.join();
+    }
+    auto snap = capture_bundle_snapshot();
+    worker_thread = std::thread(
+        [&, source = std::move(source),
+         shell = std::move(std::get<0>(snap)),
+         ccat_bundle = std::move(std::get<1>(snap))]() mutable {
+          try {
+            campcat::adb_client adb(shell.adb_path, shell.adb_serial);
+            std::string co, ce;
+            adb.connect_remote(shell.adb_connect_address, 15000, &co, &ce);
+            auto prog = campcat::ccat_lang::parse_program(source);
+            const auto images = ccat_bundle.images_base(shell.config_home);
+            std::filesystem::path script_abs = ccat_bundle.script_path_absolute;
+            if (script_abs.empty()) {
+              script_abs = shell.config_home / ccat_bundle.source_rel;
+            }
+            const auto should_stop = [&]() { return stop_requested.load(); };
+            const auto res = campcat::run_ccat_program(
+                &adb, &shell, images, script_abs, *prog, should_stop);
+            append_log(std::string("[console] ok=") +
+                       (res.ok ? "true" : "false") + " | " + res.message);
+          } catch (const campcat::ccat_lang::parse_error &ex) {
+            append_log(std::string("[console] parse error: ") + ex.what());
+          } catch (const std::exception &ex) {
+            append_log(std::string("[console] exception: ") + ex.what());
+          }
+          release_cycle(cycle_running);
         });
   };
 
@@ -495,7 +539,7 @@ int main(int argc, char **argv) {
     const bool lock_manual_single = busy_now || scheduler.running();
     const char *status_label = busy_now ? "Running" : "Idle";
 
-    enum class shell_page : int { Run = 0, Script, Settings };
+    enum class shell_page : int { Run = 0, Script, Console, Settings };
     static shell_page page = shell_page::Run;
     static double min_th = 0.35;
     static double max_th = 1.0;
@@ -562,6 +606,7 @@ int main(int argc, char **argv) {
       ImGui::Spacing();
       nav_item("Run", shell_page::Run);
       nav_item("Script", shell_page::Script);
+      nav_item("Console", shell_page::Console);
       ImGui::Spacing();
       ImGui::Separator();
       ImGui::Spacing();
@@ -577,6 +622,9 @@ int main(int argc, char **argv) {
         switch (page) {
         case shell_page::Script:
           page_title = "Script";
+          break;
+        case shell_page::Console:
+          page_title = "Console";
           break;
         case shell_page::Settings:
           page_title = "Settings";
@@ -666,10 +714,10 @@ int main(int argc, char **argv) {
             const double frac = std::clamp(
                 wp.elapsed_seconds / wp.duration_seconds, 0.0, 1.0);
             ImGui::ProgressBar(static_cast<float>(frac), ImVec2(-1.0F, 0.0F));
-            ImGui::Text("Waiting — %.1f s / %.1f s", wp.elapsed_seconds,
+            ImGui::Text("Waiting - %.1f s / %.1f s", wp.elapsed_seconds,
                         wp.duration_seconds);
           } else {
-            ImGui::TextUnformatted("Running a cycle…");
+            ImGui::TextUnformatted("Running a cycle...");
           }
         }
       } else if (page == shell_page::Script) {
@@ -782,6 +830,81 @@ int main(int argc, char **argv) {
           }
         } else {
           ImGui::TextDisabled("Choose CampCat to edit script paths.");
+        }
+      } else if (page == shell_page::Console) {
+        ImGui::TextWrapped(
+            "Interactive .ccat console. Multiline uses ... until braces/parens "
+            "balance. Disabled while a cycle is running.");
+        ImGui::Spacing();
+
+        ImGui::BeginChild(
+            "console_history",
+            ImVec2(0.0F, -ImGui::GetFrameHeightWithSpacing() * 2.5F),
+            ImGuiChildFlags_Borders);
+        for (const auto &line : console_repl.history) {
+          ImGui::TextUnformatted(line.c_str());
+        }
+        if (ImGui::GetScrollY() >= ImGui::GetScrollMaxY()) {
+          ImGui::SetScrollHereY(1.0F);
+        }
+        ImGui::EndChild();
+
+        if (busy_now) {
+          ImGui::TextColored(ImVec4(0.9F, 0.6F, 0.2F, 1.0F),
+                             "cycle running - console locked");
+          ImGui::BeginDisabled();
+        }
+
+        ImGui::TextUnformatted(console_repl.prompt());
+        ImGui::SameLine();
+        ImGui::SetNextItemWidth(-80.0F);
+        const bool submit = ImGui::InputText(
+            "##console_in", console_input, sizeof(console_input),
+            ImGuiInputTextFlags_EnterReturnsTrue);
+        // Must run immediately after InputText; later widgets would steal -1.
+        if (submit && !busy_now) {
+          ImGui::SetKeyboardFocusHere(-1);
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Clear")) {
+          console_repl.clear();
+          console_repl.history.push_back("(cleared)");
+        }
+
+        if (ImGui::IsKeyPressed(ImGuiKey_Escape)) {
+          console_repl.clear();
+        }
+
+        if (busy_now) {
+          ImGui::EndDisabled();
+        }
+
+        if (submit && !busy_now) {
+          const auto fr = console_repl.feed_line(console_input);
+          console_input[0] = '\0';
+          if (fr == campcat::ccat_lang::repl_feed_result::ready) {
+            if (!ccat_ui.has_script_source()) {
+              console_repl.history.push_back(
+                  "need .ccat path for images_base");
+              append_log("[console] need .ccat path for images_base");
+              console_repl.clear();
+            } else {
+              try {
+                (void)campcat::ccat_lang::parse_program(console_repl.pending);
+                push_job_snapshot();
+                run_console_source_job(console_repl.pending);
+                console_repl.clear();
+              } catch (const campcat::ccat_lang::parse_error &ex) {
+                const std::string msg =
+                    std::string("parse error: ") + ex.what() + " (line " +
+                    std::to_string(ex.line) + ", col " +
+                    std::to_string(ex.col) + ")";
+                console_repl.history.push_back(msg);
+                append_log(std::string("[console] ") + msg);
+                console_repl.clear();
+              }
+            }
+          }
         }
       } else if (page == shell_page::Settings) {
         ImGui::TextDisabled("%s", cfg_path.string().c_str());
