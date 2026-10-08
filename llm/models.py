@@ -12,6 +12,10 @@ from pathlib import Path
 DEFAULT_PROVIDER = "deepseek"
 DEFAULT_SYSTEM_PROMPT = "You describe what is shown in the screenshot concisely."
 DEFAULT_MAX_TOKENS = 1024
+DEFAULT_CONTEXT_TOKENS = 32000
+# Measured: a 1080x2400 emulator screenshot costs ~985 input tokens. The
+# summarization counter never sees the image bytes, so it needs this constant.
+TOKENS_PER_IMAGE = 950
 
 # Per-provider fallbacks for the settings that differ between them.
 PROVIDER_DEFAULTS = {
@@ -62,6 +66,24 @@ def _setting(name: str, provider_default: str) -> str:
 
 def system_prompt() -> str:
     return _env("CAMPCAT_LLM_SYSTEM_PROMPT") or DEFAULT_SYSTEM_PROMPT
+
+
+def context_tokens() -> int:
+    """Input-token budget for the conversation.
+
+    Older turns are summarized only once the request exceeds this. Falls back
+    to the default when the value is missing, non-numeric, or implausibly
+    small, so a bad env var can never disable summarization entirely.
+    """
+    raw = _env("CAMPCAT_LLM_CONTEXT_TOKENS")
+    if raw:
+        try:
+            value = int(raw)
+        except ValueError:
+            return DEFAULT_CONTEXT_TOKENS
+        if value >= 1000:
+            return value
+    return DEFAULT_CONTEXT_TOKENS
 
 
 def build_chat_model():

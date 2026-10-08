@@ -37,6 +37,7 @@
 #include "core/scheduler.h"
 #include "app/template_capture_ui.h"
 #include "app/llm_ui.h"
+#include "app/macos_ime.h"
 #include "app/native_file_dialog.h"
 #include "ccat_script/ccat_script_profile.h"
 #include "ccat_script/ccat_program_runner.h"
@@ -392,24 +393,72 @@ int main(int argc, char **argv) {
     colors[ImGuiCol_HeaderActive] = ImVec4(0.22F, 0.36F, 0.48F, 1.0F);
   }
 
-  ImFont *font_body = io.Fonts->AddFontFromFileTTF(
-      "/System/Library/Fonts/Supplemental/Arial.ttf", 16.0F);
-  ImFont *font_bold = io.Fonts->AddFontFromFileTTF(
-      "/System/Library/Fonts/Supplemental/Arial Bold.ttf", 16.0F);
-  ImFont *font_title = io.Fonts->AddFontFromFileTTF(
-      "/System/Library/Fonts/Supplemental/Arial Bold.ttf", 20.0F);
+  // Every UI font is one family: Arial for Latin, with the same CJK face merged
+  // in so Chinese never lands on a font that lacks it. Sizes and weights stay
+  // per-use (16 body, 16 bold, 20 titles).
+  static const struct {
+    const char *path;
+    int face;
+  } cjk_fonts[] = {
+      {"/System/Library/Fonts/Hiragino Sans GB.ttc", 0},
+      {"/System/Library/Fonts/Supplemental/Arial Unicode.ttf", 0},
+  };
+
+  // MergeMode appends to the font added just before it, so each merge is issued
+  // right after its own base font. AddFontFromFileTTF asserts on a missing file,
+  // so the CJK candidate is probed first. The full set (~21k hanzi) costs a few
+  // tens of MB of atlas, but the 2500 common set left replies drawing "?" for
+  // everyday words ("screen" is U+5C4F, outside it).
+  //
+  // `_cjk` is false for the 20px title only: the full set at 20px doubles the
+  // atlas to 4096x16384 (+320 MB RSS, +128 MB VRAM) for strings that are all
+  // ASCII today. A Chinese title would draw "?"; add the merge then if it
+  // becomes worth that.
+  auto load_font = [&io](const char *_path, float _size,
+                         bool _cjk) -> ImFont * {
+    ImFont *font = io.Fonts->AddFontFromFileTTF(_path, _size);
+    if (font == nullptr || !_cjk) {
+      return font;
+    }
+    for (const auto &cjk : cjk_fonts) {
+      std::error_code ec;
+      if (!std::filesystem::exists(cjk.path, ec)) {
+        continue;
+      }
+      ImFontConfig merge;
+      merge.MergeMode = true; // add to that font instead of replacing it
+      merge.FontNo = cjk.face; // a .ttc holds several faces
+      io.Fonts->AddFontFromFileTTF(cjk.path, _size, &merge,
+                                   io.Fonts->GetGlyphRangesChineseFull());
+      break;
+    }
+    return font;
+  };
+
+  ImFont *font_body =
+      load_font("/System/Library/Fonts/Supplemental/Arial.ttf", 16.0F, true);
   if (font_body == nullptr) {
     font_body = io.Fonts->AddFontDefault();
   }
+  ImFont *font_bold = load_font(
+      "/System/Library/Fonts/Supplemental/Arial Bold.ttf", 16.0F, true);
   if (font_bold == nullptr) {
     font_bold = font_body;
   }
+  ImFont *font_title = load_font(
+      "/System/Library/Fonts/Supplemental/Arial Bold.ttf", 20.0F, false);
   if (font_title == nullptr) {
     font_title = font_bold;
   }
+  llm_ui_set_bold_font(font_bold);
 
   ImGui_ImplGlfw_InitForOpenGL(window, true);
   ImGui_ImplOpenGL3_Init(glsl_version);
+#if defined(__APPLE__)
+  // GLFW pins the IME candidate window to the content view origin; this points
+  // it at the caret ImGui publishes instead.
+  macos_ime_attach(window);
+#endif
 
   append_log("[ui] cfg=" + cfg_path.string());
   append_log("[ui] script combo: switching logs that script snapshot to the "
@@ -597,25 +646,24 @@ int main(int argc, char **argv) {
       ImGui::PopStyleColor(3);
     };
 
-    constexpr float k_nav_w = 176.0F;
-    constexpr float k_log_h = 220.0F;
+    constexpr float k_left_w = 320.0F;
+    static bool log_open = true;
     const float body_h = ImGui::GetContentRegionAvail().y;
-    const float top_h =
-        std::max(120.0F, body_h - k_log_h - ImGui::GetStyle().ItemSpacing.y);
 
     if (ImGui::BeginTable(
             "shell_layout", 2,
             ImGuiTableFlags_BordersInnerV | ImGuiTableFlags_NoPadOuterX |
+                ImGuiTableFlags_Resizable |
                 ImGuiTableFlags_SizingStretchProp,
-            ImVec2(-1.0F, top_h))) {
-      ImGui::TableSetupColumn("nav", ImGuiTableColumnFlags_WidthFixed,
-                              k_nav_w);
+            ImVec2(-1.0F, body_h))) {
+      ImGui::TableSetupColumn("left", ImGuiTableColumnFlags_WidthFixed,
+                              k_left_w);
       ImGui::TableSetupColumn("content", ImGuiTableColumnFlags_WidthStretch);
-      ImGui::TableNextRow(ImGuiTableRowFlags_None, top_h);
+      ImGui::TableNextRow(ImGuiTableRowFlags_None, body_h);
       ImGui::TableSetColumnIndex(0);
 
-      ImGui::BeginChild("shell_nav", ImVec2(k_nav_w - 8.0F, top_h - 4.0F),
-                        ImGuiChildFlags_Borders);
+      ImGui::BeginChild("shell_nav", ImVec2(0.0F, 0.0F),
+                        ImGuiChildFlags_Borders | ImGuiChildFlags_AutoResizeY);
       ImGui::Spacing();
       ImGui::PushFont(font_title);
       ImGui::TextUnformatted("CampCat");
@@ -633,8 +681,43 @@ int main(int argc, char **argv) {
       nav_item("Settings", shell_page::Settings);
       ImGui::EndChild();
 
+      // Negative height consumes whatever the nav block left in the column;
+      // collapsed, the box shrinks to its header instead.
+      ImGui::BeginChild(
+          "shell_log",
+          ImVec2(0.0F,
+                 log_open ? -ImGui::GetStyle().ItemSpacing.y : 0.0F),
+          ImGuiChildFlags_Borders |
+              (log_open ? 0 : ImGuiChildFlags_AutoResizeY));
+      ImGui::PushFont(font_bold);
+      if (ImGui::Button(log_open ? "[-] Log" : "[+] Log")) {
+        log_open = !log_open;
+      }
+      ImGui::PopFont();
+      ImGui::Separator();
+      if (log_open) {
+        ImGui::BeginChild("logpane", ImVec2(0.0F, 0.0F), ImGuiChildFlags_None);
+        for (const auto &line : log_scroll) {
+          ImGui::TextWrapped("%s", line.c_str());
+        }
+        if (!log_scroll.empty() &&
+            ImGui::GetScrollY() >= ImGui::GetScrollMaxY() - 20.0F) {
+          ImGui::SetScrollHereY(1.0F);
+        }
+        if (ImGui::BeginPopupContextWindow("logpane_ctx",
+                                           ImGuiPopupFlags_MouseButtonRight)) {
+          if (ImGui::MenuItem("Clear log")) {
+            log_lines.clear();
+            log_scroll.clear();
+          }
+          ImGui::EndPopup();
+        }
+        ImGui::EndChild();
+      }
+      ImGui::EndChild();
+
       ImGui::TableSetColumnIndex(1);
-      ImGui::BeginChild("shell_content", ImVec2(0.0F, top_h - 4.0F),
+      ImGui::BeginChild("shell_content", ImVec2(0.0F, 0.0F),
                         ImGuiChildFlags_Borders);
 
       {
@@ -976,33 +1059,6 @@ int main(int argc, char **argv) {
       ImGui::EndChild();
       ImGui::EndTable();
     }
-
-    ImGui::BeginChild("shell_log", ImVec2(0.0F, k_log_h),
-                      ImGuiChildFlags_Borders);
-    ImGui::PushFont(font_bold);
-    ImGui::TextUnformatted("Log");
-    ImGui::PopFont();
-    ImGui::SameLine();
-    ImGui::TextDisabled("Right-click to clear");
-    ImGui::Separator();
-    ImGui::BeginChild("logpane", ImVec2(0.0F, 0.0F), ImGuiChildFlags_None);
-    for (const auto &line : log_scroll) {
-      ImGui::TextWrapped("%s", line.c_str());
-    }
-    if (!log_scroll.empty() &&
-        ImGui::GetScrollY() >= ImGui::GetScrollMaxY() - 20.0F) {
-      ImGui::SetScrollHereY(1.0F);
-    }
-    if (ImGui::BeginPopupContextWindow("logpane_ctx",
-                                       ImGuiPopupFlags_MouseButtonRight)) {
-      if (ImGui::MenuItem("Clear log")) {
-        log_lines.clear();
-        log_scroll.clear();
-      }
-      ImGui::EndPopup();
-    }
-    ImGui::EndChild();
-    ImGui::EndChild();
 
     ImGui::End();
 

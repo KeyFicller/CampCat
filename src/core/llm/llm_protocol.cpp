@@ -49,11 +49,22 @@ std::string base64_encode(const unsigned char *_data, std::size_t _len) {
   return out;
 }
 
-std::string build_describe_request(std::string_view _image_b64, long _id) {
+std::string build_describe_request(std::string_view _image_b64, long _id,
+                                   std::string_view _text) {
   nlohmann::json j;
   j["type"] = "describe";
   j["id"] = _id;
   j["image_b64"] = std::string(_image_b64);
+  if (!_text.empty()) {
+    j["text"] = std::string(_text);
+  }
+  return j.dump();
+}
+
+std::string build_reset_request(long _id) {
+  nlohmann::json j;
+  j["type"] = "reset";
+  j["id"] = _id;
   return j.dump();
 }
 
@@ -98,6 +109,14 @@ bool parse_line(std::string_view _line, message *_out) {
     _out->ok = j.value("ok", false);
     _out->text = j.value("text", std::string());
     _out->error = j.value("error", std::string());
+    _out->turns = j.value("turns", 0);
+    return true;
+  }
+  if (type == "chunk") {
+    _out->type = message::kind::chunk;
+    _out->id = j.value("id", 0L);
+    _out->text = j.value("text", std::string());
+    _out->thinking = j.value("thinking", false);
     return true;
   }
 

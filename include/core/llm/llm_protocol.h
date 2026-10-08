@@ -12,7 +12,7 @@ namespace campcat::llm_protocol {
  * callers can ignore stray lines instead of treating them as fatal.
  */
 struct message {
-  enum class kind { ready, log, result, unknown };
+  enum class kind { ready, log, result, chunk, unknown };
 
   kind type = kind::unknown;
   long id = 0;
@@ -22,12 +22,18 @@ struct message {
   std::string text;
   std::string error;
 
+  // chunk (shares `text` as the delta)
+  bool thinking = false; ///< reasoning heartbeat, `text` is empty
+
   // log
   std::string level;
   std::string log_message;
 
   // ready
   int protocol = 0;
+
+  /// Turns the sidecar retains after this result; 0 after a reset.
+  int turns = 0;
 };
 
 /**
@@ -40,11 +46,20 @@ std::string base64_encode(const unsigned char *_data, std::size_t _len);
 /**
  * @brief Build one `describe` request line (no trailing newline).
  *
- * The request carries an id and a base64 PNG, nothing else: model selection
- * and prompts belong to the sidecar. Field names are the contract with
- * `llm/main.py`; keep both sides in sync.
+ * The request carries an id, an optional base64 PNG and optional text. Model
+ * selection and prompts belong to the sidecar. Field names are the contract
+ * with `llm/main.py`; keep both sides in sync.
+ *
+ * @param[in] _image_b64 Empty for a text-only turn.
+ * @param[in] _text Empty to let the sidecar use its default prompt.
  */
-std::string build_describe_request(std::string_view _image_b64, long _id);
+std::string build_describe_request(std::string_view _image_b64, long _id,
+                                   std::string_view _text);
+
+/**
+ * @brief Build one `reset` request line, dropping the sidecar's history.
+ */
+std::string build_reset_request(long _id);
 
 /**
  * @brief Parse one sidecar line. Never throws.

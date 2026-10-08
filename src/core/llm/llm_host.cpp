@@ -68,15 +68,43 @@ void llm_host::handle_line(const std::string &_line) {
         m_result.ok = msg.ok;
         m_result.text = msg.text;
         m_result.error = msg.error;
+        m_result.turns = msg.turns;
         m_has_result = true;
       }
     }
     m_cv.notify_all();
     break;
+  case llm_protocol::message::kind::chunk:
+    {
+      // Deliberately no notify: the UI polls per frame, so waking the waiter
+      // on every delta would only churn.
+      std::lock_guard<std::mutex> lk(m_mu);
+      if (msg.id == m_pending_id) {
+        m_stream += msg.text;
+        m_thinking = m_thinking || msg.thinking;
+      }
+    }
+    break;
   case llm_protocol::message::kind::unknown:
   default:
     break;
   }
+}
+
+std::string llm_host::streaming_text() const {
+  std::lock_guard<std::mutex> lk(m_mu);
+  return m_stream;
+}
+
+bool llm_host::is_thinking() const {
+  std::lock_guard<std::mutex> lk(m_mu);
+  return m_thinking;
+}
+
+void llm_host::clear_stream() {
+  std::lock_guard<std::mutex> lk(m_mu);
+  m_stream.clear();
+  m_thinking = false;
 }
 
 void llm_host::pump(int _fd, bool _is_stderr) {
@@ -219,41 +247,21 @@ bool llm_host::ensure_running(const std::filesystem::path &_repo_root,
   return true;
 }
 
-llm_result llm_host::describe(const std::filesystem::path &_repo_root,
-                              const cv::Mat &_bgr) {
+long llm_host::next_request_id() {
+  std::lock_guard<std::mutex> lk(m_mu);
+  const long id = m_next_id++;
+  m_pending_id = id;
+  m_has_result = false;
+  m_result = llm_result{};
+  m_stream.clear();
+  m_thinking = false;
+  return id;
+}
+
+llm_result llm_host::exchange(const std::string &_request_line) {
   llm_result r;
-
-  if (_bgr.empty()) {
-    r.error = "empty image";
-    return r;
-  }
-
-  std::vector<unsigned char> png;
-  if (!cv::imencode(".png", _bgr, png) || png.empty()) {
-    r.error = "failed to encode image as PNG";
-    return r;
-  }
-
   std::string err;
-  if (!ensure_running(_repo_root, &err)) {
-    r.error = err;
-    return r;
-  }
-
-  const std::string b64 = llm_protocol::base64_encode(png.data(), png.size());
-
-  long id = 0;
-  {
-    std::lock_guard<std::mutex> lk(m_mu);
-    id = m_next_id++;
-    m_pending_id = id;
-    m_has_result = false;
-    m_result = llm_result{};
-  }
-
-  std::string request = llm_protocol::build_describe_request(b64, id);
-  request.push_back('\n');
-  if (!write_all(request, &err)) {
+  if (!write_all(_request_line, &err)) {
     teardown();
     r.error = err;
     return r;
@@ -279,6 +287,57 @@ llm_result llm_host::describe(const std::filesystem::path &_repo_root,
   return m_result;
 }
 
+llm_result llm_host::describe(const std::filesystem::path &_repo_root,
+                              const cv::Mat &_bgr,
+                              const std::string &_prompt) {
+  llm_result r;
+  if (_bgr.empty() && _prompt.empty()) {
+    r.error = "empty request";
+    return r;
+  }
+
+  // A text-only turn needs no image, so encoding is skipped when there is none.
+  std::string b64;
+  if (!_bgr.empty()) {
+    std::vector<unsigned char> png;
+    if (!cv::imencode(".png", _bgr, png) || png.empty()) {
+      r.error = "failed to encode image as PNG";
+      return r;
+    }
+    b64 = llm_protocol::base64_encode(png.data(), png.size());
+  }
+
+  std::string err;
+  if (!ensure_running(_repo_root, &err)) {
+    r.error = err;
+    return r;
+  }
+
+  const long id = next_request_id();
+  std::string request = llm_protocol::build_describe_request(b64, id, _prompt);
+  request.push_back('\n');
+  return exchange(request);
+}
+
+llm_result llm_host::reset(const std::filesystem::path &_repo_root) {
+  llm_result r;
+  {
+    std::lock_guard<std::mutex> lk(m_mu);
+    if (m_child.pid() <= 0 || m_broken || !m_ready) {
+      // No child, so no history: report success without spawning one.
+      r.ok = true;
+      r.turns = 0;
+      return r;
+    }
+  }
+  (void)_repo_root;
+
+  const long id = next_request_id();
+  std::string request = llm_protocol::build_reset_request(id);
+  request.push_back('\n');
+  return exchange(request);
+}
+
 void llm_host::teardown() {
   {
     std::lock_guard<std::mutex> lk(m_mu);
@@ -301,12 +360,26 @@ void llm_host::teardown() {
   m_broken = false;
   m_stopping = false;
   m_has_result = false;
+  m_stream.clear();
+  m_thinking = false;
 }
 
 #else // _WIN32
 
 void llm_host::handle_line(const std::string &) {}
 void llm_host::pump(int, bool) {}
+
+std::string llm_host::streaming_text() const { return std::string(); }
+bool llm_host::is_thinking() const { return false; }
+void llm_host::clear_stream() {}
+
+long llm_host::next_request_id() { return 0; }
+
+llm_result llm_host::exchange(const std::string &) {
+  llm_result r;
+  r.error = "the LLM sidecar is not supported on Windows";
+  return r;
+}
 
 bool llm_host::write_all(const std::string &, std::string *_error_out) {
   if (_error_out) {
@@ -323,7 +396,14 @@ bool llm_host::ensure_running(const std::filesystem::path &,
   return false;
 }
 
-llm_result llm_host::describe(const std::filesystem::path &, const cv::Mat &) {
+llm_result llm_host::describe(const std::filesystem::path &, const cv::Mat &,
+                              const std::string &) {
+  llm_result r;
+  r.error = "the LLM sidecar is not supported on Windows";
+  return r;
+}
+
+llm_result llm_host::reset(const std::filesystem::path &) {
   llm_result r;
   r.error = "the LLM sidecar is not supported on Windows";
   return r;

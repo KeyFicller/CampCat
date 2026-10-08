@@ -13,32 +13,73 @@ from __future__ import annotations
 
 import pathlib
 import sys
+import time
 import traceback
+from typing import Iterator
 
 import graph
 import models
 import protocol
 
+# Deltas are flushed at most this often. Batching keeps one long answer from
+# turning into a few hundred NDJSON lines on stdout.
+BATCH_SECONDS = 0.05
 
-def handle_request(req: dict) -> dict:
-    """Turn one decoded request into one response message."""
+
+def handle_request(req: dict) -> Iterator[dict]:
+    """Turn one decoded request into one or more response messages."""
     rtype = req.get("type")
     rid = req.get("id")
 
     if rtype == "ping":
-        return protocol.build_result(rid, True, "pong")
+        yield protocol.build_result(rid, True, "pong")
+        return
+    if rtype == "reset":
+        graph.reset_history()
+        yield protocol.build_result(rid, True, turns=0)
+        return
     if rtype != "describe":
-        return protocol.build_log("warn", f"ignoring unknown message type: {rtype}")
+        yield protocol.build_log("warn", f"ignoring unknown message type: {rtype}")
+        return
 
+    out: dict = {}
+    buf: list[str] = []
+    thinking_sent = False
+    last = time.monotonic()
     try:
-        out = graph.run_describe({"image_b64": req.get("image_b64") or ""})
+        for is_answer, text in graph.stream_describe(
+            {
+                "image_b64": req.get("image_b64") or "",
+                "text": req.get("text") or "",
+            },
+            out,
+        ):
+            if not is_answer:
+                # Sent at once rather than batched, or the hint would arrive
+                # only after the thinking it is meant to announce.
+                if not thinking_sent:
+                    thinking_sent = True
+                    yield protocol.build_chunk(rid, thinking=True)
+                continue
+            buf.append(text)
+            now = time.monotonic()
+            if now - last >= BATCH_SECONDS:
+                yield protocol.build_chunk(rid, "".join(buf))
+                buf.clear()
+                last = now
     except Exception as exc:  # noqa: BLE001 - never let a request kill the loop
         traceback.print_exc(file=sys.stderr)
-        return protocol.build_error_result(rid, str(exc))
+        yield protocol.build_error_result(rid, str(exc))
+        return
 
+    if buf:
+        yield protocol.build_chunk(rid, "".join(buf))
     if out.get("error"):
-        return protocol.build_error_result(rid, str(out["error"]))
-    return protocol.build_result(rid, True, str(out.get("text", "")))
+        yield protocol.build_error_result(rid, str(out["error"]))
+        return
+    yield protocol.build_result(
+        rid, True, str(out.get("reply", "")), turns=out.get("turns")
+    )
 
 
 def emit(msg: dict) -> None:
@@ -60,7 +101,8 @@ def main(argv: list[str]) -> int:
         req = protocol.decode(line)
         if req is None:
             continue
-        emit(handle_request(req))
+        for msg in handle_request(req):
+            emit(msg)
         if once:
             break
 

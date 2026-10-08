@@ -31,8 +31,24 @@ def build_log(level: str, message: str) -> dict:
     return {"type": "log", "level": level, "message": message}
 
 
-def build_result(rid: object, ok: bool, text: str = "", error: str = "") -> dict:
-    return {"type": "result", "id": rid, "ok": ok, "text": text, "error": error}
+def build_chunk(rid: object, text: str = "", thinking: bool = False) -> dict:
+    """One streaming delta, or a reasoning heartbeat when `thinking`."""
+    msg = {"type": "chunk", "id": rid}
+    if text:
+        msg["text"] = text
+    if thinking:
+        msg["thinking"] = True
+    return msg
+
+
+def build_result(rid: object, ok: bool, text: str = "", error: str = "",
+                 turns: int | None = None) -> dict:
+    """`turns` is omitted from the JSON when None, so messages that carry no
+    conversation state keep their original shape."""
+    msg = {"type": "result", "id": rid, "ok": ok, "text": text, "error": error}
+    if turns is not None:
+        msg["turns"] = turns
+    return msg
 
 
 def build_error_result(rid: object, error: str) -> dict:

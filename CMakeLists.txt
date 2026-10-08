@@ -1,6 +1,11 @@
 cmake_minimum_required(VERSION 3.20)
 project(campcat LANGUAGES CXX)
 
+# The macOS IME candidate-window fix needs Objective-C++.
+if(APPLE)
+  enable_language(OBJCXX)
+endif()
+
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
@@ -78,6 +83,23 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(portable_file_dialogs)
 
+# Markdown rendering for the LLM reply bubbles. Upstream ships only a header,
+# so there is no CMakeLists.txt for FetchContent to add; the include directory
+# is exposed through an INTERFACE target instead.
+campcat_github_url(_markdown_git juliettef/imgui_markdown.git)
+FetchContent_Declare(
+  imgui_markdown
+  GIT_REPOSITORY ${_markdown_git}
+  GIT_TAG        4acbf80584753e15ea54eb271129995862daac8f
+  GIT_SHALLOW    TRUE
+  GIT_PROGRESS   TRUE
+  GIT_SUBMODULES ""
+)
+FetchContent_MakeAvailable(imgui_markdown)
+
+add_library(imgui_markdown INTERFACE)
+target_include_directories(imgui_markdown INTERFACE ${imgui_markdown_SOURCE_DIR})
+
 find_package(OpenGL REQUIRED)
 
 add_library(imgui_lib STATIC
@@ -124,17 +146,24 @@ target_link_libraries(campcat_core PUBLIC
   nlohmann_json::nlohmann_json
 )
 
+# The IME candidate-window fix is Objective-C++, so it stays Apple-only.
+set(campcat_platform_sources)
+if(APPLE)
+  list(APPEND campcat_platform_sources src/app/macos_ime.mm)
+endif()
+
 add_executable(campcat
   src/app/main.cpp
   src/app/template_capture_ui.cpp
   src/app/llm_ui.cpp
   src/app/native_file_dialog.cpp
+  ${campcat_platform_sources}
 )
 target_include_directories(campcat PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}/include
   ${portable_file_dialogs_SOURCE_DIR}
 )
-target_link_libraries(campcat PRIVATE campcat_core imgui_lib glfw OpenGL::GL)
+target_link_libraries(campcat PRIVATE campcat_core imgui_lib glfw OpenGL::GL imgui_markdown)
 
 if(APPLE)
   target_link_libraries(campcat PRIVATE "-framework Cocoa" "-framework IOKit" "-framework CoreVideo")
