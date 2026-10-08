@@ -5,6 +5,7 @@
 #include <ctime>
 #include <deque>
 #include <filesystem>
+#include <functional>
 #include <iomanip>
 #include <mutex>
 #include <sstream>
@@ -232,13 +233,18 @@ int main(int argc, char **argv) {
       worker_thread.join();
     }
 
-    auto snap = capture_bundle_snapshot();
-    worker_thread = std::thread(
-        [&run_automation_thread_body, shell = std::move(std::get<0>(snap)),
-         ccat_bundle = std::move(std::get<1>(snap))]() mutable {
-          run_automation_thread_body(std::move(shell),
-                                     std::move(ccat_bundle));
-        });
+    try {
+      auto snap = capture_bundle_snapshot();
+      worker_thread = std::thread(
+          [&run_automation_thread_body, shell = std::move(std::get<0>(snap)),
+           ccat_bundle = std::move(std::get<1>(snap))]() mutable {
+            run_automation_thread_body(std::move(shell),
+                                       std::move(ccat_bundle));
+          });
+    } catch (const std::exception &ex) {
+      release_cycle(cycle_running);
+      append_log(std::string("[job] failed to start worker: ") + ex.what());
+    }
   };
 
   campcat::ccat_lang::CcatRepl console_repl;
@@ -253,33 +259,38 @@ int main(int argc, char **argv) {
     if (worker_thread.joinable()) {
       worker_thread.join();
     }
-    auto snap = capture_bundle_snapshot();
-    worker_thread = std::thread(
-        [&, source = std::move(source),
-         shell = std::move(std::get<0>(snap)),
-         ccat_bundle = std::move(std::get<1>(snap))]() mutable {
-          try {
-            campcat::adb_client adb(shell.adb_path, shell.adb_serial);
-            std::string co, ce;
-            adb.connect_remote(shell.adb_connect_address, 15000, &co, &ce);
-            auto prog = campcat::ccat_lang::parse_program(source);
-            const auto images = ccat_bundle.images_base(shell.config_home);
-            std::filesystem::path script_abs = ccat_bundle.script_path_absolute;
-            if (script_abs.empty()) {
-              script_abs = shell.config_home / ccat_bundle.source_rel;
+    try {
+      auto snap = capture_bundle_snapshot();
+      worker_thread = std::thread(
+          [&, source = std::move(source),
+           shell = std::move(std::get<0>(snap)),
+           ccat_bundle = std::move(std::get<1>(snap))]() mutable {
+            try {
+              campcat::adb_client adb(shell.adb_path, shell.adb_serial);
+              std::string co, ce;
+              adb.connect_remote(shell.adb_connect_address, 15000, &co, &ce);
+              auto prog = campcat::ccat_lang::parse_program(source);
+              const auto images = ccat_bundle.images_base(shell.config_home);
+              std::filesystem::path script_abs = ccat_bundle.script_path_absolute;
+              if (script_abs.empty()) {
+                script_abs = shell.config_home / ccat_bundle.source_rel;
+              }
+              const auto should_stop = [&]() { return stop_requested.load(); };
+              const auto res = campcat::run_ccat_program(
+                  &adb, &shell, images, script_abs, *prog, should_stop);
+              append_log(std::string("[console] ok=") +
+                         (res.ok ? "true" : "false") + " | " + res.message);
+            } catch (const campcat::ccat_lang::parse_error &ex) {
+              append_log(std::string("[console] parse error: ") + ex.what());
+            } catch (const std::exception &ex) {
+              append_log(std::string("[console] exception: ") + ex.what());
             }
-            const auto should_stop = [&]() { return stop_requested.load(); };
-            const auto res = campcat::run_ccat_program(
-                &adb, &shell, images, script_abs, *prog, should_stop);
-            append_log(std::string("[console] ok=") +
-                       (res.ok ? "true" : "false") + " | " + res.message);
-          } catch (const campcat::ccat_lang::parse_error &ex) {
-            append_log(std::string("[console] parse error: ") + ex.what());
-          } catch (const std::exception &ex) {
-            append_log(std::string("[console] exception: ") + ex.what());
-          }
-          release_cycle(cycle_running);
-        });
+            release_cycle(cycle_running);
+          });
+    } catch (const std::exception &ex) {
+      release_cycle(cycle_running);
+      append_log(std::string("[console] failed to start worker: ") + ex.what());
+    }
   };
 
   auto refresh_scheduler_locked = [&](bool immediate_first_tick = false) {
@@ -401,7 +412,8 @@ int main(int argc, char **argv) {
 
   campcat::ccat_script_profile ccat_ui = snapshot_ccat_live();
 
-  static bool script_switch_warmed = false;
+  // Tracks the last active script id so the combo handler can detect real
+  // switches; seeded from the loaded config on the first frame.
   static std::string last_script_seen;
 
   auto log_active_script_bundle = [&](const campcat::app_config &_view_shell) {
@@ -425,11 +437,6 @@ int main(int argc, char **argv) {
 
   auto maybe_handle_script_combo_change =
       [&](const campcat::app_config &_view_shell_before_combo) {
-        if (!script_switch_warmed) {
-          script_switch_warmed = true;
-          last_script_seen = _view_shell_before_combo.active_script_id;
-          return;
-        }
         if (_view_shell_before_combo.active_script_id == last_script_seen) {
           return;
         }
@@ -478,6 +485,7 @@ int main(int argc, char **argv) {
                     cfg_view.adb_serial.c_str());
       std::snprintf(adb_connect_buf, sizeof(adb_connect_buf), "%s",
                     cfg_view.adb_connect_address.c_str());
+      last_script_seen = cfg_view.active_script_id;
       buffers_init = true;
     }
 
@@ -492,17 +500,19 @@ int main(int argc, char **argv) {
           campcat::app_config to_write{};
           shell_merge_buffer_paths(&to_write, cfg_view, adb_path_buf,
                                    serial_buf, adb_connect_buf);
-          bool ok = false;
-          {
-            std::lock_guard<std::mutex> lk(cfg_mu);
-            cfg = to_write;
-            ccat_live = ccat_ui;
-            ok = persist_bundle_to_disk(cfg, ccat_live, cfg_path, &err);
-          }
+          // Persist first (outside cfg_mu); commit to memory only on success so
+          // a failed write cannot desync the automation config from disk.
+          const bool ok =
+              persist_bundle_to_disk(to_write, ccat_ui, cfg_path, &err);
           if (ok) {
+            {
+              std::lock_guard<std::mutex> lk(cfg_mu);
+              cfg = to_write;
+              ccat_live = ccat_ui;
+            }
             append_log("[ui] saved to shell: " + cfg_path.string());
-            const auto pj_vis =
-                to_write.resolve_script_json(std::string{shell_sid::k_ccat_script});
+            const auto pj_vis = to_write.resolve_script_json(
+                std::string{shell_sid::k_ccat_script});
             if (!pj_vis.empty()) {
               append_log("[ui] saved to ccat bundle: " + pj_vis.string());
             }

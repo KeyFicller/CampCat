@@ -73,8 +73,15 @@ ccat_script_profile ccat_script_profile::load_from_bundle_path(
     return p;
   }
   nlohmann::json j;
-  in >> j;
-  from_json(j, p);
+  try {
+    in >> j;
+    if (!j.is_object()) {
+      return defaults();
+    }
+    from_json(j, p);
+  } catch (const nlohmann::json::exception &) {
+    return defaults(); // malformed bundle: keep factory defaults
+  }
   p.source_rel = trim_copy(p.source_rel);
 
   if (!p.has_script_source()) {
@@ -105,12 +112,20 @@ void ccat_script_profile::save_to_bundle_path(
     throw std::runtime_error(
         "ccat script source path is empty; set source before save");
   }
-  std::filesystem::create_directories(_bundle_json_path.parent_path());
+  std::error_code ec;
+  std::filesystem::create_directories(_bundle_json_path.parent_path(), ec);
+  if (ec) {
+    throw std::runtime_error("failed to create ccat script bundle directory: " +
+                             ec.message());
+  }
   std::ofstream out(_bundle_json_path);
   if (!out) {
     throw std::runtime_error("failed to open ccat script bundle for write");
   }
   out << to_json(_config_home).dump(2) << '\n';
+  if (!out) {
+    throw std::runtime_error("failed to write ccat script bundle");
+  }
 }
 
 nlohmann::json
@@ -124,7 +139,7 @@ ccat_script_profile::to_json(const std::filesystem::path &) const {
 nlohmann::json ccat_script_profile::to_summary_json_for_log() const {
   nlohmann::json j;
   j["version"] = version;
-  j["source"] = source_rel;
+  j["source"] = trim_copy(source_rel);
   j["images_base"] = script_path_absolute.empty()
                          ? std::string{}
                          : script_path_absolute.parent_path().string();

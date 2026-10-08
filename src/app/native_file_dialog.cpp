@@ -2,6 +2,7 @@
 
 #include <portable-file-dialogs.h>
 
+#include <exception>
 #include <vector>
 
 namespace campcat {
@@ -24,9 +25,14 @@ pick_open_file(const std::filesystem::path &_start_dir,
 
   const std::string start =
       _start_dir.empty() ? std::string(".") : _start_dir.string();
-  auto selection =
-      pfd::open_file(_title.empty() ? "Open file" : _title, start, filters)
-          .result();
+  std::vector<std::string> selection;
+  try {
+    selection =
+        pfd::open_file(_title.empty() ? "Open file" : _title, start, filters)
+            .result();
+  } catch (const std::exception &) {
+    return std::nullopt; // dialog backend unavailable/failed, not a user cancel
+  }
   if (selection.empty()) {
     return std::nullopt;
   }

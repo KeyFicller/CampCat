@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cerrno>
 #include <chrono>
 #include <sstream>
 #include <string_view>
@@ -55,8 +56,13 @@ bool read_pipe_nonblocking(int fd, std::string *acc, int timeout_ms,
   }
   if (n == 0) {
     *eof_reached = true;
+    return true;
   }
-  return true;
+  if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) {
+    return true; // transient: retry on the next slice
+  }
+  *eof_reached = true; // real read error: stop retrying this fd
+  return false;
 }
 
 /// Drain one pipe after `poll` marked it readable / hung up (large stdout must
@@ -87,8 +93,13 @@ bool drain_pipe_after_poll(int fd, short revents, std::string *acc,
   }
   if (n == 0) {
     *eof_reached = true;
+    return true;
   }
-  return true;
+  if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) {
+    return true;
+  }
+  *eof_reached = true;
+  return false;
 }
 
 bool run_process_posix(const std::string &exe,
@@ -97,9 +108,23 @@ bool run_process_posix(const std::string &exe,
                        int timeout_ms, int *exit_code) {
   int out_pipe[2];
   int err_pipe[2];
-  if (pipe(out_pipe) != 0 || pipe(err_pipe) != 0) {
+  if (pipe(out_pipe) != 0) {
     return false;
   }
+  if (pipe(err_pipe) != 0) {
+    close(out_pipe[0]);
+    close(out_pipe[1]);
+    return false;
+  }
+
+  // Build the exec argv before fork(): the child must avoid heap allocation
+  // (another thread may hold the allocator lock at fork time).
+  std::vector<char *> ptrs;
+  ptrs.reserve(argv.size() + 1);
+  for (const auto &s : argv) {
+    ptrs.push_back(const_cast<char *>(s.data()));
+  }
+  ptrs.push_back(nullptr);
 
   pid_t pid = fork();
   if (pid < 0) {
@@ -117,13 +142,6 @@ bool run_process_posix(const std::string &exe,
     close(out_pipe[1]);
     close(err_pipe[0]);
     close(err_pipe[1]);
-
-    std::vector<char *> ptrs;
-    ptrs.reserve(argv.size() + 1);
-    for (auto &s : argv) {
-      ptrs.push_back(const_cast<char *>(s.data()));
-    }
-    ptrs.push_back(nullptr);
 
     signal(SIGPIPE, SIG_DFL);
     execvp(exe.c_str(), ptrs.data());
@@ -421,24 +439,29 @@ packages_from_recents_dump(const std::string &_dump) {
     if (apos == std::string::npos) {
       continue;
     }
-    const auto colon = line.find(':', apos + 2);
-    if (colon == std::string::npos) {
-      continue;
-    }
-    size_t i = colon + 1;
+    // Header form is `A=com.example.app` or `A=com.example.app/.Activity`; the
+    // token ends at whitespace or the enclosing `}`, and the optional `/`
+    // suffix names the activity.
+    size_t i = apos + 2;
     size_t j = i;
     while (j < line.size()) {
       const unsigned char c = static_cast<unsigned char>(line[j]);
-      if (std::isalnum(c) || c == '.' || c == '_') {
-        ++j;
-      } else {
+      if (c == ' ' || c == '\t' || c == '\r' || c == '\n' || c == '}') {
         break;
       }
+      ++j;
     }
     if (i >= j) {
       continue;
     }
     std::string pkg = line.substr(i, j - i);
+    const auto slash = pkg.find('/');
+    if (slash != std::string::npos) {
+      pkg.resize(slash);
+    }
+    if (pkg.empty()) {
+      continue;
+    }
     if (seen.insert(pkg).second) {
       pkgs.push_back(std::move(pkg));
     }

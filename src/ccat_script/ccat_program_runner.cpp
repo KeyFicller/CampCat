@@ -13,6 +13,12 @@ automation_cycle_result run_ccat_program(
     const std::filesystem::path &_script_path,
     const ccat_lang::Program &_program,
     const std::function<bool()> &_should_stop) {
+  if (!_adb || !_cfg) {
+    automation_cycle_result r{};
+    r.ok = false;
+    r.message = "run_ccat_program: adb/cfg must be non-null";
+    return r;
+  }
   template_matcher matcher(_cfg->match_threshold, _cfg->match_multiscale);
   ccat_lang::CcatInterpreter interp(_adb, _cfg, std::move(matcher),
                                     _images_base, _script_path);

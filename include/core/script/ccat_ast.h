@@ -56,6 +56,9 @@ inline stmt_exec_outcome outcome_from_opt(std::optional<std::string> &&_maybe_er
   if (!_maybe_err) {
     return stmt_exec_outcome::make_ok();
   }
+  if (*_maybe_err == "stopped") {
+    return stmt_exec_outcome::make_stopped();
+  }
   return stmt_exec_outcome::make_error(std::move(*_maybe_err));
 }
 

@@ -41,6 +41,7 @@ enum class TokKind {
   Dollar,
   Str,
   Ident,
+  Err,
 };
 
 /**
@@ -69,9 +70,9 @@ public:
 
   /**
    * @brief Peek current token without advancing.
-   * @return Copy of buffered lookahead identical until next() consumes stream progress.
+   * @return Reference to the buffered lookahead, valid until the next `next()` call.
    */
-  Token peek() const { return m_cur; }
+  const Token &peek() const { return m_cur; }
 
   /**
    * @brief Advance to next token after consuming whitespace/comments.

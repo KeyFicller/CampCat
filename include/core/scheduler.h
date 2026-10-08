@@ -57,15 +57,10 @@ public:
   void stop();
 
   /**
-   * @brief Hint long-running `_task` to abort midflight (caller driven).
-   */
-  void request_stop_cycle();
-
-  /**
    * @brief Whether the auxiliary thread owns an active scheduler loop handle.
-   * @return True while background thread remained joinable.
+   * @return True while the background loop is running.
    */
-  bool running() const { return m_thread.joinable(); }
+  bool running() const { return m_running.load(); }
 
   /**
    * @brief Peek current wait-phase progress guarded by mutex.
@@ -80,6 +75,7 @@ private:
   std::condition_variable m_cv;
   std::thread m_thread;
   std::atomic<bool> m_stop_requested{false};
+  std::atomic<bool> m_running{false};
 
   std::chrono::seconds m_interval{3600};
   std::chrono::seconds m_jitter{0};

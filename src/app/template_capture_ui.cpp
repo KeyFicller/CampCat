@@ -22,6 +22,7 @@
 #include <cstdint>
 #include <cstring>
 #include <filesystem>
+#include <utility>
 
 namespace {
 
@@ -66,6 +67,7 @@ bool upload_bgr(const cv::Mat &_bgr) {
   glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
   glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, rgba.cols, rgba.rows, 0, GL_RGBA,
                GL_UNSIGNED_BYTE, rgba.ptr());
+  glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
   glBindTexture(GL_TEXTURE_2D, 0);
   g_tex_w = rgba.cols;
   g_tex_h = rgba.rows;
@@ -106,9 +108,9 @@ void img_px_from_screen(const ImVec2 &_screen, const ImVec2 &_img_min,
   u = std::clamp(u, 0.0f, 1.0f);
   v = std::clamp(v, 0.0f, 1.0f);
   *_ix = static_cast<int>(
-      std::floor(u * static_cast<float>(std::max(1, g_tex_w - 1))));
+      std::floor(u * static_cast<float>(std::max(1, g_tex_w))));
   *_iy = static_cast<int>(
-      std::floor(v * static_cast<float>(std::max(1, g_tex_h - 1))));
+      std::floor(v * static_cast<float>(std::max(1, g_tex_h))));
   *_ix = std::clamp(*_ix, 0, std::max(0, g_tex_w - 1));
   *_iy = std::clamp(*_iy, 0, std::max(0, g_tex_h - 1));
 }
@@ -125,22 +127,28 @@ ImVec2 screen_from_img_px(int _ix, int _iy, const ImVec2 &_img_min,
 
 void capture_clicked(campcat::app_config &_cfg) {
   campcat::adb_client adb(_cfg.adb_path, _cfg.adb_serial);
-  (void)adb.connect_remote(_cfg.adb_connect_address);
+  const bool connected = adb.connect_remote(_cfg.adb_connect_address);
   cv::Mat cap;
   std::string diag;
   if (!adb.screencap_png(&cap, 45000, &diag)) {
+    if (!connected) {
+      diag += " (adb connect " + _cfg.adb_connect_address + " failed)";
+    }
     campcat::automation_log::emit("[capture] screencap failed " + diag);
     return;
   }
-  g_bgr = cap.clone();
+  const int frame_w = cap.cols;
+  const int frame_h = cap.rows;
+  g_bgr = std::move(cap);
   g_dragging = false;
   g_has_sel = false;
   if (!upload_bgr(g_bgr)) {
+    release_tex();
     campcat::automation_log::emit("[capture] texture upload failed");
     return;
   }
-  campcat::automation_log::emit("[capture] frame " + std::to_string(cap.cols) +
-                                "x" + std::to_string(cap.rows));
+  campcat::automation_log::emit("[capture] frame " + std::to_string(frame_w) +
+                                "x" + std::to_string(frame_h));
 }
 
 void clear_capture() {

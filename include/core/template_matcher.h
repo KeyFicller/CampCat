@@ -33,8 +33,8 @@ public:
    * @brief Correlate templ against screen optionally restricted by ROI rectangle.
    * @param[in] _screen_bgr Full frame BGR mat.
    * @param[in] _templ_bgr Template cropped mat.
-   * @param[in] _threshold Confidence threshold overriding defaults per call-site.
-   * @param[in] _roi Restrict search window (empty=all).
+   * @param[in] _threshold Confidence threshold; <= 0 falls back to the stored default.
+   * @param[in] _roi Restrict search window (empty=all); must lie inside the frame.
    * @return match_result honoring best correlated patch.
    */
   match_result match(const cv::Mat &_screen_bgr, const cv::Mat &_templ_bgr,
@@ -44,7 +44,7 @@ public:
    * @brief Load png from `_png_path`, forward to `match` when decoding succeeds.
    * @param[in] _screen_bgr Incoming camera frame snapshot.
    * @param[in] _png_path Template asset path on filesystem.
-   * @param[in] _threshold Similarity cutoff.
+   * @param[in] _threshold Similarity cutoff; <= 0 falls back to the stored default.
    * @param[in] _roi Optional ROI cropping search space.
    * @return nullopt when unreadable PNG; populated match payload otherwise.
    */

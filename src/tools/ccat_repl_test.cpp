@@ -35,6 +35,12 @@ int main() {
               is_source_complete("if (\"a.png\") {\n}\nelse"), false);
   expect_bool("do_while_complete",
               is_source_complete("do {\n  wait(1)\n} while (\"x.png\")"), true);
+  expect_bool("do_body_awaiting_while_paren",
+              is_source_complete("do {\n  wait(1)\n} while"), false);
+  expect_bool("do_while_open_paren",
+              is_source_complete("do {\n  wait(1)\n} while (\"x.png\""), false);
+  expect_bool("retry_body_incomplete",
+              is_source_complete("retry(3) {\n  tap(\"a.png\")\n"), false);
 
   {
     campcat::ccat_lang::CcatRepl r;
@@ -65,6 +71,25 @@ int main() {
                 true);
     r2.clear();
     expect_bool("cleared_prompt", std::string_view(r2.prompt()) == ">>>", true);
+  }
+
+  {
+    campcat::ccat_lang::CcatRepl r3;
+    auto da = r3.feed_line("do {");
+    expect_bool("feed_do_cont",
+                da == campcat::ccat_lang::repl_feed_result::continue_input,
+                true);
+    auto db = r3.feed_line("  wait(1)");
+    expect_bool("feed_do_body_cont",
+                db == campcat::ccat_lang::repl_feed_result::continue_input,
+                true);
+    auto dc = r3.feed_line("} while");
+    expect_bool("feed_do_while_head_cont",
+                dc == campcat::ccat_lang::repl_feed_result::continue_input,
+                true);
+    auto dd = r3.feed_line("(\"x.png\")");
+    expect_bool("feed_do_ready",
+                dd == campcat::ccat_lang::repl_feed_result::ready, true);
   }
 
   if (g_fails != 0) {

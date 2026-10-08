@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <deque>
 #include <mutex>
 #include <string>
@@ -13,10 +14,10 @@ namespace campcat {
 class log_buffer {
 public:
   /**
-   * @brief Push a line to the buffer.
+   * @brief Push a line to the buffer (takes ownership of the argument).
    * @param[in] _line The line to push.
    */
-  void push(const std::string &_line);
+  void push(std::string _line);
 
   /**
    * @brief Drain the buffer to a vector.

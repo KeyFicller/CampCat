@@ -1,5 +1,8 @@
 #include "core/scheduler.h"
 
+#include <algorithm>
+#include <limits>
+
 namespace campcat {
 
 scheduler::scheduler() = default;
@@ -25,6 +28,7 @@ void scheduler::start(task_fn _task, bool _run_immediately_first) {
   }
   m_stop_requested = false;
   m_thread = std::thread([this] { loop(); });
+  m_running.store(true);
 }
 
 void scheduler::stop() {
@@ -37,8 +41,6 @@ void scheduler::stop() {
   std::lock_guard<std::mutex> lk(m_mu);
   m_waiting_for_tick = false;
 }
-
-void scheduler::request_stop_cycle() {}
 
 scheduler_tick_wait_progress scheduler::tick_wait_progress() const {
   std::lock_guard<std::mutex> lk(m_mu);
@@ -56,7 +58,6 @@ scheduler_tick_wait_progress scheduler::tick_wait_progress() const {
 
 void scheduler::loop() {
   // Runs until stop(): optional initial skip of presleep, then sleep(interval+jitter), task, repeat.
-  std::uniform_int_distribution<int> dist(0, static_cast<int>(m_jitter.count()));
 
   bool skip_presleep = false;
   {
@@ -69,7 +70,17 @@ void scheduler::loop() {
       std::chrono::seconds sleep_add{0};
       {
         std::lock_guard<std::mutex> lk(m_mu);
-        const int j = m_jitter.count() > 0 ? dist(m_rng) : 0;
+        // Build the distribution from the freshly read jitter so configure()
+        // changes apply on the next tick and the range never goes stale.
+        const long long jitter_s = m_jitter.count();
+        int j = 0;
+        if (jitter_s > 0) {
+          const long long cap = std::min<long long>(
+              jitter_s,
+              static_cast<long long>(std::numeric_limits<int>::max()));
+          std::uniform_int_distribution<int> dist(0, static_cast<int>(cap));
+          j = dist(m_rng);
+        }
         sleep_add = m_interval + std::chrono::seconds(j);
       }
 
@@ -113,6 +124,7 @@ void scheduler::loop() {
       break;
     }
   }
+  m_running.store(false);
 }
 
 } // namespace campcat

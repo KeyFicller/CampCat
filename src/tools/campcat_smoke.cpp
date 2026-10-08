@@ -65,16 +65,20 @@ bool parse_args(int _argc, char **_argv, options *_out) {
       _out->offline = true;
       continue;
     }
-    if (arg == "--config" && i + 1 < _argc) {
-      _out->config_path = _argv[++i];
-      continue;
-    }
-    if (arg == "--cases-dir" && i + 1 < _argc) {
-      _out->cases_dir = _argv[++i];
-      continue;
-    }
-    if (arg == "--case" && i + 1 < _argc) {
-      _out->only_case = _argv[++i];
+    if (arg == "--config" || arg == "--cases-dir" || arg == "--case") {
+      if (i + 1 >= _argc) {
+        std::cerr << "missing value for " << arg << '\n';
+        print_usage(_argv[0]);
+        return false;
+      }
+      const std::string value = _argv[++i];
+      if (arg == "--config") {
+        _out->config_path = value;
+      } else if (arg == "--cases-dir") {
+        _out->cases_dir = value;
+      } else {
+        _out->only_case = value;
+      }
       continue;
     }
     std::cerr << "unknown argument: " << arg << '\n';
@@ -197,7 +201,9 @@ case_verdict judge_logs(const std::vector<std::string> &_lines) {
   if (saw_pass) {
     return case_verdict::pass;
   }
-  return case_verdict::fail;
+  // No marker at all: the run aborted without emitting a verdict, which is a
+  // harness/interpreter error rather than a genuine GATE_FAIL.
+  return case_verdict::error;
 }
 
 const char *verdict_name(case_verdict _v) {

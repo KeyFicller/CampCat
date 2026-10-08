@@ -14,4 +14,4 @@ imgui.ini
 /docs
 /tests/smoke/user
 
-.worktrees/
+/.worktrees/

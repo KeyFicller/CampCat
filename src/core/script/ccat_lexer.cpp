@@ -74,7 +74,9 @@ Token Lexer::lex_string() {
     buf.push_back(c);
     advance_cursor();
   }
-  return Token{TokKind::Ident, std::move(buf), line, col}; // malformed; parser will choke
+  // Unterminated string literal: surface an error token (not a valid-looking
+  // identifier) so the parser reports a real syntax error at this position.
+  return Token{TokKind::Err, std::move(buf), line, col};
 }
 
 Token Lexer::lex_ident_or_kw() {
@@ -204,13 +206,13 @@ Token Lexer::next() {
     return m_cur;
   default:
     if (std::isalpha(static_cast<unsigned char>(c)) || c == '_' ||
-        std::isdigit(static_cast<unsigned char>(c))) {
+        std::isdigit(static_cast<unsigned char>(c)) || c == '-' || c == '.') {
       m_cur = lex_ident_or_kw();
       return m_cur;
     }
     std::string junk(1, c);
     advance_cursor();
-    m_cur = Token{TokKind::Ident, std::move(junk), line, col};
+    m_cur = Token{TokKind::Err, std::move(junk), line, col};
     return m_cur;
   }
 }

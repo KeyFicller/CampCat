@@ -2,6 +2,7 @@
 
 #include "core/automation/automation_driver.h"
 
+#include <array>
 #include <memory>
 #include <string>
 
@@ -50,7 +51,7 @@ public:
 
 const ccat_automation_driver g_ccat_driver{};
 
-const automation_driver *const k_drivers[] = {
+const std::array<const automation_driver *, 1> k_drivers = {
     &g_ccat_driver,
 };
 

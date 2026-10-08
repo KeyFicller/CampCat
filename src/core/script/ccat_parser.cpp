@@ -1,6 +1,7 @@
 #include "core/script/ccat_parser.h"
 
 #include <cctype>
+#include <cmath>
 #include <cstdlib>
 #include <limits>
 #include <sstream>
@@ -183,7 +184,8 @@ private:
       fail(std::string(_ctx) + ": def has wrong type (expected number)");
     }
     const double n = _v.number;
-    if (n < 0 || n > static_cast<double>(std::numeric_limits<int>::max())) {
+    if (!std::isfinite(n) || n < 0 ||
+        n > static_cast<double>(std::numeric_limits<int>::max())) {
       fail(std::string(_ctx) + ": number out of int range");
     }
     const int as_int = static_cast<int>(n);
@@ -244,13 +246,16 @@ private:
         fail(std::string(_ctx) + ": def `" + t.text + "` is not a number");
       }
       (void)m_lex.next();
+      if (!std::isfinite(def->number)) {
+        fail(std::string(_ctx) + ": number is not finite");
+      }
       return def->number;
     }
     (void)m_lex.next();
     try {
       size_t consumed = 0;
       const double v = std::stod(t.text, &consumed);
-      if (consumed != t.text.size()) {
+      if (consumed != t.text.size() || !std::isfinite(v)) {
         fail(std::string(_ctx) + ": malformed number");
       }
       return v;

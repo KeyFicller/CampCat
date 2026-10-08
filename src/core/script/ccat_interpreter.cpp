@@ -108,7 +108,9 @@ bool CcatInterpreter::capture_screen(
 
 bool CcatInterpreter::image_matches(const std::string &_rel_path,
                                     const std::function<bool()> &_should_stop,
-                                    bool *_found, bool _dump_debug) {
+                                    bool *_found, bool _dump_debug,
+                                    cv::Mat *_screen_out,
+                                    match_result *_match_out) {
   const auto abs_path = resolve_image_path(_rel_path);
   std::error_code ec;
   if (!std::filesystem::is_regular_file(abs_path, ec)) {
@@ -130,6 +132,12 @@ bool CcatInterpreter::image_matches(const std::string &_rel_path,
   }
   if (_dump_debug) {
     dump_match_debug("if", abs_path, screen, *opt);
+  }
+  if (_screen_out) {
+    *_screen_out = screen;
+  }
+  if (_match_out) {
+    *_match_out = *opt;
   }
   *_found = opt->found;
   return true;
@@ -210,7 +218,10 @@ CcatInterpreter::tap_image(const std::string &_rel_path,
   if (!m_adb->tap(opt->center.x, opt->center.y)) {
     return std::string("tap: adb tap failed");
   }
-  std::this_thread::sleep_for(pause_after_tap(*m_cfg));
+  if (auto sl = cooperative_sleep_ms(
+          static_cast<int>(pause_after_tap(*m_cfg).count()), _should_stop)) {
+    return sl;
+  }
   return std::nullopt;
 }
 
@@ -252,7 +263,10 @@ std::optional<std::string> CcatInterpreter::swipe_templates_impl(
                     m_to->center.y, m_cfg->swipe_duration_ms)) {
     return std::string("swipe: adb swipe failed");
   }
-  std::this_thread::sleep_for(pause_after_tap(*m_cfg));
+  if (auto sl = cooperative_sleep_ms(
+          static_cast<int>(pause_after_tap(*m_cfg).count()), _should_stop)) {
+    return sl;
+  }
   return std::nullopt;
 }
 
@@ -273,7 +287,10 @@ std::optional<std::string> CcatInterpreter::tap_at_impl(
   if (!m_adb->tap(px, py)) {
     return std::string("tap_at: adb tap failed");
   }
-  std::this_thread::sleep_for(pause_after_tap(*m_cfg));
+  if (auto sl = cooperative_sleep_ms(
+          static_cast<int>(pause_after_tap(*m_cfg).count()), _should_stop)) {
+    return sl;
+  }
   return std::nullopt;
 }
 
@@ -325,7 +342,10 @@ std::optional<std::string> CcatInterpreter::tap_offset_impl(
   if (!m_adb->tap(px, py)) {
     return std::string("tap_offset: adb tap failed");
   }
-  std::this_thread::sleep_for(pause_after_tap(*m_cfg));
+  if (auto sl = cooperative_sleep_ms(
+          static_cast<int>(pause_after_tap(*m_cfg).count()), _should_stop)) {
+    return sl;
+  }
   return std::nullopt;
 }
 
@@ -350,7 +370,10 @@ std::optional<std::string> CcatInterpreter::swipe_at_impl(
   if (!m_adb->swipe(ax, ay, bx, by, m_cfg->swipe_duration_ms)) {
     return std::string("swipe_at: adb swipe failed");
   }
-  std::this_thread::sleep_for(pause_after_tap(*m_cfg));
+  if (auto sl = cooperative_sleep_ms(
+          static_cast<int>(pause_after_tap(*m_cfg).count()), _should_stop)) {
+    return sl;
+  }
   return std::nullopt;
 }
 
@@ -431,17 +454,22 @@ CcatInterpreter::run_script_impl(const std::string &_rel,
     return oss.str();
   }
 
-  const std::filesystem::path saved_base = m_images_base;
-  const std::filesystem::path saved_script = m_script_path;
+  struct frame_guard {
+    CcatInterpreter &interp;
+    std::filesystem::path saved_base;
+    std::filesystem::path saved_script;
+    ~frame_guard() {
+      interp.m_run_stack.pop_back();
+      interp.m_images_base = std::move(saved_base);
+      interp.m_script_path = std::move(saved_script);
+    }
+  } guard{*this, m_images_base, m_script_path};
+
   m_images_base = abs.parent_path();
   m_script_path = abs;
   m_run_stack.push_back(abs);
 
   stmt_exec_outcome o = exec_program_stmts(*prog, _should_stop);
-
-  m_run_stack.pop_back();
-  m_images_base = saved_base;
-  m_script_path = saved_script;
 
   if (o.kind == stmt_exec_outcome::tag::returned || o.is_ok()) {
     return std::nullopt;
@@ -469,25 +497,26 @@ std::optional<std::string> CcatInterpreter::wait_until_impl(
     if (_should_stop()) {
       return std::string("stopped");
     }
-    if (std::chrono::steady_clock::now() >= deadline) {
-      bool ignored = false;
-      (void)image_matches(_rel_path, _should_stop, &ignored,
-                          /*_dump_debug=*/true);
-      std::ostringstream oss;
-      oss << "wait_until: timeout after " << _timeout_ms << " ms for "
-          << _rel_path;
-      return oss.str();
-    }
     bool found = false;
-    if (!image_matches(_rel_path, _should_stop, &found, /*_dump_debug=*/false)) {
+    cv::Mat screen;
+    match_result mr{};
+    if (!image_matches(_rel_path, _should_stop, &found, /*_dump_debug=*/false,
+                       &screen, &mr)) {
       if (_should_stop()) {
         return std::string("stopped");
       }
       return std::string("wait_until: screencap failed");
     }
     if (found) {
-      (void)image_matches(_rel_path, _should_stop, &found, /*_dump_debug=*/true);
+      dump_match_debug("wait_until", abs_path, screen, mr);
       return std::nullopt;
+    }
+    if (std::chrono::steady_clock::now() >= deadline) {
+      dump_match_debug("wait_until", abs_path, screen, mr);
+      std::ostringstream oss;
+      oss << "wait_until: timeout after " << _timeout_ms << " ms for "
+          << _rel_path;
+      return oss.str();
     }
     if (auto sl = cooperative_sleep_ms(50, _should_stop)) {
       return sl;
@@ -710,15 +739,24 @@ CcatInterpreter::run(const Program &_program,
                      const std::function<bool()> &_should_stop) {
   automation_cycle_result r{};
   const bool pushed_entry = !m_script_path.empty();
+  std::error_code ec;
+  const std::filesystem::path entry =
+      std::filesystem::weakly_canonical(m_script_path, ec);
   if (pushed_entry) {
-    m_run_stack.push_back(m_script_path);
+    m_run_stack.push_back(ec ? m_script_path : entry);
   }
+
+  struct pop_guard {
+    std::vector<std::filesystem::path> &stack;
+    bool active;
+    ~pop_guard() {
+      if (active) {
+        stack.pop_back();
+      }
+    }
+  } guard{m_run_stack, pushed_entry};
 
   stmt_exec_outcome o = exec_program_stmts(_program, _should_stop);
-
-  if (pushed_entry && !m_run_stack.empty()) {
-    m_run_stack.pop_back();
-  }
 
   if (o.kind == stmt_exec_outcome::tag::returned || o.is_ok()) {
     r.ok = true;

@@ -50,8 +50,8 @@ struct app_config {
 
   scheduler_config scheduler{};
 
-  /// String id driving `make_game_automation`; `"none"` keeps automation idle.
-  std::string active_script_id = "ccat_script";
+  /// String id driving `make_game_automation`; empty or `"none"` keeps automation idle.
+  std::string active_script_id;
 
   /// Mapping script id → json path resolved relative to `config_home`.
   std::unordered_map<std::string, std::string> script_config_paths;

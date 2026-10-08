@@ -169,8 +169,8 @@ bool is_source_complete(std::string_view source) {
           awaiting_brace = false;
           continue;
         }
-        // `while` without `(` after do-body — incomplete / parse later
-        awaiting_brace = false;
+        // `while` head after a `do` body is still an incomplete statement.
+        awaiting_brace = true;
         continue;
       }
 

@@ -88,11 +88,15 @@ private:
    * @param[in] _rel_path Relative path merged against bundled images_base unless absolute.
    * @param[in] _should_stop Cooperative cancellation piped through capture_screen internals.
    * @param[out] _found Populated true when correlation surpasses configured matcher threshold.
+   * @param[in] _dump_debug Dump annotated match debug PNG when the feature is enabled.
+   * @param[out] _screen_out Optional; receives the captured frame (shallow copy) for reuse.
+   * @param[out] _match_out Optional; receives the best correlation payload for reuse.
    * @return False only when screencap plumbing aborts; unreadable PNG yields *_found=false yet true return.
    */
   bool image_matches(const std::string &_rel_path,
                      const std::function<bool()> &_should_stop, bool *_found,
-                     bool _dump_debug = true);
+                     bool _dump_debug = true, cv::Mat *_screen_out = nullptr,
+                     match_result *_match_out = nullptr);
 
   /**
    * @brief Locate `_rel_path`, tap correlation peak, then honor tap pacing hints from `_cfg`.

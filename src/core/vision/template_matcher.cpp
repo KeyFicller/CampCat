@@ -21,6 +21,10 @@ match_result template_matcher::match_once(const cv::Mat& _screen_bgr,
 
   cv::Mat hay = _screen_bgr;
   if (_roi.area() > 0) {
+    const cv::Rect frame{0, 0, _screen_bgr.cols, _screen_bgr.rows};
+    if ((_roi & frame) != _roi) {
+      return {}; // ROI must lie fully inside the captured frame
+    }
     hay = _screen_bgr(_roi);
   }
 
@@ -30,11 +34,9 @@ match_result template_matcher::match_once(const cv::Mat& _screen_bgr,
 
   cv::Mat result;
   cv::matchTemplate(hay, _templ_bgr, result, cv::TM_CCOEFF_NORMED);
-  double min_val = 0;
   double max_val = 0;
-  cv::Point min_loc;
   cv::Point max_loc;
-  cv::minMaxLoc(result, &min_val, &max_val, &min_loc, &max_loc);
+  cv::minMaxLoc(result, nullptr, &max_val, nullptr, &max_loc);
 
   match_result mr;
   mr.confidence = max_val;
@@ -54,10 +56,13 @@ match_result template_matcher::match(const cv::Mat& _screen_bgr,
                                      const cv::Mat& _templ_bgr,
                                      double _threshold,
                                      cv::Rect _roi) const {
+  // Normalize once so every entry point treats <= 0 as "use the stored default"
+  // (a raw 0 would otherwise make `confidence >= threshold` always true).
+  const double thr = _threshold > 0 ? _threshold : m_default_threshold;
   if (m_multiscale) {
-    return match_multiscale_inner(_screen_bgr, _templ_bgr, _threshold, _roi);
+    return match_multiscale_inner(_screen_bgr, _templ_bgr, thr, _roi);
   }
-  return match_once(_screen_bgr, _templ_bgr, _threshold, _roi);
+  return match_once(_screen_bgr, _templ_bgr, thr, _roi);
 }
 
 match_result template_matcher::match_multiscale_inner(
@@ -87,8 +92,7 @@ std::optional<match_result> template_matcher::match_file(
   if (!load_template(_png_path, &templ)) {
     return std::nullopt;
   }
-  const double thr = _threshold > 0 ? _threshold : m_default_threshold;
-  return match(_screen_bgr, templ, thr, _roi);
+  return match(_screen_bgr, templ, _threshold, _roi);
 }
 
 bool template_matcher::load_template(const std::string& _png_path,
