@@ -108,6 +108,9 @@ add_library(campcat_core STATIC
   src/core/script/ccat_parser.cpp
   src/core/script/ccat_interpreter.cpp
   src/core/script/ccat_repl.cpp
+  src/core/process.cpp
+  src/core/llm/llm_protocol.cpp
+  src/core/llm/llm_host.cpp
   src/ccat_script/ccat_script_profile.cpp
   src/ccat_script/ccat_script_automation.cpp
   src/ccat_script/ccat_program_runner.cpp
@@ -124,6 +127,7 @@ target_link_libraries(campcat_core PUBLIC
 add_executable(campcat
   src/app/main.cpp
   src/app/template_capture_ui.cpp
+  src/app/llm_ui.cpp
   src/app/native_file_dialog.cpp
 )
 target_include_directories(campcat PRIVATE

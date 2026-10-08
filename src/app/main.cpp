@@ -1,6 +1,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <csignal>
 #include <cstdio>
 #include <ctime>
 #include <deque>
@@ -35,6 +36,7 @@
 #include "core/log_buffer.h"
 #include "core/scheduler.h"
 #include "app/template_capture_ui.h"
+#include "app/llm_ui.h"
 #include "app/native_file_dialog.h"
 #include "ccat_script/ccat_script_profile.h"
 #include "ccat_script/ccat_program_runner.h"
@@ -122,6 +124,14 @@ bool persist_bundle_to_disk(
 } // namespace
 
 int main(int argc, char **argv) {
+  // The LLM sidecar can die between our readiness check and a write to its
+  // stdin; that write would raise SIGPIPE and kill the whole app. Ignoring it
+  // turns the case into an ordinary EPIPE that `llm_host` already reports.
+  // The sidecar itself re-enables the default (see `process::spawn`).
+#ifndef _WIN32
+  std::signal(SIGPIPE, SIG_IGN);
+#endif
+
   const std::filesystem::path cfg_path =
       std::filesystem::path(argc >= 2 ? argv[1] : k_default_config_relative);
 
@@ -549,8 +559,8 @@ int main(int argc, char **argv) {
     const bool lock_manual_single = busy_now || scheduler.running();
     const char *status_label = busy_now ? "Running" : "Idle";
 
-    enum class shell_page : int { Run = 0, Script, Console, Settings };
-    static shell_page page = shell_page::Run;
+    enum class shell_page : int { Script = 0, Llm, Console, Settings };
+    static shell_page page = shell_page::Script;
     static double min_th = 0.35;
     static double max_th = 1.0;
 
@@ -614,8 +624,8 @@ int main(int argc, char **argv) {
       ImGui::Spacing();
       ImGui::Separator();
       ImGui::Spacing();
-      nav_item("Run", shell_page::Run);
       nav_item("Script", shell_page::Script);
+      nav_item("LLM", shell_page::Llm);
       nav_item("Console", shell_page::Console);
       ImGui::Spacing();
       ImGui::Separator();
@@ -628,10 +638,10 @@ int main(int argc, char **argv) {
                         ImGuiChildFlags_Borders);
 
       {
-        const char *page_title = "Run";
+        const char *page_title = "Script";
         switch (page) {
-        case shell_page::Script:
-          page_title = "Script";
+        case shell_page::Llm:
+          page_title = "LLM";
           break;
         case shell_page::Console:
           page_title = "Console";
@@ -639,9 +649,9 @@ int main(int argc, char **argv) {
         case shell_page::Settings:
           page_title = "Settings";
           break;
-        case shell_page::Run:
+        case shell_page::Script:
         default:
-          page_title = "Run";
+          page_title = "Script";
           break;
         }
         ImGui::PushFont(font_title);
@@ -663,7 +673,7 @@ int main(int argc, char **argv) {
         ImGui::Spacing();
       }
 
-      if (page == shell_page::Run) {
+      if (page == shell_page::Script) {
         ImGui::TextWrapped(
             "Run a single automation cycle, stop the current cycle, or arm "
             "the scheduler.");
@@ -730,7 +740,11 @@ int main(int argc, char **argv) {
             ImGui::TextUnformatted("Running a cycle...");
           }
         }
-      } else if (page == shell_page::Script) {
+
+        ImGui::Spacing();
+        ImGui::Separator();
+        ImGui::Spacing();
+
         std::vector<std::string> script_ids;
         script_ids.reserve(cfg_view.script_config_paths.size() + 1);
         script_ids.push_back("none");
@@ -841,6 +855,8 @@ int main(int argc, char **argv) {
         } else {
           ImGui::TextDisabled("Choose CampCat to edit script paths.");
         }
+      } else if (page == shell_page::Llm) {
+        llm_ui_draw_panel(cfg_view, lock_manual_single);
       } else if (page == shell_page::Console) {
         ImGui::TextWrapped(
             "Interactive .ccat console. Multiline uses ... until braces/parens "
@@ -1020,6 +1036,7 @@ int main(int argc, char **argv) {
   campcat::automation_log::clear_sink();
 
   template_capture_shutdown_gl();
+  llm_ui_shutdown_gl();
   ImGui_ImplOpenGL3_Shutdown();
   ImGui_ImplGlfw_Shutdown();
   ImGui::DestroyContext();

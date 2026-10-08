@@ -2,12 +2,17 @@
 /build-release
 /build-repl
 /cmake-build-*
+/.venv
 /.cache
+__pycache__/
+*.pyc
 compile_commands.json
 *.user
 .DS_Store
 imgui.ini
 /.vscode
+/.env
+/llm/.env
 /config/scripts/
 /config/match_debug
 /.summary
