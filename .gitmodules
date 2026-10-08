@@ -1,0 +1,15 @@
+[submodule ".cursor/skills/superpowers"]
+	path = .cursor/skills/superpowers
+	url = https://github.com/obra/superpowers
+[submodule ".cursor/skills/ponytail"]
+	path = .cursor/skills/ponytail
+	url = https://github.com/DietrichGebert/ponytail
+[submodule ".cursor/skills/langfuse"]
+	path = .cursor/skills/langfuse
+	url = https://github.com/langfuse/skills
+[submodule ".cursor/skills/open-code-review"]
+	path = .cursor/skills/open-code-review
+	url = https://github.com/alibaba/open-code-review
+[submodule ".cursor/skills/answer-me-with-html"]
+	path = .cursor/skills/answer-me-with-html
+	url = https://github.com/QingYunA/answer-me-with-html.git

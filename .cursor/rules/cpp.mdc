@@ -1,0 +1,75 @@
+---
+description: CampCat C++ 硬性基础——本机自带 Apple clang + C++20、分层边界、命名、CMake、测试、注释与语言
+globs: **/*.cpp,**/*.h,**/CMakeLists.txt
+alwaysApply: false
+---
+
+# 工具链
+
+- 编译器是本机自带的 Apple clang：`/usr/bin/clang++`（Xcode command line tools，Apple clang 17）。
+- 语言标准是 **C++20**（`CMakeLists.txt` 的 `CMAKE_CXX_STANDARD 20`）。不写依赖 C++23 / C++26 的设施。
+- 构建 / 运行照 `ReadMe.md`（`.vscode/tasks.json` 同款）：
+
+  ```bash
+  cmake -S . -B build -DOpenCV_DIR=/opt/homebrew/lib/cmake/opencv4
+  cmake --build build --target campcat
+  ./build/campcat
+  ```
+
+- `-Wall -Wextra` 这类警告 flags 加在 target 上，不全局。
+
+# 标准与依赖
+
+- C++20，不用编译器私有扩展。
+- 依赖由 CMake 声明：OpenCV 走 Homebrew（`find_package(OpenCV ...)` + `-DOpenCV_DIR=...`）；GLFW / ImGui / nlohmann-json / portable-file-dialogs 走 `FetchContent`（见 `CMakeLists.txt`）。新增依赖先改 `CMakeLists.txt`，不手拷源码。
+- 库层（`campcat_core`）只依赖 `opencv2/core.hpp` 与标准库。
+
+# 分层与边界
+
+- **UI 与核心分离**：ImGui / GLFW 只出现在 `src/app`；`src/core`、`src/ccat_script` 不得 `#include` ImGui / GLFW，也不得渲染。core 的公开头只依赖 `opencv2/core.hpp` + 标准库（+ 必要的自带头）。
+- **adb 只有一处边界**：所有 adb 子进程调用集中在 `adb_client`；其它模块不得 `fork` / `popen` / 自行拼 adb 命令行。
+- **视觉隔离**在 `template_matcher` / `screen_template_ops`；业务层不直接调 `cv::matchTemplate`。
+- **脚本语义隔离**在 `ccat_lang`（`Lexer` / `parse_program` / AST / `CcatInterpreter`）；UI 不解析 `.ccat`，只经 interpreter / runner 驱动。
+- **可插拔自动化**走 `automation_driver` + `automation_factory`，按 `shell_script_id`（`k_none` / `k_ccat_script`）分派；不在 core 里写 `if (game == "...")` 之类特判。
+- **库层不输出**：`campcat_core` 不得 `printf` / `std::cout` / `iostream`；日志走 `automation_log` / `log_buffer`，真正的输出只在前端（`src/app` renderer 或工具 CLI）。core 里用 `std::snprintf` 构造字符串可以，但不得直接写 stdout / stderr。
+
+# 命名
+
+- 文件、命名空间、函数 / 方法、变量、成员、参数一律**小写蛇形**；嵌套命名空间写 `namespace campcat::ccat_lang {}`。
+- 头文件一律 `.h`（C++ 头也用 `.h`，不用 `.hpp`），一律 `#pragma once`。
+- 成员变量带 `m_` 前缀：`m_adb_path`、`m_lines`。
+- 函数形参带 `_` 前缀：`int add(int _a, int _b)`、`std::string_view _source`。
+- `constexpr` 常量带 `k_` 前缀：`k_max_lines`、`k_slice_ms`、`k_default_config_relative`。
+- 宏只作第三方 workaround（如 `GL_SILENCE_DEPRECATION`），`UPPER_SNAKE`。
+- **类型名与枚举值跟随所在模块的既有风格**：`ccat_lang` 子系统多用 PascalCase（`Lexer` / `Token` / `Stmt` / `CcatInterpreter` / `TokKind`），其余模块多用 snake_case（`adb_client` / `log_buffer` / `automation_driver` / `app_config` / `screen_template_error`）。新代码照抄同目录写法，不跨模块重命名。
+- 纯数据载体（options / result 之类）用 `struct` + 默认成员初始化器；有不变式或生命周期的一律 `class`，多态基类带 `virtual ~T() = default`。
+- 枚举一律 `enum class`，不用裸 `enum`。
+
+# 错误处理
+
+- 预期内失败用返回值表达：`bool` 配 `*_out` 出参（如 `screencap_png(cv::Mat *_bgr_out, ...)`、`run(...)`），或 `std::optional`；不用哨兵值（`-1` / 空指针 / `size_t(-1)`）。
+- 可恢复的解析失败抛 `campcat::ccat_lang::parse_error`（带 `line` / `col`）。
+- 异常只在边界：解析、文件 I/O、子进程、启动期参数；`main` 顶层 `catch`。不跨 `ccat_lang` 边界乱抛。
+- 禁异常当控制流；禁 catch 后不处理。
+
+# 内存与所有权
+
+- 值语义优先；`app_config` 与结果结构按 `const &` 传，不搬。
+- 多态 AST 节点等拥有关系用 `std::unique_ptr`（`std::unique_ptr<Stmt>`、`std::unique_ptr<Program>`）。
+- 禁裸 `new` / `delete` / `malloc` / `free`；成对资源（子进程、文件）一律 RAII 包起来。
+- 禁全局可变状态；`log_buffer` 这类共享状态自带同步（`std::mutex`）。
+
+# 注释与语言
+
+- 源码（`.cpp` / `.h`）一律英文：注释、标识符、字符串、日志、测试名。
+- 头文件用 Doxygen：`/** @brief ... */`，参数 / 返回标 `@param[in] _x` / `@param[out] _out` / `@return ...`。
+- 注释只写**为什么**与非显然约束（协议契约、超时取舍）；不写变更记录、PR / issue 号、TODO。
+- `.md` 文档随既有文件用中文（`ReadMe.md`）或英文（`CCAT.md`）。
+
+# 测试
+
+- 走 CTest：`cmake --build build` 后 `ctest --test-dir build`（现有 `ccat_smoke` / `ccat_syntax` / `ccat_repl`）。
+- 测试可执行文件放 `src/tools/`（`campcat_smoke.cpp`、`ccat_repl_test.cpp`），由 `CMakeLists.txt` 的 `add_test` 注册；不引测试框架。
+- `.ccat` 语法 / 行为用例放 `tests/smoke/syntax/<case>/script.ccat`（头部 `expect` 声明 pass / parse_error），`campcat_smoke --offline` 离线跑。
+- 失败用 `std::fprintf(stderr, ...)` 并计数、返回非 0；不用断言库、不写 disabled / skip 测试。
+- 非平凡逻辑（词法 / 语法 / 求值 / 分支）必须有用例；改解析行为先补 `tests/smoke/syntax` 用例。
