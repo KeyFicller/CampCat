@@ -96,11 +96,6 @@ struct quiet {
   str<N> text;
 };
 
-/// Marks the approval half of a two-step tool flow, i.e. a tool that only
-/// exists while the human-approval gate is on: [[= js::approval_gate]].
-struct approval_gate_t {};
-inline constexpr approval_gate_t approval_gate{};
-
 // --- type traits ------------------------------------------------------------
 
 template <typename T>
@@ -266,13 +261,6 @@ consteval std::string_view quiet_note_of() {
   return std::string_view(std::define_static_string(text_of<^^quiet, Fn>()));
 }
 
-/// True when the tool carries [[= js::approval_gate]]: it is the half of a
-/// two-step flow that only makes sense while human approval is enabled.
-template <detail::meta::info Fn>
-consteval bool has_approval_gate() {
-  return has_annotation<^^approval_gate_t>(Fn);
-}
-
 // --- schema generation ------------------------------------------------------
 
 /// Splices a description into a generated schema, which is always one object.
@@ -409,8 +397,6 @@ struct tool_entry {
   std::string_view schema;
   std::string (*run)(const nlohmann::json &);
   bool returns_image = false;
-  /// Only offered to the model while the human-approval gate is on.
-  bool approval_gate = false;
   /// What the log shows in place of this tool's result. Non-empty also marks the
   /// tool quiet: the result is a document for the model, too long to print.
   std::string_view quiet_note;
@@ -435,25 +421,11 @@ inline void register_tool(tool_entry _entry) {
   tool_registry().push_back(std::move(_entry));
 }
 
-/// True when a registry entry is available to the model given the gate state.
-/// `tools_json` and `dispatch` must agree, or a tool the model cannot see could
-/// still be called and answered.
-inline bool offered(const tool_entry &_entry, bool _gate_on) {
-  return !_entry.approval_gate || _gate_on;
-}
-
 /// The whole registry as the OpenAI tools array the sidecar hands to bind_tools.
-/// Tools carrying [[= js::approval_gate]] are skipped unless `_include_gated`:
-/// they are the approval half of a two-step flow that only exists while the
-/// human gate is on, and offering them without the gate invites the model to
-/// take a step nobody will answer.
-inline std::string tools_json(bool _include_gated) {
+inline std::string tools_json() {
   std::string out = "[";
   bool first = true;
   for (const tool_entry &entry : tool_registry()) {
-    if (!offered(entry, _include_gated)) {
-      continue;
-    }
     if (!first) {
       out += ",";
     }
@@ -477,7 +449,6 @@ inline std::string tools_json(bool _include_gated) {
     ::campcat::llm::js::register_tool(::campcat::llm::js::tool_entry{              \
         #fn, ::campcat::llm::js::tool_schema<^^fn>(), &js_run_##fn,                \
         ::campcat::llm::js::has_image_annotation<^^fn>(),                          \
-        ::campcat::llm::js::has_approval_gate<^^fn>(),                             \
         ::campcat::llm::js::quiet_note_of<^^fn>()});                               \
     return 0;                                                                      \
   }();                                                                             \

@@ -17,6 +17,8 @@ device.
 A PNG path or a message may be a quoted string, a string `def`, or a bare word (letters, digits, `_`, `.`, `-`), so
 `tap(ok.png)` is legal but spaces need quotes. Absolute paths are used as is; relative ones resolve against the
 directory of the `.ccat` file being run. Strings are `"..."` with `\n`, `\t`, `\\`, `\"`; any other `\x` is `x`.
+Scripts you save live in a bundle, `config/scripts/llm/<name>/main.ccat` with their templates beside it; run one from
+another script with `run("<name>/main.ccat")`.
 
 Counts and timeouts are non-negative integer literals: `wait(0)` and `loop(0)` are fine, `wait_until("a.png", 0)` and
 `retry(0)` are rejected while parsing. No arithmetic: `wait(1000 + 500)` is a syntax error.

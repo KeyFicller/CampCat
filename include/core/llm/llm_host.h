@@ -193,6 +193,12 @@ private:
 
   /// Supplied by the worker; read when a turn starts. Not touched by readers.
   llm::tool_context m_tool_ctx;
+  /// The session's last screenshot. Deliberately not a field of `m_tool_ctx`:
+  /// `set_tool_context` is called every turn (the worker rebuilds it per turn and
+  /// clears it after), so storing it there would be wiped by the next injection.
+  /// Written and read only by the worker thread inside `run_turn`; `reset()`
+  /// clears it after joining that thread.
+  llm::screen_state m_screen;
   /// A pending tool call the sidecar is blocked on, guarded by `m_mu`.
   llm_protocol::message m_tool_call;
   bool m_has_tool = false;

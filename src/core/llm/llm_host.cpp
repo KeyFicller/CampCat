@@ -330,7 +330,8 @@ std::string llm_host::run_tool(const llm_protocol::message &_call) {
     return llm_protocol::build_tool_result(_call.call_id, false, "", error, "");
   }
 
-  const llm::tool_reply reply = llm::dispatch(_call.tool_name, _call.tool_args_json);
+  const llm::tool_reply reply =
+      llm::dispatch(_call.tool_name, _call.tool_args_json, _call.image_b64);
   if (reply.ok) {
     const std::string shown =
         reply.quiet_note.empty() ? reply.text : std::string(reply.quiet_note);
@@ -415,15 +416,15 @@ llm_result llm_host::run_turn(const std::filesystem::path &_repo_root,
     return r;
   }
 
-  // A fresh context per turn, so the screen size starts unknown: coordinates are
-  // only meaningful against a screenshot the model actually asked for, and the
-  // `screenshot` tool is what fills these in.
   // One context per turn, carrying the host's own approval callback: the gate has
-  // to have somebody to ask before it can work.
+  // to have somebody to ask before it can work. The screenshot is injected from
+  // `m_screen` rather than taken fresh: it belongs to the session, so coordinates
+  // taken from it stay valid until the model asks for a new one.
   llm::tool_context ctx = m_tool_ctx;
   ctx.request_approval = [this](const llm::approval_request &_req) {
     return service_approval(_req);
   };
+  ctx.screen = m_screen;
   llm::set_context(ctx);
 
   std::string err;
@@ -436,11 +437,20 @@ llm_result llm_host::run_turn(const std::filesystem::path &_repo_root,
   std::string request =
       llm_protocol::build_turn_request(id, _prompt, llm::tools_json());
   request.push_back('\n');
-  return exchange(request);
+  const llm_result turn = exchange(request);
+  // This turn may have replaced the screenshot; take it back for the next one to
+  // inject. A turn that never called `screenshot` hands back what it was given,
+  // so this cannot blank the session's picture.
+  llm::current_screen(&m_screen);
+  return turn;
 }
 
 llm_result llm_host::reset(const std::filesystem::path &_repo_root) {
   llm_result r;
+  // The session is over: the screenshot goes with it, at the same moment the
+  // sidecar drops its picture store. Before the early return below -- no child
+  // means there was no history, and a stale screenshot would only mislead.
+  m_screen = llm::screen_state{};
   {
     std::lock_guard<std::mutex> lk(m_mu);
     if (m_child.pid() <= 0 || m_broken || !m_ready) {

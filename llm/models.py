@@ -105,8 +105,8 @@ def _setting(name: str, provider_default: str) -> str:
 
 
 _CCAT_CHEATSHEET = (
-    "You can also write a .ccat script and run it with `run_script`. Call `ccat_help` "
-    "for the full language reference. The parts that are easy to get wrong:\n"
+    "Write a .ccat script and run it with `run_script`. Call `ccat_help` "
+    "for the full reference. The parts that are easy to get wrong:\n"
     "  * Comments are `//`; semicolons are optional. There are no expressions and no "
     "runtime variables: `defs` values are substituted while parsing.\n"
     "  * `tap_at(x, y)` / `swipe_at(...)` take coordinates normalized to [0,1] against "
@@ -119,7 +119,8 @@ _CCAT_CHEATSHEET = (
     "break, return.\n"
     "  * A failing statement stops the script and comes back to you as an error. "
     "Statements that need a PNG (`tap`, `tap_offset`, `swipe`, `wait_until`) or a `.ccat` "
-    "(`run`) fail when the file is missing; an `if` with a missing template is just false."
+    "(`run`) fail when the file is missing; an `if` with a missing template is just false.\n"
+    "  * `save_script` / `save_template` save a script and its templates as a bundle; run it with `run(\"<name>/main.ccat\")`."
 )
 
 

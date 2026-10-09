@@ -7,7 +7,8 @@ namespace campcat::llm_protocol {
 
 /// Current protocol revision. The sidecar states its own in `ready`; a mismatch
 /// means one side was rebuilt without the other, which breaks the tools.
-constexpr int k_protocol_version = 3;
+/// 4: `tool_call` may carry `image_b64`, a screenshot the sidecar kept.
+constexpr int k_protocol_version = 4;
 
 /**
  * @brief One decoded line from the sidecar's stdout.
@@ -33,6 +34,7 @@ struct message {
   std::string call_id;        ///< echoed back in the answering tool_result
   std::string tool_name;
   std::string tool_args_json; ///< the model's raw arguments object, unparsed
+  std::string image_b64;      ///< a screenshot this call needs, empty when none
 
   // log
   std::string level;
@@ -51,6 +53,21 @@ struct message {
  * @param[in] _len Number of bytes to encode.
  */
 std::string base64_encode(const unsigned char *_data, std::size_t _len);
+
+/**
+ * @brief Decode standard base64 (RFC 4648), with or without `=` padding.
+ *
+ * Strict about the alphabet: any space, newline or other byte outside the
+ * alphabet fails rather than being skipped, so a mangled line cannot decode
+ * into plausible-looking bytes. The two to four bits left over from the final
+ * group are discarded without being required to be zero, which matches what a
+ * canonical encoder produces.
+ *
+ * @param[in] _in Undecoded text.
+ * @param[out] _out Decoded bytes; cleared before decoding and on failure.
+ * @return False when the input is not valid base64.
+ */
+bool base64_decode(std::string_view _in, std::string *_out);
 
 /**
  * @brief Build one `turn` request line (no trailing newline).

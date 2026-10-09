@@ -67,6 +67,14 @@ class TurnState(TypedDict, total=False):
 # Only the NDJSON read loop touches this, so it needs no lock.
 _MESSAGES: list = []
 
+# The screenshots this session can still cut a template out of, by the number
+# their caption showed. Kept out of _MESSAGES on purpose: a picture in the
+# history is re-sent on every later request and eventually summarized away,
+# while the model only needs the *number* to be able to point at an old frame
+# (cutting a dialog it already tapped away). Unbounded, cleared per session.
+_IMAGES: dict[int, str] = {}
+_NEXT_SHOT = 0
+
 # Built lazily: both the budget and the model come from the environment, which
 # main.py loads from llm/.env before the first request. A summary lands in
 # _MESSAGES as the first HumanMessage, never as a SystemMessage: the summarizer
@@ -76,8 +84,10 @@ _MW = None
 
 def reset_history() -> None:
     """Drop every turn. The next request starts a fresh conversation."""
-    global _MW
+    global _MW, _NEXT_SHOT
     _MESSAGES.clear()
+    _IMAGES.clear()
+    _NEXT_SHOT = 0
     _MW = None
 
 
@@ -89,8 +99,9 @@ def history_size() -> int:
 def _middleware():
     """Summarizes older turns once the request approaches the budget.
 
-    `keep` is a quarter of the budget: it has to comfortably exceed one image
-    (~950 tokens), or the verbatim window could retain no screenshots at all.
+    `keep` is a quarter of the budget. The history is text only -- screenshots
+    live in `_IMAGES` and only the latest one is re-sent, by `build_messages` --
+    so a quarter already covers many turns.
     """
     global _MW
     if _MW is None:
@@ -156,9 +167,22 @@ def compact(state: TurnState) -> dict:
 
 
 def build_messages(state: TurnState) -> dict:
-    """Assemble the model input from the conversation plus the current turn."""
+    """Assemble the model input from the conversation plus the current turn.
+
+    The most recent screenshot rides along as its own user turn, so a request
+    that follows a turn full of taps still opens on the screen the model last
+    looked at. Only the latest one: older frames stay in `_IMAGES` to be cut
+    from, not to be re-sent, and the prefix above stays byte-identical for the
+    provider's prompt cache.
+    """
     messages: list[object] = [SystemMessage(content=models.system_prompt())]
     messages.extend(_MESSAGES)
+    latest = max(_IMAGES, default=0)
+    if latest:
+        messages.append(
+            HumanMessage(content=_shot_content(
+                latest, _shot_caption(latest, "The last screenshot you took:")))
+        )
     messages.append(HumanMessage(content=state.get("text", "")))
     return {"messages": messages}
 
@@ -236,6 +260,43 @@ def png_size(png_b64: str) -> tuple[int, int] | None:
     return struct.unpack(">II", head[16:24])
 
 
+def _store_shot(image_b64: str) -> int:
+    """Files one screenshot under the next number and returns it.
+
+    Numbers only ever go up, so a `shot` the model remembers from an earlier
+    request keeps pointing at the same picture.
+    """
+    global _NEXT_SHOT
+    _NEXT_SHOT += 1
+    _IMAGES[_NEXT_SHOT] = image_b64
+    return _NEXT_SHOT
+
+
+def _shot_caption(shot: int, lead: str) -> str:
+    """`lead` plus the number and size, which is what names this frame later.
+
+    `save_template`'s `shot` is this number and its box is in these pixels, so
+    both have to be on screen next to the picture.
+    """
+    size = png_size(_IMAGES[shot])
+    return (f"{lead} #{shot} ({size[0]}x{size[1]} pixels)." if size
+            else f"{lead} #{shot}.")
+
+
+def _shot_content(shot: int, caption: str) -> list[dict]:
+    """One numbered screenshot as user-turn content, for the model to look at.
+
+    A user turn, never a tool result: ChatDeepSeek json.dumps()es list content
+    on a `tool` message, so a data URL there is billed as text. One 1080x2400
+    screenshot cost 2.3M tokens that way, against ~1k here.
+    """
+    return [
+        {"type": "text", "text": caption},
+        {"type": "image_url",
+         "image_url": {"url": f"data:{MIME};base64,{_IMAGES[shot]}"}},
+    ]
+
+
 def run_tools(state: TurnState) -> dict:
     """Run the tool calls the model just asked for, one by one.
 
@@ -248,32 +309,35 @@ def run_tools(state: TurnState) -> dict:
     results: list = []
     for call in calls:
         name = call.get("name", "")
-        reply = tools.call_cpp(name, call.get("args") or {})
+        args = call.get("args") or {}
+        # Resolved before the round's own screenshot is stored: the model cannot
+        # name a number that does not exist yet, and a stale one must not point
+        # at the picture this very round is about to produce.
+        reply = tools.call_cpp(name, args, tools.resolve_shot(args, _IMAGES))
         if reply.get("ok"):
             content: object = reply.get("text") or "ok"
         else:
             content = "error: " + str(reply.get("error", ""))
         results.append(ToolMessage(content=content, tool_call_id=call.get("id", "")))
         image = reply.get("image_b64") or ""
-        if image:
-            # The image rides in a user turn, never in the tool result:
-            # ChatDeepSeek json.dumps()es a list content on a `tool` message, so
-            # a data URL there is billed as text. One 1080x2400 screenshot cost
-            # 2.3M tokens that way, against ~1k here.
-            size = png_size(image)
-            caption = (
-                f"Screenshot after {name} ({size[0]}x{size[1]} pixels)."
-                if size
-                else f"Screenshot after {name}."
-            )
+        if not image:
+            continue
+        if name == "screenshot":
+            shot = _store_shot(image)
             results.append(
-                HumanMessage(
-                    content=[
-                        {"type": "text", "text": caption},
-                        {"type": "image_url",
-                         "image_url": {"url": f"data:{MIME};base64,{image}"}},
-                    ]
-                )
+                HumanMessage(content=_shot_content(
+                    shot, _shot_caption(shot, "Screenshot")))
+            )
+        else:
+            # Every other image tool returns a marked-up copy for the user to
+            # look at. It is not stored: its box and label would be baked into
+            # any template cut from it.
+            results.append(
+                HumanMessage(content=[
+                    {"type": "text", "text": f"Image after {name}."},
+                    {"type": "image_url",
+                     "image_url": {"url": f"data:{MIME};base64,{image}"}},
+                ])
             )
     return {"messages": messages + results,
             "tool_rounds": state.get("tool_rounds", 0) + 1}

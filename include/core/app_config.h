@@ -48,9 +48,10 @@ struct app_config {
   int max_step_retries = 12;
   int step_retry_interval_ms = 500;
 
-  /// When true, `tap` needs a prior human-approved `request_tap` (see
-  /// llm_tools.h / llm_host.h). Off by default: with it off the tool list and
-  /// `tap` behave exactly as they did before the gate existed.
+  /// When true, the tools that change the device or write files (`tap`,
+  /// `run_script`, `save_script`, `save_template`) show the user what they are
+  /// about to do and wait for approval. Off by default: they then act without
+  /// asking. See llm_tools.h / llm_host.h.
   bool require_tool_approval = false;
 
   scheduler_config scheduler{};

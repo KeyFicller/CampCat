@@ -11,6 +11,26 @@ namespace {
 constexpr char k_base64_table[] =
     "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
+/// Value of one base64 character, or -1 when it is not in the alphabet.
+int base64_value(unsigned char _c) {
+  if (_c >= 'A' && _c <= 'Z') {
+    return _c - 'A';
+  }
+  if (_c >= 'a' && _c <= 'z') {
+    return _c - 'a' + 26;
+  }
+  if (_c >= '0' && _c <= '9') {
+    return _c - '0' + 52;
+  }
+  if (_c == '+') {
+    return 62;
+  }
+  if (_c == '/') {
+    return 63;
+  }
+  return -1;
+}
+
 } // namespace
 
 std::string base64_encode(const unsigned char *_data, std::size_t _len) {
@@ -47,6 +67,45 @@ std::string base64_encode(const unsigned char *_data, std::size_t _len) {
     out.push_back('=');
   }
   return out;
+}
+
+bool base64_decode(std::string_view _in, std::string *_out) {
+  if (_out == nullptr) {
+    return false;
+  }
+  _out->clear();
+
+  std::size_t len = _in.size();
+  std::size_t pad = 0;
+  while (len > 0 && _in[len - 1] == '=') {
+    if (++pad > 2) {
+      return false;
+    }
+    --len;
+  }
+  // A lone trailing character cannot encode a byte, and padding has to complete
+  // the group it was added to.
+  if (len % 4 == 1 || (pad > 0 && (len + pad) % 4 != 0)) {
+    return false;
+  }
+
+  _out->reserve(len / 4 * 3 + 2);
+  unsigned int acc = 0;
+  int bits = 0;
+  for (std::size_t i = 0; i < len; ++i) {
+    const int v = base64_value(static_cast<unsigned char>(_in[i]));
+    if (v < 0) {
+      _out->clear();
+      return false;
+    }
+    acc = (acc << 6) | static_cast<unsigned int>(v);
+    bits += 6;
+    if (bits >= 8) {
+      bits -= 8;
+      _out->push_back(static_cast<char>((acc >> bits) & 0xFFU));
+    }
+  }
+  return true;
 }
 
 std::string build_turn_request(long _id, std::string_view _text,
@@ -144,6 +203,7 @@ bool parse_line(std::string_view _line, message *_out) {
     // Kept as text: the C++ binder parses it, so malformed arguments surface as
     // a tool error the model can see rather than being dropped here.
     _out->tool_args_json = j.contains("args") ? j["args"].dump() : std::string("{}");
+    _out->image_b64 = j.value("image_b64", std::string());
     return true;
   }
 
