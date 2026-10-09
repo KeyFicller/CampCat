@@ -297,9 +297,10 @@ CPP_REFLECT_TOOL(request_run_script)
 [[= js::doc{.text = js::str("Runs a .ccat script on the device and returns what happened. "
                             "While human approval is on, the exact same source must have "
                             "been approved through request_run_script first. Call ccat_help "
-                            "for the language. No template PNGs exist yet, so statements "
-                            "that name a file (tap, swipe, if, wait_until, run) will fail; "
-                            "the tap_at / swipe_at forms work.")}]]
+                            "for the language. No template PNGs exist yet, so tap, "
+                            "tap_offset, swipe, wait_until and run will fail (they need a "
+                            "PNG or a .ccat on disk); an `if` on a missing PNG is just "
+                            "false. The tap_at / swipe_at forms work.")}]]
 [[= js::param_docs(js::str("The full .ccat script source to run."))]]
 std::string run_script(std::string source) {
   const std::unique_ptr<ccat_lang::Program> prog = parse_or_throw(source);

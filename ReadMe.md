@@ -4,7 +4,8 @@ Mac 上跑 Android 模拟器的挂机壳子：ADB 截图 + OpenCV 模板匹配�
 
 ## 能干什么
 
-- **脚本自动化**：流程写在 `config/scripts/*.ccat`；语法见 [CCAT.md](CCAT.md)。
+- **脚本自动化**：`.ccat` 脚本放 `config/` 下（一般 `config/scripts/`），模板 PNG 放**同一目录**；语法见 [CCAT.md](CCAT.md)。
+  `config/scripts/<id>.json` 的 `source` 指向脚本（相对 `config/`）；`config/default.json` 的 `scripts` 登记有哪些 id、`active_script` 选当前跑哪个。
 - **定时调度**：间隔 + 抖动，周期跑当前脚本。
 - **LLM**：把截图（模拟器 ADB 截图或本地图片）发给 OpenAI 兼容的 `deepseek-flash`，拿回文字描述；API key 优先读环境变量 `DEEPSEEK_API_KEY`，没有则读 `llm/.env`（dotenv 格式，已 gitignore）。
 - **Console**：ImGui 内交互输入 `.ccat` 片段（`>>>` / `...` 多行），真机执行；与 cycle 互斥。

@@ -1,87 +1,86 @@
 # CampCat (`.ccat`) language
 
-Scripts drive Android emulator automation: template match → tap / swipe / wait.
-PNG paths are always relative to the **folder of the current `.ccat` file**.
+Written for a model to read, not for people: the `ccat_help` tool returns this file verbatim.
 
-Comments: `//` to end of line. Semicolons are optional.
+Scripts drive an Android device over ADB: screenshot, template match, tap / swipe / wait.
 
-## `defs` (optional, top of file only)
+- **A failing statement stops the script**; that error is what you get back. Nothing catches it.
+- **No expressions, no variables.** Numbers only where a statement takes one; `defs` values are substituted while
+  parsing.
 
-Parse-time constants for **this** script only. Expanded while parsing; not kept at runtime.
+## Syntax at a glance
+
+Every statement that names a PNG takes its own fresh screenshot. `//` comments to end of line, no block comments;
+`;` between statements is optional. Everything is parsed before anything runs, so a syntax error never reaches the
+device.
+
+A PNG path or a message may be a quoted string, a string `def`, or a bare word (letters, digits, `_`, `.`, `-`), so
+`tap(ok.png)` is legal but spaces need quotes. Absolute paths are used as is; relative ones resolve against the
+directory of the `.ccat` file being run. Strings are `"..."` with `\n`, `\t`, `\\`, `\"`; any other `\x` is `x`.
+
+Counts and timeouts are non-negative integer literals: `wait(0)` and `loop(0)` are fine, `wait_until("a.png", 0)` and
+`retry(0)` are rejected while parsing. No arithmetic: `wait(1000 + 500)` is a syntax error.
 
 ```ccat
-defs {
-  n = 5
-  x = 0.5
-  btn = "ok.png"
-  enabled = true
-}
+defs { claim = "claim.png" }
+if (claim) { tap(claim) } else { log("no claim") }
 ```
 
-Values: number, string, `true` / `false`. Names are identifiers.
-`if (enabled)` with a bool def is folded at parse time.
+## Statements
 
-## Actions
+| Statement | Does | Fails when |
+|---|---|---|
+| `tap("a.png")` | match, tap the center | not found; adb failure |
+| `tap_at(x, y)` | tap normalized coords | `x` / `y` outside `[0,1]` |
+| `tap_offset("a.png", dx, dy)` | tap center + `(dx, dy)` x screen | point lands off screen |
+| `swipe("a.png", "b.png")` | one screenshot, center to center | either not found |
+| `swipe_at(x1, y1, x2, y2)` | swipe normalized endpoints | a coordinate outside `[0,1]` |
+| `wait(ms)` | sleep | nothing |
+| `wait_until("a.png", ms)` | poll until matched | timeout |
+| `log("msg")` | one log line | nothing |
+| `home` | HOME + force-stop recents | adb failure |
+| `run("other.ccat")` | another script, relative to this file | unreadable; cyclic; deeper than 16; callee error |
 
-| Statement | Meaning |
-|-----------|---------|
-| `tap("btn.png")` | One screencap → match → tap center |
-| `tap_at(x, y)` | Tap normalized coords in `[0,1]` vs screenshot size |
-| `tap_offset("btn.png", dx, dy)` | Match center + screen-normalized offset (signed) |
-| `swipe("a.png", "b.png")` | One screencap; swipe between match centers |
-| `swipe_at(x1, y1, x2, y2)` | Swipe normalized endpoints |
-| `wait(ms)` | Sleep milliseconds |
-| `wait_until("dlg.png", ms)` | Poll until template appears or timeout |
-| `log("msg")` | Write a line to the shell log |
-| `home` | HOME + force-stop recent non-home packages |
-| `run("other.ccat")` | Run another script relative to this file’s directory (`..` allowed; depth/cycle limited) |
+**A named file that is missing fails the statement**, which is why `tap`, `tap_offset`, `swipe`, `wait_until` and
+`run` need their files to exist first. `if` is the exception (below).
+
+After a tap or swipe the script waits `max(tap_delay_ms, action_gap_ms)` (config, 1000 ms), so you rarely need `wait`
+after an action.
 
 ## Control flow
 
-```ccat
-if ("popup.png") {
-  tap("ok.png")
-} else {
-  log("no popup")
-}
+`if ("a.png") { ... } else { ... }` takes one screenshot, then runs a branch. **A missing template is not an error
+here: the condition is simply false.** `else` is optional.
 
-retry(3) {
-  tap("claim.png")
-}
+`loop(n) { ... }` runs the body exactly `n` times; `0` succeeds.
 
-loop(5) {
-  tap("next.png")
-  break          // leave innermost loop / do-while / retry
-}
+`retry(n) { ... }` runs the body **until it succeeds**, 50 ms apart: success exits early, `break` counts as success,
+and if every attempt fails the last error is what the script gets.
 
-do {
-  tap("close.png")
-} while ("close.png")
+`do { ... } while ("a.png")` runs the body first, then repeats while the template is visible, giving up with an error
+after **50000** iterations, so a polling loop needs another way out.
 
-return           // end this script successfully
-```
+`break` leaves the innermost `loop` / `do` / `retry`; elsewhere it is an error (`break outside loop`). `return` ends
+the whole script successfully, including from inside a `retry`. An error stops the script wherever it happens, except
+inside a `retry`, which uses it only to decide whether to try again.
 
-## Debug
+## defs
 
-```ccat
-$Debug On        // dump match overlays (when config enables match_debug)
-$Debug Off
-```
+Optional. **At most one block, the first statement of its file**; a duplicate name is an error. Values: number,
+string, `true`, `false`: `defs { n = 3  btn = "ok.png"  fast = true }`.
 
-## Minimal example
+`defs` is parse-time substitution (the AST never sees it), so a string def can stand wherever a PNG path or a message
+is expected. `if (fast)` on a bool def is folded into the chosen branch while parsing; a **number** def in an `if` is
+a syntax error.
 
-```ccat
-defs {
-  gap = 800
-}
+## Coordinates & timing
 
-wait_until("home.png", 15000)
-tap("daily.png")
-wait(gap)
-if ("claim.png") {
-  tap("claim.png")
-}
-return
-```
+Normalized `[0,1]` against the current screenshot, never pixels: `tap_at(0.5, 0.5)` is the center. Each axis maps to
+`lround(n x (dim - 1))`, and a value outside `[0,1]` is an error rather than a clamp. `tap_offset` scales `dx` / `dy`
+by the full screen and errors if the result is off screen, so keep offsets small and signed. The match threshold and
+the swipe duration come from config; a script cannot change them.
 
-Point the shell’s script path at your `.ccat` under `config/` (typically `scripts/…`). Put template PNGs next to that file.
+## `$Debug`
+
+`$Debug On` / `$Debug Off` (`on` / `off` too) toggles the per-match debug dumps regardless of the `match_debug`
+config value, which only sets the starting state. Dumps land in the configured `match_debug_dir`.

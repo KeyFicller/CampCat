@@ -107,15 +107,19 @@ def _setting(name: str, provider_default: str) -> str:
 _CCAT_CHEATSHEET = (
     "You can also write a .ccat script and run it with `run_script`. Call `ccat_help` "
     "for the full language reference. The parts that are easy to get wrong:\n"
-    "  * Comments are `//`; semicolons are optional.\n"
+    "  * Comments are `//`; semicolons are optional. There are no expressions and no "
+    "runtime variables: `defs` values are substituted while parsing.\n"
     "  * `tap_at(x, y)` / `swipe_at(...)` take coordinates normalized to [0,1] against "
-    "the screenshot size, not pixels.\n"
+    "the screenshot size, not pixels; out of range is an error.\n"
     "  * Actions: tap(\"a.png\"), tap_at(x, y), tap_offset(\"a.png\", dx, dy), "
-    "swipe(\"a.png\", \"b.png\"), wait(ms), wait_until(\"a.png\", ms), log(\"msg\"), "
-    "home, run(\"other.ccat\").\n"
-    "  * Control flow: if (\"a.png\") { } else { }, retry(n) { }, loop(n) { }, "
-    "do { } while (\"a.png\"), break, return.\n"
-    "  * A failing statement stops the script and comes back to you as an error."
+    "swipe(\"a.png\", \"b.png\"), wait(ms), wait_until(\"a.png\", ms) (a timeout is an "
+    "error), log(\"msg\"), home, run(\"other.ccat\").\n"
+    "  * Control flow: if (\"a.png\") { } else { }, retry(n) { } (retries until it "
+    "succeeds), loop(n) { }, do { } while (\"a.png\") (stops hard at 50000 iterations), "
+    "break, return.\n"
+    "  * A failing statement stops the script and comes back to you as an error. "
+    "Statements that need a PNG (`tap`, `tap_offset`, `swipe`, `wait_until`) or a `.ccat` "
+    "(`run`) fail when the file is missing; an `if` with a missing template is just false."
 )
 
 
