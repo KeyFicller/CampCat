@@ -9,6 +9,7 @@
   "match_multiscale": false,
   "match_threshold": 0.7,
   "max_step_retries": 12,
+  "require_tool_approval": true,
   "scheduler": {
     "enabled": true,
     "interval_seconds": 300,

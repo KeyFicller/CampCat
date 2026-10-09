@@ -1,12 +1,37 @@
 cmake_minimum_required(VERSION 3.20)
+
+# clang-p2996 (P2996 static reflection), installed locally:
+#   <LLVM_ROOT>/bin/clang++          compiler
+#   <LLVM_ROOT>/include/c++/v1/meta  reflective libc++
+# The tool schemas handed to the model are generated from C++ declarations, so
+# the whole project is pinned to this compiler. See
+# docs/superpowers/specs/2026-10-09-llm-schema-bridge-design.md section 6.
+set(LLVM_ROOT "/Users/keyficller/src/llvm-p2996" CACHE PATH "clang-p2996 install prefix")
+if(NOT EXISTS "${LLVM_ROOT}/bin/clang++" OR NOT EXISTS "${LLVM_ROOT}/include/c++/v1/meta")
+  message(FATAL_ERROR
+    "clang-p2996 not found at ${LLVM_ROOT} (need bin/clang++ and include/c++/v1/meta)")
+endif()
+set(CMAKE_CXX_COMPILER "${LLVM_ROOT}/bin/clang++" CACHE FILEPATH "" FORCE)
+set(CMAKE_C_COMPILER "${LLVM_ROOT}/bin/clang" CACHE FILEPATH "" FORCE)
+
 project(campcat LANGUAGES CXX)
+
+# A source-built clang has no default sysroot, so it cannot even find the macOS
+# SDK headers without this.
+execute_process(COMMAND xcrun --show-sdk-path
+                OUTPUT_VARIABLE _campcat_sdk OUTPUT_STRIP_TRAILING_WHITESPACE)
+add_compile_options(-isysroot "${_campcat_sdk}")
+# Reflection is a C++ language feature; Objective-C++ does not need it.
+add_compile_options("$<$<COMPILE_LANGUAGE:CXX>:-freflection-latest>")
+# Link the reflective runtime from the prefix instead of /usr/lib.
+add_link_options(-L "${LLVM_ROOT}/lib" "-Wl,-rpath,${LLVM_ROOT}/lib")
 
 # The macOS IME candidate-window fix needs Objective-C++.
 if(APPLE)
   enable_language(OBJCXX)
 endif()
 
-set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD 26)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
@@ -132,6 +157,7 @@ add_library(campcat_core STATIC
   src/core/script/ccat_repl.cpp
   src/core/process.cpp
   src/core/llm/llm_protocol.cpp
+  src/core/llm/llm_tools.cpp
   src/core/llm/llm_host.cpp
   src/ccat_script/ccat_script_profile.cpp
   src/ccat_script/ccat_script_automation.cpp

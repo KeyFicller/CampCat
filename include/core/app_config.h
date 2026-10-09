@@ -48,6 +48,11 @@ struct app_config {
   int max_step_retries = 12;
   int step_retry_interval_ms = 500;
 
+  /// When true, `tap` needs a prior human-approved `request_tap` (see
+  /// llm_tools.h / llm_host.h). Off by default: with it off the tool list and
+  /// `tap` behave exactly as they did before the gate existed.
+  bool require_tool_approval = false;
+
   scheduler_config scheduler{};
 
   /// String id driving `make_game_automation`; empty or `"none"` keeps automation idle.

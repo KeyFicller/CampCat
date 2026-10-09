@@ -1,12 +1,16 @@
 #include "app/llm_ui.h"
 
-#include "app/native_file_dialog.h"
 #include "core/adb_client.h"
 #include "core/app_config.h"
 #include "core/automation_log.h"
 #include "core/llm/llm_host.h"
 
+#if defined(__APPLE__)
+#include "app/macos_ime.h"
+#endif
+
 #include <imgui.h>
+#include <imgui_internal.h> // GetInputTextState: the IME pre-edit hangs off the caret
 #include <imgui_markdown.h>
 
 #include <opencv2/core.hpp>
@@ -23,7 +27,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cctype>
-#include <cstdint>
+#include <cstring>
 #include <filesystem>
 #include <mutex>
 #include <string>
@@ -33,32 +37,20 @@
 
 namespace {
 
-/// Oldest turns are dropped past this, each releasing its texture.
+/// Oldest turns are dropped past this.
 constexpr int k_turn_cap = 30;
-/// Thumbnails are downscaled to this long side before upload: a raw 1080x2400
-/// screenshot is ~10 MB of texture, which 30 turns would blow up.
-constexpr int k_thumb_max_side = 320;
-constexpr float k_image_max_width = 260.0f;
-/// Cap on the pending-screenshot preview. It bounds the height of the controls
-/// below the log, which is what keeps the panel itself from ever scrolling.
-constexpr float k_preview_max_height = 140.0F;
 
 /// One exchange in the conversation: what was sent and what came back.
 struct llm_turn {
-  GLuint tex = 0; ///< 0 when the turn carried no image
-  int tex_w = 0;
-  int tex_h = 0;
-  std::string label; ///< screenshot source, e.g. "emulator screenshot"
   std::string user_text;
   std::string reply;
+  std::vector<std::string> tool_notes; ///< what the model did, in call order
   bool pending = false; ///< sent but unanswered; drives the waiting bubble
   bool ok = false;
   std::string error;
 };
 
-/// Result of a finished background job, handed to the UI thread. The outgoing
-/// image and prompt are consumed when the turn is queued, so they are not
-/// carried back.
+/// Result of a finished background job, handed to the UI thread.
 struct handoff {
   bool has = false;
   bool is_reset = false;
@@ -67,12 +59,14 @@ struct handoff {
 
 // UI-thread state: never touched by the worker.
 std::vector<llm_turn> g_turns;
-cv::Mat g_pending;
-std::string g_pending_label;
 char g_input[1024] = {};
 bool g_pin_bottom = true;
 bool g_thinking = false; ///< sidecar reports the model is reasoning
 ImFont *g_bold = nullptr; ///< set by llm_ui_set_bold_font
+
+/// True while an automation cycle or the scheduler owns adb. Tools must refuse
+/// then rather than contend for the device.
+std::atomic<bool> g_adb_busy{false};
 
 /// Wraps the library default, fixing two of its choices that read badly in a
 /// chat bubble.
@@ -104,9 +98,51 @@ ImGui::MarkdownConfig &md_config() {
   }();
   return cfg;
 }
-GLuint g_tex = 0; ///< pending preview texture
-int g_tex_w = 0;
-int g_tex_h = 0;
+
+/// IME helper. Off Apple it is constant, so the input path needs no guard.
+std::string ime_preedit() {
+#if defined(__APPLE__)
+  return macos_ime_preedit();
+#else
+  return {};
+#endif
+}
+
+/// Paints the IME composition over the prompt box. While composing, ImGui's own
+/// buffer is still empty, so nothing else in the box shows what is being typed.
+///
+/// Call it right after the prompt's InputText, before SameLine/Button: the caret
+/// comes from the last item and the origin from its rect.
+///
+/// ponytail: no selection highlight, and the pre-edit is clipped to the box
+/// instead of pushing the text after the caret along; upgrade if a mid-text
+/// composition ever needs either.
+void draw_ime_preedit(const ImVec2 &_box_min, const ImVec2 &_box_max,
+                      const char *_buf, const std::string &_preedit) {
+  ImGuiInputTextState *state = ImGui::GetInputTextState(ImGui::GetItemID());
+  if (state == nullptr) {
+    return; // not the live input right now
+  }
+  const int len = static_cast<int>(std::strlen(_buf));
+  // Stb is only forward-declared outside imgui_widgets.cpp, so read the caret
+  // through the accessor ImGui itself exposes.
+  const int cursor = ImClamp(state->GetCursorPos(), 0, len); // byte index
+  const ImGuiStyle &style = ImGui::GetStyle();
+  const float prefix = ImGui::CalcTextSize(_buf, _buf + cursor).x;
+  const ImVec2 pos(_box_min.x + style.FramePadding.x + prefix - state->Scroll.x,
+                   _box_min.y + style.FramePadding.y);
+  const ImVec2 size = ImGui::CalcTextSize(_preedit.c_str());
+  ImDrawList *dl = ImGui::GetWindowDrawList();
+  dl->PushClipRect(_box_min, _box_max, true);
+  dl->AddRectFilled(ImVec2(pos.x, _box_min.y + 3.0F),
+                    ImVec2(pos.x + size.x + 2.0F, _box_min.y + size.y + 3.0F),
+                    IM_COL32(70, 70, 85, 255), 3.0F);
+  dl->AddText(pos, ImGui::GetColorU32(ImGuiCol_Text), _preedit.c_str());
+  dl->AddLine(ImVec2(pos.x, pos.y + size.y),
+              ImVec2(pos.x + size.x, pos.y + size.y),
+              ImGui::GetColorU32(ImGuiCol_Text), 1.0F);
+  dl->PopClipRect();
+}
 
 // Worker state.
 std::atomic<bool> g_running{false};
@@ -126,30 +162,9 @@ const ImVec4 k_err_bg{0.30F, 0.16F, 0.16F, 1.0F}; ///< failed-reply bubble
 constexpr float k_bubble_frac = 0.72F;
 constexpr float k_bubble_rounding = 6.0F;
 
-bool is_blank(const char *_s) {
-  for (const char *p = _s; *p != '\0'; ++p) {
-    if (!std::isspace(static_cast<unsigned char>(*p))) {
-      return false;
-    }
-  }
-  return true;
-}
-
-/// Downscale to the thumbnail budget; leaves small images untouched.
-cv::Mat make_thumb(const cv::Mat &_bgr) {
-  if (_bgr.empty()) {
-    return {};
-  }
-  const int long_side = std::max(_bgr.cols, _bgr.rows);
-  if (long_side <= k_thumb_max_side) {
-    return _bgr.clone();
-  }
-  const double scale =
-      static_cast<double>(k_thumb_max_side) / static_cast<double>(long_side);
-  cv::Mat out;
-  cv::resize(_bgr, out, cv::Size(), scale, scale, cv::INTER_AREA);
-  return out;
-}
+/// Width cap for the approval preview. Wider than a plain screenshot thumbnail
+/// because the user has to judge a highlighted box before allowing a tap.
+constexpr float k_approval_max_w = 420.0F;
 
 /// Upload `_bgr` as a texture. Returns 0 on failure.
 GLuint upload_bgr(const cv::Mat &_bgr, int *_w, int *_h) {
@@ -183,25 +198,24 @@ void delete_tex(GLuint *_tex, int *_w, int *_h) {
   *_h = 0;
 }
 
-/// Fit `_w x _h` into `k_image_max_width`, preserving aspect.
-ImVec2 fit_image(int _w, int _h) {
+/// Fit `_w x _h` into `_max_w`, preserving aspect.
+ImVec2 fit_image(int _w, int _h, float _max_w) {
   float w = static_cast<float>(_w);
   float h = static_cast<float>(_h);
-  if (w > k_image_max_width && w > 0.0F) {
-    h *= k_image_max_width / w;
-    w = k_image_max_width;
+  if (w > _max_w && w > 0.0F) {
+    h *= _max_w / w;
+    w = _max_w;
   }
   return ImVec2(w, h);
 }
 
-/// Preview box for the pending screenshot: `fit_image` plus a height cap.
-ImVec2 preview_size() {
-  const ImVec2 fitted = fit_image(g_tex_w, g_tex_h);
-  if (fitted.y > k_preview_max_height && fitted.y > 0.0F) {
-    return ImVec2(fitted.x * k_preview_max_height / fitted.y,
-                  k_preview_max_height);
+bool is_blank(const char *_s) {
+  for (const char *p = _s; *p != '\0'; ++p) {
+    if (!std::isspace(static_cast<unsigned char>(*p))) {
+      return false;
+    }
   }
-  return fitted;
+  return true;
 }
 
 /// Space reserved below the log. Measured from the previous frame rather than
@@ -210,96 +224,15 @@ ImVec2 preview_size() {
 /// very first frame under-fills instead of overlapping.
 float g_footer_h = 160.0F;
 
-/// Replace the pending screenshot and refresh its preview texture (UI thread).
-void set_pending(cv::Mat &&_bgr, std::string _label) {
-  g_pending = std::move(_bgr);
-  g_pending_label = std::move(_label);
-  delete_tex(&g_tex, &g_tex_w, &g_tex_h);
-  if (g_pending.empty()) {
-    return;
-  }
-  const cv::Mat thumb = make_thumb(g_pending);
-  g_tex = upload_bgr(thumb, &g_tex_w, &g_tex_h);
-  if (g_tex == 0) {
-    campcat::automation_log::emit("[llm] texture upload failed");
-  }
-}
-
-/// Pending screenshot as a strip: thumbnail, source, native size and an "x"
-/// that drops it. Callers skip this entirely when nothing is attached.
-void draw_attachment_bar() {
-  ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, k_bubble_rounding);
-  ImGui::BeginChild("llm_attach", ImVec2(0.0F, 0.0F),
-                    ImGuiChildFlags_AutoResizeY | ImGuiChildFlags_Borders |
-                        ImGuiChildFlags_AlwaysUseWindowPadding,
-                    ImGuiWindowFlags_NoScrollbar);
-  ImGui::Image(static_cast<ImTextureID>(static_cast<uintptr_t>(g_tex)),
-               preview_size(), ImVec2(0.0F, 0.0F), ImVec2(1.0F, 1.0F));
-  ImGui::SameLine();
-  ImGui::BeginGroup();
-  ImGui::TextUnformatted(g_pending_label.c_str());
-  ImGui::TextDisabled("%d x %d", g_pending.cols, g_pending.rows);
-  ImGui::EndGroup();
-  ImGui::SameLine(ImGui::GetWindowContentRegionMax().x -
-                  ImGui::GetFrameHeight());
-  const bool remove = ImGui::Button("x", ImVec2(ImGui::GetFrameHeight(), 0.0F));
-  ImGui::EndChild();
-  ImGui::PopStyleVar();
-  if (remove) {
-    set_pending({}, "");
-  }
-}
-
-void capture_from_adb(campcat::app_config &_cfg) {
-  campcat::adb_client adb(_cfg.adb_path, _cfg.adb_serial);
-  const bool connected = adb.connect_remote(_cfg.adb_connect_address);
-  cv::Mat cap;
-  std::string diag;
-  if (!adb.screencap_png(&cap, 45000, &diag)) {
-    if (!connected) {
-      diag += " (adb connect " + _cfg.adb_connect_address + " failed)";
-    }
-    campcat::automation_log::emit("[llm] screencap failed " + diag);
-    return;
-  }
-  campcat::automation_log::emit("[llm] captured " + std::to_string(cap.cols) +
-                                "x" + std::to_string(cap.rows));
-  set_pending(std::move(cap), "emulator screenshot");
-}
-
-void pick_local_image() {
-  auto picked = campcat::pick_open_file(std::filesystem::current_path(), "png",
-                                        "Select a screenshot");
-  if (!picked) {
-    return;
-  }
-  cv::Mat img = cv::imread(picked->string(), cv::IMREAD_COLOR);
-  if (img.empty()) {
-    campcat::automation_log::emit("[llm] cannot read image: " +
-                                  picked->string());
-    return;
-  }
-  campcat::automation_log::emit("[llm] loaded " + picked->string());
-  set_pending(std::move(img), picked->filename().string());
-}
-
 /// Queue the outgoing turn the moment it is sent, so the log shows the user's
-/// message while the reply is still in flight. UI thread only, for the GL call.
-void append_user_turn(const cv::Mat &_image, std::string _label,
-                      std::string _prompt) {
+/// message while the reply is still in flight.
+void append_user_turn(std::string _prompt) {
   llm_turn t;
-  t.label = std::move(_label);
   t.user_text = std::move(_prompt);
   t.pending = true;
-  if (!_image.empty()) {
-    const cv::Mat thumb = make_thumb(_image);
-    t.tex = upload_bgr(thumb, &t.tex_w, &t.tex_h);
-  }
 
   g_turns.push_back(std::move(t));
   while (static_cast<int>(g_turns.size()) > k_turn_cap) {
-    delete_tex(&g_turns.front().tex, &g_turns.front().tex_w,
-               &g_turns.front().tex_h);
     g_turns.erase(g_turns.begin());
   }
   g_pin_bottom = true;
@@ -337,19 +270,33 @@ void pump_stream() {
     return;
   }
   t->reply = g_host.streaming_text();
+  t->tool_notes = g_host.tool_notes();
   g_thinking = g_host.is_thinking();
 }
 
-/// Run one turn on the worker. `_image` may be empty for a text-only turn.
-void start_turn(std::filesystem::path _repo_root, cv::Mat _image,
+/// Run one turn on the worker.
+void start_turn(const campcat::app_config &_cfg, std::string _repo_root,
                 std::string _prompt) {
   if (g_thread.joinable()) {
     g_thread.join();
   }
   g_running.store(true);
-  g_thread = std::thread([root = std::move(_repo_root), img = std::move(_image),
+  g_thread = std::thread([adb_path = _cfg.adb_path, adb_serial = _cfg.adb_serial,
+                          adb_connect = _cfg.adb_connect_address,
+                          requires_approval = _cfg.require_tool_approval,
+                          root = std::move(_repo_root),
                           prompt = std::move(_prompt)]() {
-    campcat::llm_result res = g_host.describe(root, img, prompt);
+    // A per-turn client, built the way the automation cycle builds one. Every
+    // tool runs on this thread, so nothing here races the UI.
+    campcat::adb_client adb(adb_path, adb_serial);
+    adb.connect_remote(adb_connect);
+    campcat::llm::tool_context ctx;
+    ctx.adb = &adb;
+    ctx.adb_busy = [] { return g_adb_busy.load(); };
+    ctx.require_approval = requires_approval;
+    g_host.set_tool_context(ctx);
+    campcat::llm_result res = g_host.run_turn(root, prompt);
+    g_host.set_tool_context({}); // `adb` dies with this lambda
     {
       std::lock_guard<std::mutex> lk(g_done_mu);
       g_done = handoff{};
@@ -403,35 +350,27 @@ void consume_handoff() {
     campcat::automation_log::emit("[llm] reset failed: " + h.res.error);
     return;
   }
-  for (llm_turn &t : g_turns) {
-    delete_tex(&t.tex, &t.tex_w, &t.tex_h);
-  }
   g_turns.clear();
   g_pin_bottom = true;
   campcat::automation_log::emit("[llm] conversation cleared");
 }
 
-/// Send whatever is staged: clear the input and hand the image to the worker.
+/// Send whatever is staged: clear the input and hand the prompt to the worker.
 void send_current(campcat::app_config &_cfg) {
   const std::string prompt = g_input;
-  if (is_blank(g_input) && g_pending.empty()) {
+  if (is_blank(g_input)) {
     return;
   }
-  cv::Mat image = g_pending;
-  const std::string label = g_pending_label;
 
   g_input[0] = '\0';
-  g_pending.release();
-  g_pending_label.clear();
-  delete_tex(&g_tex, &g_tex_w, &g_tex_h);
 
-  append_user_turn(image, label, prompt);
+  append_user_turn(prompt);
   // Cleared from the UI thread, not just on the worker: the worker clears it
   // inside next_request_id, which runs after ensure_running may have spent a
   // minute starting the interpreter, and until then the new bubble would show
   // the previous request's leftovers.
   g_host.clear_stream();
-  start_turn(_cfg.config_home.parent_path(), std::move(image), prompt);
+  start_turn(_cfg, _cfg.config_home.parent_path(), prompt);
 }
 
 /// "Thinking" (when the sidecar says so) plus 1..3 dots on the frame clock, so
@@ -443,8 +382,8 @@ std::string waiting_label() {
 
 /// Centred two-line hint for an empty conversation.
 void draw_empty_state() {
-  const char *title = "Ask about a screenshot";
-  const char *hint = "Attach one with \"+\" or just type a question";
+  const char *title = "Tell CampCat what to do";
+  const char *hint = "It looks at the device screen itself, then taps";
   const ImVec2 avail = ImGui::GetContentRegionAvail();
   ImGui::SetCursorPosY(ImGui::GetCursorPosY() + avail.y * 0.4F);
   if (g_bold != nullptr) {
@@ -481,10 +420,8 @@ void draw_turn(const llm_turn &_t, int _index) {
   ImGui::PushID(_index);
   const float pad = ImGui::GetStyle().WindowPadding.x;
   const float max_w = ImGui::GetContentRegionAvail().x * k_bubble_frac;
-  const ImVec2 fitted =
-      _t.tex != 0 ? fit_image(_t.tex_w, _t.tex_h) : ImVec2(0.0F, 0.0F);
 
-  const float uw = bubble_width(_t.user_text.c_str(), max_w, fitted.x, pad);
+  const float uw = bubble_width(_t.user_text.c_str(), max_w, 0.0F, pad);
   ImGui::SetCursorPosX(ImGui::GetCursorPosX() +
                        ImGui::GetContentRegionAvail().x - uw);
   ImGui::PushStyleColor(ImGuiCol_ChildBg, k_user_bg);
@@ -493,22 +430,7 @@ void draw_turn(const llm_turn &_t, int _index) {
                     ImGuiChildFlags_AutoResizeY |
                         ImGuiChildFlags_AlwaysUseWindowPadding,
                     ImGuiWindowFlags_NoScrollbar);
-  if (_t.tex != 0) {
-    const float room = ImGui::GetContentRegionAvail().x;
-    ImVec2 shown = fitted;
-    if (shown.x > room && shown.x > 0.0F) {
-      shown.y *= room / shown.x;
-      shown.x = room;
-    }
-    ImGui::Image(static_cast<ImTextureID>(static_cast<uintptr_t>(_t.tex)), shown,
-                 ImVec2(0.0F, 0.0F), ImVec2(1.0F, 1.0F));
-    if (!_t.label.empty()) {
-      ImGui::TextDisabled("%s", _t.label.c_str());
-    }
-  }
-  if (!_t.user_text.empty()) {
-    ImGui::TextWrapped("%s", _t.user_text.c_str());
-  }
+  ImGui::TextWrapped("%s", _t.user_text.c_str());
   ImGui::EndChild();
   ImGui::PopStyleVar();
   ImGui::PopStyleColor();
@@ -529,6 +451,12 @@ void draw_turn(const llm_turn &_t, int _index) {
                     ImGuiChildFlags_AutoResizeY |
                         ImGuiChildFlags_AlwaysUseWindowPadding,
                     ImGuiWindowFlags_NoScrollbar);
+  // Shown above the reply so the model's device actions are visible even while
+  // the answer is still streaming. Without them a tap that changed the screen
+  // would look like nothing happened.
+  for (const std::string &note : _t.tool_notes) {
+    ImGui::TextDisabled("%s", note.c_str());
+  }
   if (_t.pending && !_t.reply.empty()) {
     ImGui::Markdown(_t.reply.c_str(), _t.reply.size(), md_config());
   } else if (_t.pending) {
@@ -550,6 +478,85 @@ void draw_turn(const llm_turn &_t, int _index) {
   ImGui::PopStyleColor();
 
   ImGui::PopID();
+}
+
+/// Approval preview texture. Rebuilt only when the question changes: the
+/// screenshot is a megabyte or two, far too much to re-upload every frame.
+GLuint g_appr_tex = 0;
+int g_appr_w = 0;
+int g_appr_h = 0;
+long g_appr_id = -1;
+
+/// Pull the pending question and keep its texture in step. Returns whether a
+/// question is waiting.
+bool sync_approval_texture(const campcat::llm_approval &_a) {
+  if (!_a.pending) {
+    delete_tex(&g_appr_tex, &g_appr_w, &g_appr_h);
+    g_appr_id = -1;
+    return false;
+  }
+  if (_a.id == g_appr_id) {
+    return true;
+  }
+  delete_tex(&g_appr_tex, &g_appr_w, &g_appr_h);
+  g_appr_id = _a.id;
+  const std::string png = g_host.approval_screen_png();
+  if (png.empty()) {
+    return true; // nothing to show, but the buttons must stay reachable
+  }
+  const cv::Mat buf(1, static_cast<int>(png.size()), CV_8UC1,
+                    const_cast<char *>(png.data()));
+  const cv::Mat bgr = cv::imdecode(buf, cv::IMREAD_COLOR);
+  g_appr_tex = upload_bgr(bgr, &g_appr_w, &g_appr_h);
+  return true;
+}
+
+/// The question waiting on the user: the proposed box drawn over the screenshot,
+/// and the two buttons that decide whether the tap runs at all.
+void draw_approval_bubble(const campcat::llm_approval &_a) {
+  ImGui::PushStyleColor(ImGuiCol_ChildBg, k_bot_bg);
+  ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, k_bubble_rounding);
+  ImGui::BeginChild("approval", ImVec2(0.0F, 0.0F),
+                    ImGuiChildFlags_AutoResizeY |
+                        ImGuiChildFlags_AlwaysUseWindowPadding,
+                    ImGuiWindowFlags_NoScrollbar);
+  if (g_bold != nullptr) {
+    ImGui::PushFont(g_bold);
+  }
+  ImGui::TextUnformatted("Waiting for your approval");
+  if (g_bold != nullptr) {
+    ImGui::PopFont();
+  }
+  ImGui::TextDisabled("%s", _a.summary.c_str());
+  if (g_appr_tex != 0 && g_appr_w > 0) {
+    const ImVec2 size = fit_image(g_appr_w, g_appr_h, k_approval_max_w);
+    ImGui::Image(static_cast<ImTextureID>(static_cast<uintptr_t>(g_appr_tex)),
+                 size, ImVec2(0.0F, 0.0F), ImVec2(1.0F, 1.0F));
+    // The boxes are in screenshot pixels; the image is drawn scaled.
+    const ImVec2 origin = ImGui::GetItemRectMin();
+    const float scale = size.x / static_cast<float>(g_appr_w);
+    ImDrawList *dl = ImGui::GetWindowDrawList();
+    for (const campcat::llm::rect &r : _a.highlight) {
+      const ImVec2 p0(origin.x + static_cast<float>(r.x) * scale,
+                      origin.y + static_cast<float>(r.y) * scale);
+      const ImVec2 p1(origin.x + static_cast<float>(r.x + r.w) * scale,
+                      origin.y + static_cast<float>(r.y + r.h) * scale);
+      dl->AddRectFilled(p0, p1, IM_COL32(255, 200, 60, 48));
+      dl->AddRect(p0, p1, IM_COL32(255, 200, 60, 230), 0.0F, 0, 2.0F);
+    }
+  }
+  if (ImGui::Button("✓ Approve")) {
+    g_host.answer_approval(true);
+  }
+  ImGui::SameLine();
+  // Rejection with a typed correction goes through the prompt box, which stays
+  // live while this bubble is up; these buttons are the no-typing shortcut.
+  if (ImGui::Button("✗ Reject")) {
+    g_host.answer_approval(false);
+  }
+  ImGui::EndChild();
+  ImGui::PopStyleVar();
+  ImGui::PopStyleColor();
 }
 
 /// Draws the conversation. Returns true when the user asked to clear it via the
@@ -579,6 +586,14 @@ bool draw_log() {
     draw_turn(g_turns[i], static_cast<int>(i));
   }
 
+  // The approval gate, at the end of the conversation: the user reads it as the
+  // model's latest action, and it scrolls away with the rest once answered.
+  const campcat::llm_approval approval = g_host.pending_approval();
+  if (sync_approval_texture(approval)) {
+    ImGui::Spacing();
+    draw_approval_bubble(approval);
+  }
+
   // Follow new content only while the user is already at the bottom.
   if (g_pin_bottom) {
     ImGui::SetScrollHereY(1.0F);
@@ -601,22 +616,26 @@ void llm_ui_set_bold_font(ImFont *_font) {
 }
 
 void llm_ui_shutdown_gl() {
+  // Unblock a question nobody can answer any more: without this the worker stays
+  // inside service_approval and the join below never returns.
+  g_host.cancel_approval();
   if (g_thread.joinable()) {
     g_thread.join();
   }
   g_host.stop();
-  for (llm_turn &t : g_turns) {
-    delete_tex(&t.tex, &t.tex_w, &t.tex_h);
-  }
+  delete_tex(&g_appr_tex, &g_appr_w, &g_appr_h);
+  g_appr_id = -1;
   g_turns.clear();
   g_thinking = false;
-  delete_tex(&g_tex, &g_tex_w, &g_tex_h);
-  g_pending.release();
 }
 
-void llm_ui_draw_panel(campcat::app_config &_cfg, bool _disable_capture) {
-  // GL calls belong to the UI thread, so finished work is folded in here.
+void llm_ui_draw_panel(campcat::app_config &_cfg, bool _adb_busy) {
+  // Finished work is folded in on the UI thread, which owns g_turns.
   consume_handoff();
+
+  // An automation cycle or the scheduler is using adb, so tools must refuse
+  // rather than contend with it.
+  g_adb_busy.store(_adb_busy);
 
   const bool busy = g_running.load();
 
@@ -627,39 +646,35 @@ void llm_ui_draw_panel(campcat::app_config &_cfg, bool _disable_capture) {
 
   // Top of whatever comes below the log: the reference for the footer height.
   const float footer_top = ImGui::GetCursorScreenPos().y;
-  if (g_tex != 0) {
-    draw_attachment_bar();
-  }
 
-  // Leaves room for the "+" button, Send, and the spacing between the three.
-  ImGui::SetNextItemWidth(-156.0F);
+  // While a question waits on the user, this box and its Send are the rejection
+  // form: the text becomes the correction the model gets back. One input, one
+  // habit, instead of a second box inside the bubble.
+  const bool awaiting = g_host.pending_approval().pending;
+
+  // ImGui is kept out of the keys while a composition is live (see
+  // macos_ime.mm), so an Enter here is a real Enter.
+  const std::string preedit = ime_preedit();
+
+  // Leaves room for the Send button and the spacing before it.
+  ImGui::SetNextItemWidth(-116.0F);
   const bool submitted = ImGui::InputTextWithHint(
-      "##llm_prompt", "Type an instruction (optional)...", g_input,
-      sizeof(g_input), ImGuiInputTextFlags_EnterReturnsTrue);
-
-  ImGui::SameLine();
-  if (busy) {
-    ImGui::BeginDisabled();
-  }
-  if (ImGui::Button("+", ImVec2(32.0F, 0.0F))) {
-    ImGui::OpenPopup("llm_attach_menu");
-  }
-  if (busy) {
-    ImGui::EndDisabled();
-  }
-  if (ImGui::BeginPopup("llm_attach_menu")) {
-    if (ImGui::MenuItem("Capture from emulator (ADB)", nullptr, false,
-                        !_disable_capture)) {
-      capture_from_adb(_cfg);
-    }
-    if (ImGui::MenuItem("Open image file...")) {
-      pick_local_image();
-    }
-    ImGui::EndPopup();
+      "##llm_prompt",
+      // While composing the hint is blanked: the composition is painted over the
+      // box and the two would collide on the same line.
+      preedit.empty() ? (awaiting ? "Optional: tell it what to do instead"
+                                  : "Tell CampCat what to do...")
+                      : "",
+      g_input, sizeof(g_input), ImGuiInputTextFlags_EnterReturnsTrue);
+  // Both need the prompt to still be the last item.
+  const ImVec2 prompt_min = ImGui::GetItemRectMin();
+  const ImVec2 prompt_max = ImGui::GetItemRectMax();
+  if (!preedit.empty()) {
+    draw_ime_preedit(prompt_min, prompt_max, g_input, preedit);
   }
 
   ImGui::SameLine();
-  const bool can_send = !busy && (!g_pending.empty() || !is_blank(g_input));
+  const bool can_send = awaiting || (!busy && !is_blank(g_input));
   if (!can_send) {
     ImGui::BeginDisabled();
   }
@@ -669,7 +684,13 @@ void llm_ui_draw_panel(campcat::app_config &_cfg, bool _disable_capture) {
   }
 
   if ((clicked || submitted) && can_send) {
-    send_current(_cfg);
+    if (awaiting) {
+      const bool blank = is_blank(g_input);
+      g_host.answer_approval(false, blank ? std::string() : std::string(g_input));
+      g_input[0] = '\0'; // consumed as the answer, not as a prompt
+    } else {
+      send_current(_cfg);
+    }
   }
 
   // Reserve exactly what the controls actually used, so they never creep over

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 
-PROTOCOL_VERSION = 1
+PROTOCOL_VERSION = 3
 
 
 def encode(obj: dict) -> str:
@@ -53,3 +53,9 @@ def build_result(rid: object, ok: bool, text: str = "", error: str = "",
 
 def build_error_result(rid: object, error: str) -> dict:
     return build_result(rid, False, "", error)
+
+
+def build_tool_call(rid: object, call_id: str, name: str, args: dict) -> dict:
+    """Ask the host to run one tool. The host answers with `tool_result`."""
+    return {"type": "tool_call", "id": rid, "call_id": call_id, "name": name,
+            "args": args}

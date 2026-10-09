@@ -33,6 +33,8 @@ void app_config::from_json(const nlohmann::json &_j, app_config &_c) {
   _c.max_step_retries = _j.value("max_step_retries", _c.max_step_retries);
   _c.step_retry_interval_ms =
       _j.value("step_retry_interval_ms", _c.step_retry_interval_ms);
+  _c.require_tool_approval =
+      _j.value("require_tool_approval", _c.require_tool_approval);
 
   if (_j.contains("scheduler")) {
     const auto &s = _j["scheduler"];
@@ -78,6 +80,7 @@ nlohmann::json app_config::to_json(const app_config &_c) {
   j["match_debug_dir"] = _c.match_debug_dir;
   j["max_step_retries"] = _c.max_step_retries;
   j["step_retry_interval_ms"] = _c.step_retry_interval_ms;
+  j["require_tool_approval"] = _c.require_tool_approval;
 
   j["scheduler"]["enabled"] = _c.scheduler.enabled;
   j["scheduler"]["interval_seconds"] = _c.scheduler.interval_seconds;

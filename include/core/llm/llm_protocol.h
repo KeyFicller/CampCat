@@ -5,6 +5,10 @@
 
 namespace campcat::llm_protocol {
 
+/// Current protocol revision. The sidecar states its own in `ready`; a mismatch
+/// means one side was rebuilt without the other, which breaks the tools.
+constexpr int k_protocol_version = 3;
+
 /**
  * @brief One decoded line from the sidecar's stdout.
  *
@@ -12,7 +16,7 @@ namespace campcat::llm_protocol {
  * callers can ignore stray lines instead of treating them as fatal.
  */
 struct message {
-  enum class kind { ready, log, result, chunk, unknown };
+  enum class kind { ready, log, result, chunk, tool_call, unknown };
 
   kind type = kind::unknown;
   long id = 0;
@@ -24,6 +28,11 @@ struct message {
 
   // chunk (shares `text` as the delta)
   bool thinking = false; ///< reasoning heartbeat, `text` is empty
+
+  // tool_call (the sidecar is asking us to run a tool)
+  std::string call_id;        ///< echoed back in the answering tool_result
+  std::string tool_name;
+  std::string tool_args_json; ///< the model's raw arguments object, unparsed
 
   // log
   std::string level;
@@ -44,17 +53,31 @@ struct message {
 std::string base64_encode(const unsigned char *_data, std::size_t _len);
 
 /**
- * @brief Build one `describe` request line (no trailing newline).
+ * @brief Build one `turn` request line (no trailing newline).
  *
- * The request carries an id, an optional base64 PNG and optional text. Model
- * selection and prompts belong to the sidecar. Field names are the contract
- * with `llm/main.py`; keep both sides in sync.
+ * The request carries an id, the user's instruction and the tool schemas. Model
+ * selection, prompts and the device itself belong to the sidecar and the tools:
+ * there is deliberately no image here, because the model now takes its own
+ * screenshots. Field names are the contract with `llm/main.py`; keep both sides
+ * in sync.
  *
- * @param[in] _image_b64 Empty for a text-only turn.
- * @param[in] _text Empty to let the sidecar use its default prompt.
+ * @param[in] _text The user's instruction; blank asks for nothing.
+ * @param[in] _tools_json OpenAI tools array; empty to offer no tools.
  */
-std::string build_describe_request(std::string_view _image_b64, long _id,
-                                   std::string_view _text);
+std::string build_turn_request(long _id, std::string_view _text,
+                               std::string_view _tools_json);
+
+/**
+ * @brief Build one `tool_result` line answering a `tool_call`.
+ *
+ * Carries no `id`: the sidecar matches the reply to its waiting request by
+ * `call_id`, and the request ids stay unambiguous.
+ *
+ * @param[in] _image_b64 Set only by image-returning tools.
+ */
+std::string build_tool_result(std::string_view _call_id, bool _ok,
+                              std::string_view _text, std::string_view _error,
+                              std::string_view _image_b64);
 
 /**
  * @brief Build one `reset` request line, dropping the sidecar's history.

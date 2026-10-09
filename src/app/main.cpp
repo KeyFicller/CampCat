@@ -455,8 +455,8 @@ int main(int argc, char **argv) {
   ImGui_ImplGlfw_InitForOpenGL(window, true);
   ImGui_ImplOpenGL3_Init(glsl_version);
 #if defined(__APPLE__)
-  // GLFW pins the IME candidate window to the content view origin; this points
-  // it at the caret ImGui publishes instead.
+  // Points the IME candidate window at the caret ImGui publishes, and keeps a
+  // live composition out of ImGui's hands.
   macos_ime_attach(window);
 #endif
 

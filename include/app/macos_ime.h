@@ -1,5 +1,7 @@
 #pragma once
 
+#include <string>
+
 struct GLFWwindow; // only ever passed through here, so glfw3.h stays out
 
 /**
@@ -18,3 +20,11 @@ struct GLFWwindow; // only ever passed through here, so glfw3.h stays out
  * guarded. The declaration stays unconditional to keep the guard in one place.
  */
 void macos_ime_attach(GLFWwindow *_window);
+
+/**
+ * @brief The IME composition (pinyin) currently being typed, UTF-8.
+ *
+ * GLFW stores the marked text on its content view and never draws it, so the UI
+ * has to paint this itself or the pinyin never appears. Empty when not composing.
+ */
+std::string macos_ime_preedit();

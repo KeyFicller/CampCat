@@ -15,16 +15,16 @@ struct app_config;
 void llm_ui_set_bold_font(ImFont *_font);
 
 /**
- * @brief Release GL texture owned by the LLM page (call before GL teardown).
+ * @brief Stop the LLM page's worker and sidecar (call before GL teardown, with
+ * the other panels' shutdowns).
  */
 void llm_ui_shutdown_gl();
 
 /**
- * @brief Draw the LLM page: capture/pick a screenshot, preview it, request a
- * description from the configured endpoint.
+ * @brief Draw the LLM page: type an instruction, watch the agent work.
  *
  * @param[in,out] _cfg Shell snapshot (adb paths + llm settings).
- * @param[in] _disable_capture Disable the ADB capture button while automation
- * owns ADB.
+ * @param[in] _adb_busy True while automation owns ADB, which makes the device
+ * tools refuse instead of contending with it.
  */
-void llm_ui_draw_panel(campcat::app_config &_cfg, bool _disable_capture);
+void llm_ui_draw_panel(campcat::app_config &_cfg, bool _adb_busy);

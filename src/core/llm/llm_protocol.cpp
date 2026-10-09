@@ -49,14 +49,31 @@ std::string base64_encode(const unsigned char *_data, std::size_t _len) {
   return out;
 }
 
-std::string build_describe_request(std::string_view _image_b64, long _id,
-                                   std::string_view _text) {
+std::string build_turn_request(long _id, std::string_view _text,
+                               std::string_view _tools_json) {
   nlohmann::json j;
-  j["type"] = "describe";
+  j["type"] = "turn";
   j["id"] = _id;
-  j["image_b64"] = std::string(_image_b64);
-  if (!_text.empty()) {
-    j["text"] = std::string(_text);
+  j["text"] = std::string(_text);
+  if (!_tools_json.empty()) {
+    // Parsed rather than embedded: the tools have to reach bind_tools as a
+    // JSON array, not as a string the sidecar would then have to re-parse.
+    j["tools"] = nlohmann::json::parse(_tools_json, nullptr, false);
+  }
+  return j.dump();
+}
+
+std::string build_tool_result(std::string_view _call_id, bool _ok,
+                              std::string_view _text, std::string_view _error,
+                              std::string_view _image_b64) {
+  nlohmann::json j;
+  j["type"] = "tool_result";
+  j["call_id"] = std::string(_call_id);
+  j["ok"] = _ok;
+  j["text"] = std::string(_text);
+  j["error"] = std::string(_error);
+  if (!_image_b64.empty()) {
+    j["image_b64"] = std::string(_image_b64);
   }
   return j.dump();
 }
@@ -117,6 +134,16 @@ bool parse_line(std::string_view _line, message *_out) {
     _out->id = j.value("id", 0L);
     _out->text = j.value("text", std::string());
     _out->thinking = j.value("thinking", false);
+    return true;
+  }
+  if (type == "tool_call") {
+    _out->type = message::kind::tool_call;
+    _out->id = j.value("id", 0L);
+    _out->call_id = j.value("call_id", std::string());
+    _out->tool_name = j.value("name", std::string());
+    // Kept as text: the C++ binder parses it, so malformed arguments surface as
+    // a tool error the model can see rather than being dropped here.
+    _out->tool_args_json = j.contains("args") ? j["args"].dump() : std::string("{}");
     return true;
   }
 

@@ -3,8 +3,6 @@
 #include "core/automation_log.h"
 #include "core/llm/llm_protocol.h"
 
-#include <opencv2/imgcodecs.hpp>
-
 #include <chrono>
 #include <vector>
 
@@ -24,8 +22,14 @@ constexpr char k_venv_python_rel[] = ".venv/bin/python3";
 
 /// Generous enough to cover a cold Python + LangChain import.
 constexpr int k_startup_timeout_ms = 60000;
-/// One model round trip; a vision call on a large screenshot is not fast.
-constexpr int k_request_timeout_ms = 120000;
+/// The whole exchange, tool calls included, so this has to cover every round the
+/// sidecar allows (`MAX_TOOL_ROUNDS` in llm/graph.py). Too short and a long but
+/// healthy turn dies as "sidecar timed out" rather than finishing.
+constexpr int k_request_timeout_ms = 900000;
+/// Hard stop on a runaway tool loop, kept above the sidecar's round budget: a
+/// round may issue several calls, and this must not cut a turn the sidecar still
+/// considers legal. The deadline above is what bounds total time.
+constexpr int k_max_tool_calls = 100;
 
 /// The interpreter and script are found by convention, never configured.
 void resolve_sidecar_paths(const std::filesystem::path &_repo_root,
@@ -54,6 +58,13 @@ void llm_host::handle_line(const std::string &_line) {
   case llm_protocol::message::kind::ready:
     {
       std::lock_guard<std::mutex> lk(m_mu);
+      if (msg.protocol != llm_protocol::k_protocol_version) {
+        // Reported instead of ignored: an older sidecar silently knows nothing
+        // about tool calls, and a newer one may expect fields we do not send.
+        m_protocol_mismatch = "sidecar speaks protocol " + std::to_string(msg.protocol) +
+                              ", host speaks " +
+                              std::to_string(llm_protocol::k_protocol_version);
+      }
       m_ready = true;
     }
     m_cv.notify_all();
@@ -84,6 +95,19 @@ void llm_host::handle_line(const std::string &_line) {
         m_thinking = m_thinking || msg.thinking;
       }
     }
+    break;
+  case llm_protocol::message::kind::tool_call:
+    {
+      // Queued, not executed: this is the reader thread, and running the tool
+      // here would block the very pipe that delivers its result. The waiter in
+      // `exchange` picks it up and runs it off the lock.
+      std::lock_guard<std::mutex> lk(m_mu);
+      if (msg.id == m_pending_id) {
+        m_tool_call = msg;
+        m_has_tool = true;
+      }
+    }
+    m_cv.notify_all();
     break;
   case llm_protocol::message::kind::unknown:
   default:
@@ -236,6 +260,15 @@ bool llm_host::ensure_running(const std::filesystem::path &_repo_root,
     }
     return false;
   }
+  if (!m_protocol_mismatch.empty()) {
+    const std::string mismatch = m_protocol_mismatch;
+    lk.unlock();
+    teardown();
+    if (_error_out) {
+      *_error_out = mismatch;
+    }
+    return false;
+  }
   if (m_broken || !m_ready) {
     lk.unlock();
     teardown();
@@ -255,7 +288,46 @@ long llm_host::next_request_id() {
   m_result = llm_result{};
   m_stream.clear();
   m_thinking = false;
+  m_has_tool = false;
+  m_tool_calls = 0;
+  m_notes.clear();
   return id;
+}
+
+void llm_host::set_tool_context(const llm::tool_context &_ctx) { m_tool_ctx = _ctx; }
+
+std::vector<std::string> llm_host::tool_notes() const {
+  std::lock_guard<std::mutex> lk(m_mu);
+  return m_notes;
+}
+
+void llm_host::record_note(const std::string &_note) {
+  std::lock_guard<std::mutex> lk(m_mu);
+  m_notes.push_back(_note);
+}
+
+std::string llm_host::run_tool(const llm_protocol::message &_call) {
+  int call_index = 0;
+  {
+    std::lock_guard<std::mutex> lk(m_mu);
+    call_index = ++m_tool_calls;
+  }
+  if (call_index > k_max_tool_calls) {
+    const std::string error = "tool call limit reached (" +
+                              std::to_string(k_max_tool_calls) + ")";
+    record_note(_call.tool_name + " error: " + error);
+    return llm_protocol::build_tool_result(_call.call_id, false, "", error, "");
+  }
+
+  const llm::tool_reply reply = llm::dispatch(_call.tool_name, _call.tool_args_json);
+  if (reply.ok) {
+    record_note(_call.tool_name + " ok" +
+                (reply.text.empty() ? std::string() : ": " + reply.text));
+  } else {
+    record_note(_call.tool_name + " error: " + reply.error);
+  }
+  return llm_protocol::build_tool_result(_call.call_id, reply.ok, reply.text,
+                                         reply.error, reply.image_b64);
 }
 
 llm_result llm_host::exchange(const std::string &_request_line) {
@@ -267,45 +339,67 @@ llm_result llm_host::exchange(const std::string &_request_line) {
     return r;
   }
 
+  // One deadline for the whole exchange, tool calls included: a model that
+  // keeps tapping must not extend its own budget indefinitely.
+  auto deadline = std::chrono::steady_clock::now() +
+                  std::chrono::milliseconds(k_request_timeout_ms);
   std::unique_lock<std::mutex> lk(m_mu);
-  const bool got = m_cv.wait_for(
-      lk, std::chrono::milliseconds(k_request_timeout_ms),
-      [this]() { return m_has_result || m_broken; });
-  if (!got) {
+  while (true) {
+    const bool signalled = m_cv.wait_until(
+        lk, deadline, [this]() { return m_has_result || m_broken || m_has_tool; });
+    if (!signalled) {
+      lk.unlock();
+      teardown();
+      r.error = "sidecar timed out after " +
+                std::to_string(k_request_timeout_ms) + " ms";
+      return r;
+    }
+    if (m_has_result) {
+      return m_result;
+    }
+    if (m_broken) {
+      lk.unlock();
+      teardown();
+      r.error = "sidecar exited before answering";
+      return r;
+    }
+
+    const llm_protocol::message call = m_tool_call;
+    m_has_tool = false;
     lk.unlock();
-    teardown();
-    r.error = "sidecar timed out after " +
-              std::to_string(k_request_timeout_ms) + " ms";
-    return r;
+    const std::string reply = run_tool(call);
+    // Time spent waiting on a human does not count against the request budget:
+    // the worker was blocked inside service_approval, so wait_until never ran,
+    // and without this top-up the next wait_until would time out immediately and
+    // tear the sidecar down.
+    deadline += take_approval_wait();
+    if (!write_all(reply + "\n", &err)) {
+      teardown();
+      r.error = err;
+      return r;
+    }
+    lk.lock();
   }
-  if (!m_has_result) {
-    lk.unlock();
-    teardown();
-    r.error = "sidecar exited before answering";
-    return r;
-  }
-  return m_result;
 }
 
-llm_result llm_host::describe(const std::filesystem::path &_repo_root,
-                              const cv::Mat &_bgr,
+llm_result llm_host::run_turn(const std::filesystem::path &_repo_root,
                               const std::string &_prompt) {
   llm_result r;
-  if (_bgr.empty() && _prompt.empty()) {
+  if (_prompt.empty()) {
     r.error = "empty request";
     return r;
   }
 
-  // A text-only turn needs no image, so encoding is skipped when there is none.
-  std::string b64;
-  if (!_bgr.empty()) {
-    std::vector<unsigned char> png;
-    if (!cv::imencode(".png", _bgr, png) || png.empty()) {
-      r.error = "failed to encode image as PNG";
-      return r;
-    }
-    b64 = llm_protocol::base64_encode(png.data(), png.size());
-  }
+  // A fresh context per turn, so the screen size starts unknown: coordinates are
+  // only meaningful against a screenshot the model actually asked for, and the
+  // `screenshot` tool is what fills these in.
+  // One context per turn, carrying the host's own approval callback: the gate has
+  // to have somebody to ask before it can work.
+  llm::tool_context ctx = m_tool_ctx;
+  ctx.request_approval = [this](const llm::approval_request &_req) {
+    return service_approval(_req);
+  };
+  llm::set_context(ctx);
 
   std::string err;
   if (!ensure_running(_repo_root, &err)) {
@@ -314,7 +408,8 @@ llm_result llm_host::describe(const std::filesystem::path &_repo_root,
   }
 
   const long id = next_request_id();
-  std::string request = llm_protocol::build_describe_request(b64, id, _prompt);
+  std::string request =
+      llm_protocol::build_turn_request(id, _prompt, llm::tools_json());
   request.push_back('\n');
   return exchange(request);
 }
@@ -360,6 +455,8 @@ void llm_host::teardown() {
   m_broken = false;
   m_stopping = false;
   m_has_result = false;
+  m_has_tool = false;
+  m_protocol_mismatch.clear();
   m_stream.clear();
   m_thinking = false;
 }
@@ -374,6 +471,16 @@ bool llm_host::is_thinking() const { return false; }
 void llm_host::clear_stream() {}
 
 long llm_host::next_request_id() { return 0; }
+
+std::string llm_host::run_tool(const llm_protocol::message &) {
+  return std::string();
+}
+
+void llm_host::set_tool_context(const llm::tool_context &) {}
+
+std::vector<std::string> llm_host::tool_notes() const { return {}; }
+
+void llm_host::record_note(const std::string &) {}
 
 llm_result llm_host::exchange(const std::string &) {
   llm_result r;
@@ -396,7 +503,7 @@ bool llm_host::ensure_running(const std::filesystem::path &,
   return false;
 }
 
-llm_result llm_host::describe(const std::filesystem::path &, const cv::Mat &,
+llm_result llm_host::run_turn(const std::filesystem::path &,
                               const std::string &) {
   llm_result r;
   r.error = "the LLM sidecar is not supported on Windows";
@@ -414,5 +521,71 @@ void llm_host::teardown() {}
 #endif // _WIN32
 
 void llm_host::stop() { teardown(); }
+
+llm::approval_decision llm_host::service_approval(
+    const llm::approval_request &_req) {
+  const auto start = std::chrono::steady_clock::now();
+  std::unique_lock<std::mutex> lk(m_approval_mu);
+  if (m_approval_abort) {
+    return {};
+  }
+  m_approval_req = _req;
+  m_approval_pending = true;
+  m_approval_answered = false;
+  m_approval_approved = false;
+  m_approval_cancelled = false;
+  m_approval_guidance.clear(); // a stale correction must not leak into this one
+  ++m_next_approval_id;
+  // Deliberately no notify: the UI polls pending_approval() per frame, so no
+  // thread is waiting on publication.
+  m_approval_cv.wait(lk,
+                     [this] { return m_approval_answered || m_approval_cancelled; });
+  const bool approved = m_approval_approved && !m_approval_cancelled;
+  const std::string guidance = approved ? std::string{} : m_approval_guidance;
+  m_approval_pending = false;
+  lk.unlock();
+  m_approval_wait += std::chrono::steady_clock::now() - start;
+  return {approved, guidance};
+}
+
+llm_approval llm_host::pending_approval() const {
+  std::lock_guard<std::mutex> lk(m_approval_mu);
+  return llm_approval{m_approval_pending, m_next_approval_id, m_approval_req.tool,
+                      m_approval_req.summary, m_approval_req.highlight};
+}
+
+std::string llm_host::approval_screen_png() const {
+  std::lock_guard<std::mutex> lk(m_approval_mu);
+  return m_approval_req.screen_png;
+}
+
+void llm_host::answer_approval(bool _approved, std::string _guidance) {
+  std::lock_guard<std::mutex> lk(m_approval_mu);
+  if (!m_approval_pending || m_approval_answered || m_approval_cancelled) {
+    return;
+  }
+  m_approval_approved = _approved;
+  // An approval means "the box is right", so any text is dropped. Enforced here
+  // rather than in the UI: no caller can sneak a correction onto an approval.
+  m_approval_guidance = _approved ? std::string{} : std::move(_guidance);
+  m_approval_answered = true;
+  m_approval_cv.notify_all();
+}
+
+void llm_host::cancel_approval() {
+  std::lock_guard<std::mutex> lk(m_approval_mu);
+  m_approval_abort = true;
+  if (!m_approval_pending) {
+    return;
+  }
+  m_approval_cancelled = true;
+  m_approval_cv.notify_all();
+}
+
+std::chrono::nanoseconds llm_host::take_approval_wait() {
+  const std::chrono::nanoseconds waited = m_approval_wait;
+  m_approval_wait = std::chrono::nanoseconds{0};
+  return waited;
+}
 
 } // namespace campcat
