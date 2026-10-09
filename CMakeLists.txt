@@ -37,7 +37,9 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 # OpenCV: install via Homebrew (`brew install opencv`), then configure with CMake.
 # Apple Silicon hint if needed: -DOpenCV_DIR=/opt/homebrew/lib/cmake/opencv4
-find_package(OpenCV REQUIRED COMPONENTS core imgproc imgcodecs)
+# freetype draws the CJK label `mark` paints onto a screenshot; cv::putText
+# itself only knows ASCII.
+find_package(OpenCV REQUIRED COMPONENTS core imgproc imgcodecs freetype)
 
 include(FetchContent)
 

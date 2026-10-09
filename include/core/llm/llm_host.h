@@ -116,6 +116,19 @@ public:
    */
   llm_approval pending_approval() const;
 
+  /**
+   * @brief Raw PNG bytes of the last image a tool returned this turn.
+   *
+   * The UI draws it in the reply bubble; the model already got its own copy
+   * through the tool result. Empty when no tool returned an image. Cleared when
+   * the next turn starts, which is also when `tool_image_id()` moves on.
+   */
+  std::string tool_image_png() const;
+
+  /// Bumped once per image a tool returns. The UI uses it to notice a new image
+  /// without comparing a megabyte of pixels every frame.
+  long tool_image_id() const;
+
   /// Raw PNG bytes of the pending question's screenshot; empty if there is none.
   std::string approval_screen_png() const;
 
@@ -187,6 +200,9 @@ private:
   /// Tool activity for the turn in flight; `m_notes` is read by the UI thread.
   int m_tool_calls = 0;
   std::vector<std::string> m_notes;
+  /// Last tool image of the turn, raw PNG, kept for the UI to draw.
+  std::string m_tool_png;
+  long m_tool_image_id = 0;
 
   /// Streamed deltas for the in-flight request, read by the UI every frame.
   std::string m_stream;

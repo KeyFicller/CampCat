@@ -60,12 +60,14 @@ struct tool_context {
   bool require_approval = false;
 };
 
-/// Outcome of one tool call. `image_b64` is set only by image-returning tools.
+/// Outcome of one tool call. `image_png` is set only by image-returning tools
+/// and holds raw PNG bytes; the host base64-encodes them for the wire, which is
+/// the only place the encoding exists.
 struct tool_reply {
   bool ok = false;
   std::string text;
   std::string error;
-  std::string image_b64;
+  std::string image_png;
 };
 
 /// Sets the context every tool reads. Called once per turn by the worker that

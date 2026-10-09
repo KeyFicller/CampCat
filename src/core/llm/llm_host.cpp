@@ -25,11 +25,11 @@ constexpr int k_startup_timeout_ms = 60000;
 /// The whole exchange, tool calls included, so this has to cover every round the
 /// sidecar allows (`MAX_TOOL_ROUNDS` in llm/graph.py). Too short and a long but
 /// healthy turn dies as "sidecar timed out" rather than finishing.
-constexpr int k_request_timeout_ms = 900000;
+constexpr int k_request_timeout_ms = 86400000;
 /// Hard stop on a runaway tool loop, kept above the sidecar's round budget: a
 /// round may issue several calls, and this must not cut a turn the sidecar still
 /// considers legal. The deadline above is what bounds total time.
-constexpr int k_max_tool_calls = 100;
+constexpr int k_max_tool_calls = 1000000;
 
 /// The interpreter and script are found by convention, never configured.
 void resolve_sidecar_paths(const std::filesystem::path &_repo_root,
@@ -291,6 +291,7 @@ long llm_host::next_request_id() {
   m_has_tool = false;
   m_tool_calls = 0;
   m_notes.clear();
+  m_tool_png.clear();
   return id;
 }
 
@@ -299,6 +300,16 @@ void llm_host::set_tool_context(const llm::tool_context &_ctx) { m_tool_ctx = _c
 std::vector<std::string> llm_host::tool_notes() const {
   std::lock_guard<std::mutex> lk(m_mu);
   return m_notes;
+}
+
+std::string llm_host::tool_image_png() const {
+  std::lock_guard<std::mutex> lk(m_mu);
+  return m_tool_png;
+}
+
+long llm_host::tool_image_id() const {
+  std::lock_guard<std::mutex> lk(m_mu);
+  return m_tool_image_id;
 }
 
 void llm_host::record_note(const std::string &_note) {
@@ -326,8 +337,20 @@ std::string llm_host::run_tool(const llm_protocol::message &_call) {
   } else {
     record_note(_call.tool_name + " error: " + reply.error);
   }
+  if (!reply.image_png.empty()) {
+    std::lock_guard<std::mutex> lk(m_mu);
+    // Kept raw for the UI to draw; the wire is the only place base64 happens.
+    m_tool_png = reply.image_png;
+    ++m_tool_image_id;
+  }
+  const std::string image_b64 =
+      reply.image_png.empty()
+          ? std::string()
+          : llm_protocol::base64_encode(
+                reinterpret_cast<const unsigned char *>(reply.image_png.data()),
+                reply.image_png.size());
   return llm_protocol::build_tool_result(_call.call_id, reply.ok, reply.text,
-                                         reply.error, reply.image_b64);
+                                         reply.error, image_b64);
 }
 
 llm_result llm_host::exchange(const std::string &_request_line) {
@@ -479,6 +502,10 @@ std::string llm_host::run_tool(const llm_protocol::message &) {
 void llm_host::set_tool_context(const llm::tool_context &) {}
 
 std::vector<std::string> llm_host::tool_notes() const { return {}; }
+
+std::string llm_host::tool_image_png() const { return {}; }
+
+long llm_host::tool_image_id() const { return 0; }
 
 void llm_host::record_note(const std::string &) {}
 

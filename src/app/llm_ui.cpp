@@ -45,6 +45,14 @@ struct llm_turn {
   std::string user_text;
   std::string reply;
   std::vector<std::string> tool_notes; ///< what the model did, in call order
+  /// Last tool image of the turn, raw PNG, copied from the host once. The model
+  /// already saw this image through the tool result; this copy is for the human.
+  std::string image_png;
+  long image_id = 0; ///< which host image `image_png` holds; see tool_image_id()
+  GLuint tex = 0;    ///< decoded lazily on the UI thread, needs the GL context
+  int tex_w = 0;
+  int tex_h = 0;
+  bool tex_tried = false; ///< decode attempted; a 0 `tex` after this means failed
   bool pending = false; ///< sent but unanswered; drives the waiting bubble
   bool ok = false;
   std::string error;
@@ -166,6 +174,11 @@ constexpr float k_bubble_rounding = 6.0F;
 /// because the user has to judge a highlighted box before allowing a tap.
 constexpr float k_approval_max_w = 420.0F;
 
+/// A tool image is decoded at no more than this width. A full frame is ~10 MB of
+/// texture, and turns are kept, so a whole conversation of them would not fit in
+/// VRAM. The bubble draws it far smaller than this anyway.
+constexpr int k_turn_img_max_w = 640;
+
 /// Upload `_bgr` as a texture. Returns 0 on failure.
 GLuint upload_bgr(const cv::Mat &_bgr, int *_w, int *_h) {
   if (_bgr.empty() || _bgr.type() != CV_8UC3) {
@@ -196,6 +209,51 @@ void delete_tex(GLuint *_tex, int *_w, int *_h) {
   }
   *_w = 0;
   *_h = 0;
+}
+
+/// Take the host's latest tool image into the turn, if a new one appeared.
+/// Compares ids, not pixels, so the per-frame cost does not include a megabyte
+/// of PNG. A turn that arrives after the image was produced still gets it.
+void adopt_tool_image(llm_turn &_t) {
+  const long id = g_host.tool_image_id();
+  if (_t.image_id == id) {
+    return;
+  }
+  _t.image_id = id;
+  _t.image_png = g_host.tool_image_png();
+  delete_tex(&_t.tex, &_t.tex_w, &_t.tex_h);
+  _t.tex_tried = false; // the next draw decodes the new bytes
+}
+
+/// Decode the turn's image once and upload it. UI thread, and the caller must
+/// hold the GL context.
+void ensure_turn_texture(llm_turn &_t) {
+  if (_t.tex_tried || _t.image_png.empty()) {
+    return;
+  }
+  _t.tex_tried = true;
+  const cv::Mat buf(1, static_cast<int>(_t.image_png.size()), CV_8UC1,
+                    const_cast<char *>(_t.image_png.data()));
+  const cv::Mat bgr = cv::imdecode(buf, cv::IMREAD_COLOR);
+  if (bgr.empty()) {
+    return;
+  }
+  if (bgr.cols > k_turn_img_max_w) {
+    const double scale = static_cast<double>(k_turn_img_max_w) / bgr.cols;
+    cv::Mat small;
+    cv::resize(bgr, small, cv::Size(), scale, scale, cv::INTER_AREA);
+    _t.tex = upload_bgr(small, &_t.tex_w, &_t.tex_h);
+    return;
+  }
+  _t.tex = upload_bgr(bgr, &_t.tex_w, &_t.tex_h);
+}
+
+/// Drop every turn, releasing the textures they own. The GL context must be live.
+void drop_all_turns() {
+  for (llm_turn &t : g_turns) {
+    delete_tex(&t.tex, &t.tex_w, &t.tex_h);
+  }
+  g_turns.clear();
 }
 
 /// Fit `_w x _h` into `_max_w`, preserving aspect.
@@ -230,9 +288,13 @@ void append_user_turn(std::string _prompt) {
   llm_turn t;
   t.user_text = std::move(_prompt);
   t.pending = true;
+  // Start level with the host, so the previous turn's image is not mistaken for
+  // a new one on the first frame.
+  t.image_id = g_host.tool_image_id();
 
   g_turns.push_back(std::move(t));
   while (static_cast<int>(g_turns.size()) > k_turn_cap) {
+    delete_tex(&g_turns.front().tex, &g_turns.front().tex_w, &g_turns.front().tex_h);
     g_turns.erase(g_turns.begin());
   }
   g_pin_bottom = true;
@@ -259,6 +321,9 @@ void fill_reply(const campcat::llm_result &_res) {
     } else {
       t->error = _res.error;
     }
+    // A tool image may have arrived in the same frame the turn finished, which
+    // pump_stream would have missed.
+    adopt_tool_image(*t);
   }
   g_pin_bottom = true;
 }
@@ -271,6 +336,7 @@ void pump_stream() {
   }
   t->reply = g_host.streaming_text();
   t->tool_notes = g_host.tool_notes();
+  adopt_tool_image(*t);
   g_thinking = g_host.is_thinking();
 }
 
@@ -340,7 +406,7 @@ void consume_handoff() {
   if (!h.is_reset) {
     fill_reply(h.res);
     if (h.res.ok) {
-      campcat::automation_log::emit("[llm] ok: " + h.res.text);
+      campcat::automation_log::emit("[llm] ok");
     } else {
       campcat::automation_log::emit("[llm] failed: " + h.res.error);
     }
@@ -350,7 +416,7 @@ void consume_handoff() {
     campcat::automation_log::emit("[llm] reset failed: " + h.res.error);
     return;
   }
-  g_turns.clear();
+  drop_all_turns();
   g_pin_bottom = true;
   campcat::automation_log::emit("[llm] conversation cleared");
 }
@@ -416,7 +482,7 @@ float bubble_width(const char *_text, float _max_w, float _extra, float _pad) {
 
 /// One exchange as two bubbles: the user's hugging the right edge, the reply on
 /// the left. A pending turn shows a waiting bubble in place of the reply.
-void draw_turn(const llm_turn &_t, int _index) {
+void draw_turn(llm_turn &_t, int _index) {
   ImGui::PushID(_index);
   const float pad = ImGui::GetStyle().WindowPadding.x;
   const float max_w = ImGui::GetContentRegionAvail().x * k_bubble_frac;
@@ -438,10 +504,12 @@ void draw_turn(const llm_turn &_t, int _index) {
   // A markdown reply cannot be measured from the raw text (`**` would be
   // counted), so the bubble goes full width once there is real text; the
   // placeholder stays tight because a wide box holding "..." looks broken. It
-  // is measured at its widest so the ticking dots do not resize it.
+  // is measured at its widest so the ticking dots do not resize it. A tool image
+  // needs the full width too, or it would be clipped into a narrow strip.
   const bool placeholder = _t.pending && _t.reply.empty();
+  const bool has_image = !_t.image_png.empty();
   const float aw =
-      placeholder
+      (placeholder && !has_image)
           ? bubble_width(g_thinking ? "Thinking..." : "...", max_w, 0.0F, pad)
           : max_w;
   const bool failed = !_t.pending && !_t.ok;
@@ -456,6 +524,15 @@ void draw_turn(const llm_turn &_t, int _index) {
   // would look like nothing happened.
   for (const std::string &note : _t.tool_notes) {
     ImGui::TextDisabled("%s", note.c_str());
+  }
+  // What the model was looking at when it wrote the reply below: a tool image
+  // (a screenshot, or a box `mark` drew) that would otherwise be invisible here.
+  ensure_turn_texture(_t);
+  if (_t.tex != 0 && _t.tex_w > 0) {
+    const ImVec2 img =
+        fit_image(_t.tex_w, _t.tex_h, ImGui::GetContentRegionAvail().x);
+    ImGui::Image(static_cast<ImTextureID>(static_cast<uintptr_t>(_t.tex)), img,
+                 ImVec2(0.0F, 0.0F), ImVec2(1.0F, 1.0F));
   }
   if (_t.pending && !_t.reply.empty()) {
     ImGui::Markdown(_t.reply.c_str(), _t.reply.size(), md_config());
@@ -545,13 +622,15 @@ void draw_approval_bubble(const campcat::llm_approval &_a) {
       dl->AddRect(p0, p1, IM_COL32(255, 200, 60, 230), 0.0F, 0, 2.0F);
     }
   }
-  if (ImGui::Button("✓ Approve")) {
+  if (ImGui::Button("Approve")) {
     g_host.answer_approval(true);
   }
   ImGui::SameLine();
   // Rejection with a typed correction goes through the prompt box, which stays
   // live while this bubble is up; these buttons are the no-typing shortcut.
-  if (ImGui::Button("✗ Reject")) {
+  // Plain words, not ✓/✗: the UI font carries no glyphs for those two and draws
+  // them as "?" (see 2026-10-09-llm-tap-approval-design.md §4.5).
+  if (ImGui::Button("Reject")) {
     g_host.answer_approval(false);
   }
   ImGui::EndChild();
@@ -625,7 +704,7 @@ void llm_ui_shutdown_gl() {
   g_host.stop();
   delete_tex(&g_appr_tex, &g_appr_w, &g_appr_h);
   g_appr_id = -1;
-  g_turns.clear();
+  drop_all_turns();
   g_thinking = false;
 }
 

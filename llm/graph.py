@@ -37,7 +37,7 @@ MIME = "image/png"
 # same way, and its per-request deadline has to stay long enough for this many
 # rounds plus their model latencies, or a long turn dies on "sidecar timed out"
 # instead. Both caps move together.
-MAX_TOOL_ROUNDS = 50
+MAX_TOOL_ROUNDS = 100000
 
 # Said to the model once the rounds above are spent. With the tools withdrawn it
 # otherwise reaches for one anyway and writes the call into its answer as text.

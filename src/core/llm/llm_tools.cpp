@@ -1,12 +1,13 @@
 #include "core/llm/llm_tools.h"
 
 #include "core/adb_client.h"
-#include "core/llm/llm_protocol.h"
 
 // Private: <meta> and the consteval cost stay out of include/.
 #include "llm_tool_schema.h"
 
+#include <opencv2/freetype.hpp>
 #include <opencv2/imgcodecs.hpp>
+#include <opencv2/imgproc.hpp>
 
 #include <exception>
 #include <optional>
@@ -74,6 +75,30 @@ adb_client &require_adb() {
   return *g_ctx.adb;
 }
 
+/// The CJK face the UI itself renders Chinese with, reused so a label looks the
+/// same in the screenshot as it does in the chat.
+constexpr char k_cjk_font_path[] = "/System/Library/Fonts/Hiragino Sans GB.ttc";
+constexpr int k_label_font_h = 28;
+
+/// Draws `_text` with its top-left at (`_x`, `_y`). `cv::putText` knows ASCII
+/// only, so a Chinese label would come out as boxes; the freetype module draws
+/// UTF-8 from a real font, and ASCII too, so every label looks the same. A
+/// missing font or a build without the module falls back to `cv::putText`.
+void draw_label(cv::Mat &_img, const std::string &_text, int _x, int _y,
+                const cv::Scalar &_color) {
+  try {
+    cv::Ptr<cv::freetype::FreeType2> ft = cv::freetype::createFreeType2();
+    ft->loadFontData(k_cjk_font_path, 0);
+    ft->putText(_img, _text, cv::Point(_x, _y), k_label_font_h, _color, 2,
+                cv::LINE_AA, false);
+    return;
+  } catch (const cv::Exception &) {
+    // No font or no module: the box still marks the spot, so fall through.
+  }
+  cv::putText(_img, _text, cv::Point(_x, _y), cv::FONT_HERSHEY_SIMPLEX, 0.8,
+              _color, 2);
+}
+
 } // namespace
 
 namespace tools {
@@ -101,9 +126,10 @@ std::string screenshot() {
   if (!cv::imencode(".png", bgr, png)) {
     throw js::bind_error("png encode failed");
   }
-  // The approval bubble shows this same image, and base64 is only for the wire.
+  // The approval bubble shows this same image, so keep the raw PNG: base64 is
+  // the wire's problem, and the host encodes once on the way out.
   g_last_screen_png.assign(png.begin(), png.end());
-  return llm_protocol::base64_encode(png.data(), png.size());
+  return std::string(png.begin(), png.end());
 }
 CPP_REFLECT_TOOL(screenshot)
 
@@ -146,6 +172,38 @@ std::string request_tap(int x, int y, int w, int h) {
          std::to_string(w) + "x" + std::to_string(h);
 }
 CPP_REFLECT_TOOL(request_tap)
+
+[[= js::image_result]]
+[[= js::doc{.text = js::str("Draws a box on the last screenshot and returns the marked image, "
+                            "so the user can see where you think something is. Nothing is "
+                            "tapped and nothing needs approval; the box lives in the picture.")}]]
+[[= js::param_docs(js::str("Short label for what the box marks, e.g. \"the login button\"."),
+                   js::str("Left edge X of the box, in screenshot pixels."),
+                   js::str("Top edge Y of the box, in screenshot pixels."),
+                   js::str("Width of the box in pixels."),
+                   js::str("Height of the box in pixels."))]]
+std::string mark(std::string label, int x, int y, int w, int h) {
+  std::string error;
+  if (!box_on_screen(x, y, w, h, &error)) {
+    throw js::bind_error(error);
+  }
+  const cv::Mat buf(1, static_cast<int>(g_last_screen_png.size()), CV_8UC1,
+                    const_cast<char *>(g_last_screen_png.data()));
+  cv::Mat bgr = cv::imdecode(buf, cv::IMREAD_COLOR);
+  const cv::Scalar color(60, 200, 255); // BGR, near-orange against most UIs
+  cv::rectangle(bgr, cv::Rect(x, y, w, h), color, 4);
+  if (!label.empty()) {
+    // Above the box, or below it when the box hugs the top edge.
+    const int ty = y >= k_label_font_h + 4 ? y - k_label_font_h - 2 : y + h + 4;
+    draw_label(bgr, label, x, ty, color);
+  }
+  std::vector<unsigned char> png;
+  if (!cv::imencode(".png", bgr, png)) {
+    throw js::bind_error("png encode failed");
+  }
+  return std::string(png.begin(), png.end());
+}
+CPP_REFLECT_TOOL(mark)
 
 [[= js::doc{.text = js::str("Taps a point on the device screen, in screenshot pixels.")}]]
 [[= js::param_docs(js::str("X coordinate, in screenshot pixels."),
@@ -223,7 +281,7 @@ tool_reply dispatch(std::string_view _name, std::string_view _args_json) {
     try {
       const std::string result = entry.run(args);
       if (entry.returns_image) {
-        out.image_b64 = result;
+        out.image_png = result;
       } else {
         out.text = result;
       }
