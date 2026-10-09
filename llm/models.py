@@ -102,10 +102,10 @@ def build_chat_model():
     max_tokens = int(_env("CAMPCAT_LLM_MAX_TOKENS") or DEFAULT_MAX_TOKENS)
 
     if provider == "deepseek":
-        api_key = _env("CAMPCAT_LLM_API_KEY")
+        api_key = _env("DEEPSEEK_API_KEY")
         if not api_key:
             raise RuntimeError(
-                "CAMPCAT_LLM_API_KEY is not set (put it in llm/.env)"
+                "DEEPSEEK_API_KEY is not set (put it in llm/.env)"
             )
         from langchain_deepseek import ChatDeepSeek
 
