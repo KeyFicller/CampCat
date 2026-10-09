@@ -1,6 +1,9 @@
 #include "core/llm/llm_tools.h"
 
+#include "ccat_script/ccat_program_runner.h" // run_ccat_program
 #include "core/adb_client.h"
+#include "core/app_config.h"
+#include "core/script/ccat_parser.h" // parse_program / parse_error
 
 // Private: <meta> and the consteval cost stay out of include/.
 #include "llm_tool_schema.h"
@@ -9,7 +12,11 @@
 #include <opencv2/imgcodecs.hpp>
 #include <opencv2/imgproc.hpp>
 
+#include <atomic>
 #include <exception>
+#include <fstream>
+#include <iterator>
+#include <memory>
 #include <optional>
 #include <string>
 #include <vector>
@@ -28,6 +35,39 @@ std::string g_last_screen_png;
 /// The element box the human approved. Consumed by the first tap that lands in it;
 /// cleared every turn by set_context().
 std::optional<rect> g_grant;
+
+/// The exact script source the human approved. Consumed by the first run_script
+/// whose source is byte-identical; cleared every turn by set_context(). Exact
+/// equality, not a prefix: a looser test would let an approved script vouch for a
+/// different one.
+std::optional<std::string> g_grant_script;
+
+/// A script is executing (the UI polls this) and it has been asked to stop (the UI
+/// writes it, the interpreter reads it). Both cross threads, hence atomics.
+std::atomic<bool> g_script_running{false};
+std::atomic<bool> g_script_stop{false};
+
+/// Clears a stale stop on entry and marks the script as running until it returns.
+/// The clear is not decoration: a turn can run a second script, and the stop the
+/// user pressed for the first one would otherwise kill it on entry.
+struct script_run_guard {
+  script_run_guard() {
+    g_script_stop.store(false);
+    g_script_running.store(true);
+  }
+  ~script_run_guard() { g_script_running.store(false); }
+};
+
+/// Parses `_source` or turns the syntax error into the bind_error the model reads.
+std::unique_ptr<ccat_lang::Program> parse_or_throw(const std::string &_source) {
+  try {
+    return ccat_lang::parse_program(_source);
+  } catch (const ccat_lang::parse_error &ex) {
+    throw js::bind_error("parse error: " + std::string(ex.what()) + " (line " +
+                         std::to_string(ex.line) + ", col " +
+                         std::to_string(ex.col) + ")");
+  }
+}
 
 /// Rejects a coordinate outside the screenshot the model last saw. Rejection,
 /// not clamping: a clamped tap would look successful to the model.
@@ -226,6 +266,90 @@ std::string tap(int x, int y) {
 }
 CPP_REFLECT_TOOL(tap)
 
+[[= js::approval_gate]]
+[[= js::doc{.text = js::str("Proposes running a .ccat script and waits for the user to "
+                            "approve it. A rejected proposal comes back as an error, and "
+                            "`run_script` then refuses that exact script until this succeeds.")}]]
+[[= js::param_docs(js::str("The full .ccat script source to run."))]]
+std::string request_run_script(std::string source) {
+  // Parse first: a syntax error answers the model directly instead of asking a
+  // human to read a script that cannot run.
+  const std::unique_ptr<ccat_lang::Program> prog = parse_or_throw(source);
+  g_grant_script.reset(); // a new proposal invalidates the old permission
+  if (!g_ctx.request_approval) {
+    throw js::bind_error("no human available to approve running the script");
+  }
+  llm::approval_request req;
+  req.tool = "run_script";
+  req.summary = source; // the thing being approved is the script itself
+  const llm::approval_decision decision = g_ctx.request_approval(req);
+  if (!decision.approved) {
+    throw js::bind_error(decision.guidance.empty()
+                             ? "user rejected running the script"
+                             : "user rejected running the script: " + decision.guidance);
+  }
+  g_grant_script = source;
+  return "approved: run script (" + std::to_string(prog->stmts.size()) +
+         " statements, " + std::to_string(source.size()) + " chars)";
+}
+CPP_REFLECT_TOOL(request_run_script)
+
+[[= js::doc{.text = js::str("Runs a .ccat script on the device and returns what happened. "
+                            "While human approval is on, the exact same source must have "
+                            "been approved through request_run_script first. Call ccat_help "
+                            "for the language. No template PNGs exist yet, so statements "
+                            "that name a file (tap, swipe, if, wait_until, run) will fail; "
+                            "the tap_at / swipe_at forms work.")}]]
+[[= js::param_docs(js::str("The full .ccat script source to run."))]]
+std::string run_script(std::string source) {
+  const std::unique_ptr<ccat_lang::Program> prog = parse_or_throw(source);
+  if (g_ctx.require_approval) {
+    if (!g_grant_script.has_value() || *g_grant_script != source) {
+      throw js::bind_error("script not approved; call request_run_script first");
+    }
+  }
+  // Checked before adb so the refusal above is the reason reported, and so that
+  // path is testable without a device.
+  adb_client &adb = require_adb();
+  if (g_ctx.cfg == nullptr) {
+    throw js::bind_error("no shell config for the script tools");
+  }
+  script_run_guard guard;
+  const auto res = run_ccat_program(&adb, g_ctx.cfg, g_ctx.script_dir, {}, *prog,
+                                    [] { return g_script_stop.load(); });
+  if (!res.ok) {
+    // A user stop arrives here as "stopped"; the grant is kept, like a failed tap's.
+    throw js::bind_error(res.message.empty() ? std::string("script failed")
+                                             : res.message);
+  }
+  g_grant_script.reset(); // one approval authorizes one run; only on success
+  return "script ran ok (" + std::to_string(prog->stmts.size()) + " statements)";
+}
+CPP_REFLECT_TOOL(run_script)
+
+[[= js::quiet{.text = js::str("Read CCAT.md")}]]
+[[= js::doc{.text = js::str("Returns the full reference for the .ccat scripting language. "
+                            "Call it before writing a script with run_script.")}]]
+std::string ccat_help() {
+  if (g_ctx.cfg == nullptr) {
+    throw js::bind_error("no shell config; cannot locate CCAT.md");
+  }
+  const std::filesystem::path path =
+      g_ctx.cfg->config_home.parent_path() / "CCAT.md";
+  // Read per call, no cache: a function-local static would freeze whichever
+  // g_ctx the first call happened to see, and this tool is called rarely enough
+  // that the read costs nothing.
+  std::ifstream in(path, std::ios::binary);
+  if (!in) {
+    // Loud, with the path: an empty string would read as "the language is this
+    // small", which is worse than a failure.
+    throw js::bind_error("CCAT.md not found at " + path.string());
+  }
+  return std::string(std::istreambuf_iterator<char>(in),
+                     std::istreambuf_iterator<char>());
+}
+CPP_REFLECT_TOOL(ccat_help)
+
 // ponytail: deliberately not registered -- swipe is unverified on a real device.
 // Add `CPP_REFLECT_TOOL(swipe)` back once it has been tried there; until then the
 // model never sees it and `dispatch` answers "unknown tool".
@@ -255,10 +379,15 @@ void set_context(const tool_context &_ctx) {
   g_ctx = _ctx;
   // Every turn starts with no screenshot and no permission.
   g_grant.reset();
+  g_grant_script.reset();
   g_last_screen_png.clear();
 }
 
 std::string tools_json() { return js::tools_json(g_ctx.require_approval); }
+
+bool script_running() { return g_script_running.load(); }
+
+void request_script_stop() { g_script_stop.store(true); }
 
 tool_reply dispatch(std::string_view _name, std::string_view _args_json) {
   tool_reply out;
@@ -286,6 +415,7 @@ tool_reply dispatch(std::string_view _name, std::string_view _args_json) {
         out.text = result;
       }
       out.ok = true;
+      out.quiet_note = entry.quiet_note;
     } catch (const std::exception &e) {
       out.error = e.what();
     }

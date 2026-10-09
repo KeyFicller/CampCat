@@ -1,5 +1,6 @@
 #pragma once
 
+#include <filesystem>
 #include <functional>
 #include <string>
 #include <string_view>
@@ -7,6 +8,7 @@
 
 namespace campcat {
 class adb_client;
+struct app_config;
 } // namespace campcat
 
 namespace campcat::llm {
@@ -58,6 +60,12 @@ struct tool_context {
   /// Mirrors app_config::require_tool_approval: decides whether approval tools
   /// enter the tool list and whether `tap` needs a grant.
   bool require_approval = false;
+  /// Config the script tools hand to the interpreter (matcher thresholds, pacing).
+  /// Null makes `run_script` refuse rather than run with defaults nobody chose.
+  const app_config *cfg = nullptr;
+  /// Root a model-authored script's relative paths (template PNGs, `run`) resolve
+  /// against. It has no file of its own, so this stands in for its directory.
+  std::filesystem::path script_dir;
 };
 
 /// Outcome of one tool call. `image_png` is set only by image-returning tools
@@ -68,6 +76,9 @@ struct tool_reply {
   std::string text;
   std::string error;
   std::string image_png;
+  /// Line the UI's tool note shows instead of `text`; non-empty also marks the
+  /// text as a document for the model, too long to print (see `js::quiet`).
+  std::string_view quiet_note;
 };
 
 /// Sets the context every tool reads. Called once per turn by the worker that
@@ -81,5 +92,13 @@ std::string tools_json();
 /// Runs one tool by name against the model's raw `arguments` JSON text.
 /// Never throws: every failure comes back as `ok == false`.
 tool_reply dispatch(std::string_view _name, std::string_view _args_json);
+
+/// True while a script started by `run_script` is executing. The UI polls it to
+/// decide whether its stop control is worth showing.
+bool script_running();
+
+/// Asks the script that is running to stop before its next statement. Safe to
+/// call when nothing is running.
+void request_script_stop();
 
 } // namespace campcat::llm

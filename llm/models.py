@@ -104,8 +104,25 @@ def _setting(name: str, provider_default: str) -> str:
     return _env(name) or provider_default
 
 
+_CCAT_CHEATSHEET = (
+    "You can also write a .ccat script and run it with `run_script`. Call `ccat_help` "
+    "for the full language reference. The parts that are easy to get wrong:\n"
+    "  * Comments are `//`; semicolons are optional.\n"
+    "  * `tap_at(x, y)` / `swipe_at(...)` take coordinates normalized to [0,1] against "
+    "the screenshot size, not pixels.\n"
+    "  * Actions: tap(\"a.png\"), tap_at(x, y), tap_offset(\"a.png\", dx, dy), "
+    "swipe(\"a.png\", \"b.png\"), wait(ms), wait_until(\"a.png\", ms), log(\"msg\"), "
+    "home, run(\"other.ccat\").\n"
+    "  * Control flow: if (\"a.png\") { } else { }, retry(n) { }, loop(n) { }, "
+    "do { } while (\"a.png\"), break, return.\n"
+    "  * A failing statement stops the script and comes back to you as an error."
+)
+
+
 def system_prompt() -> str:
-    return _env("CAMPCAT_LLM_SYSTEM_PROMPT") or DEFAULT_SYSTEM_PROMPT
+    # Appended after the override, not replaced by it: the language reference is
+    # what makes the script tools usable at all, not a stylistic choice.
+    return f"{_env('CAMPCAT_LLM_SYSTEM_PROMPT') or DEFAULT_SYSTEM_PROMPT}\n\n{_CCAT_CHEATSHEET}"
 
 
 def context_tokens() -> int:

@@ -332,8 +332,10 @@ std::string llm_host::run_tool(const llm_protocol::message &_call) {
 
   const llm::tool_reply reply = llm::dispatch(_call.tool_name, _call.tool_args_json);
   if (reply.ok) {
+    const std::string shown =
+        reply.quiet_note.empty() ? reply.text : std::string(reply.quiet_note);
     record_note(_call.tool_name + " ok" +
-                (reply.text.empty() ? std::string() : ": " + reply.text));
+                (shown.empty() ? std::string() : ": " + shown));
   } else {
     record_note(_call.tool_name + " error: " + reply.error);
   }

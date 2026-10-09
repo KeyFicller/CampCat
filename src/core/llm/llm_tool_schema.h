@@ -86,6 +86,16 @@ consteval auto param_docs(auto... _xs) {
 struct image_result_t {};
 inline constexpr image_result_t image_result{};
 
+/// Marks a tool whose result is a document for the model rather than log
+/// material, i.e. text too long to print, and carries the line the log shows
+/// instead: [[= js::quiet{.text = js::str("Read CCAT.md")}]]. The text itself
+/// still reaches the model unchanged. Same shape as `doc` above, so
+/// `text_of<^^quiet, Fn>()` reads it.
+template <std::size_t N = 1>
+struct quiet {
+  str<N> text;
+};
+
 /// Marks the approval half of a two-step tool flow, i.e. a tool that only
 /// exists while the human-approval gate is on: [[= js::approval_gate]].
 struct approval_gate_t {};
@@ -244,6 +254,18 @@ consteval bool has_image_annotation() {
   return has_annotation<^^image_result_t>(Fn);
 }
 
+/// The line the UI log shows in place of a quiet tool's result, i.e. the text of
+/// its [[= js::quiet]] annotation. Empty when the tool carries no such annotation,
+/// which is also the signal that it is not quiet: a non-empty value is what
+/// replaces the result in the log. `define_static_string` because the result has
+/// to outlive the consteval call. Wrapped in its own function because the
+/// registration macro expands outside this namespace, where `^^quiet` would not
+/// resolve unqualified.
+template <detail::meta::info Fn>
+consteval std::string_view quiet_note_of() {
+  return std::string_view(std::define_static_string(text_of<^^quiet, Fn>()));
+}
+
 /// True when the tool carries [[= js::approval_gate]]: it is the half of a
 /// two-step flow that only makes sense while human approval is enabled.
 template <detail::meta::info Fn>
@@ -389,6 +411,9 @@ struct tool_entry {
   bool returns_image = false;
   /// Only offered to the model while the human-approval gate is on.
   bool approval_gate = false;
+  /// What the log shows in place of this tool's result. Non-empty also marks the
+  /// tool quiet: the result is a document for the model, too long to print.
+  std::string_view quiet_note;
 };
 
 inline std::vector<tool_entry> &tool_registry() {
@@ -452,7 +477,8 @@ inline std::string tools_json(bool _include_gated) {
     ::campcat::llm::js::register_tool(::campcat::llm::js::tool_entry{              \
         #fn, ::campcat::llm::js::tool_schema<^^fn>(), &js_run_##fn,                \
         ::campcat::llm::js::has_image_annotation<^^fn>(),                          \
-        ::campcat::llm::js::has_approval_gate<^^fn>()});                           \
+        ::campcat::llm::js::has_approval_gate<^^fn>(),                             \
+        ::campcat::llm::js::quiet_note_of<^^fn>()});                               \
     return 0;                                                                      \
   }();                                                                             \
   }

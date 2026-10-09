@@ -347,19 +347,21 @@ void start_turn(const campcat::app_config &_cfg, std::string _repo_root,
     g_thread.join();
   }
   g_running.store(true);
-  g_thread = std::thread([adb_path = _cfg.adb_path, adb_serial = _cfg.adb_serial,
-                          adb_connect = _cfg.adb_connect_address,
-                          requires_approval = _cfg.require_tool_approval,
-                          root = std::move(_repo_root),
+  // The whole snapshot, by value: the script tools need the interpreter's config
+  // (`tool_context::cfg`), and `_cfg` is a per-frame copy in the caller's frame,
+  // so a pointer to it would dangle the moment the frame ends.
+  g_thread = std::thread([cfg_snapshot = _cfg, root = std::move(_repo_root),
                           prompt = std::move(_prompt)]() {
     // A per-turn client, built the way the automation cycle builds one. Every
     // tool runs on this thread, so nothing here races the UI.
-    campcat::adb_client adb(adb_path, adb_serial);
-    adb.connect_remote(adb_connect);
+    campcat::adb_client adb(cfg_snapshot.adb_path, cfg_snapshot.adb_serial);
+    adb.connect_remote(cfg_snapshot.adb_connect_address);
     campcat::llm::tool_context ctx;
     ctx.adb = &adb;
     ctx.adb_busy = [] { return g_adb_busy.load(); };
-    ctx.require_approval = requires_approval;
+    ctx.require_approval = cfg_snapshot.require_tool_approval;
+    ctx.cfg = &cfg_snapshot;
+    ctx.script_dir = cfg_snapshot.config_home / "scripts/llm";
     g_host.set_tool_context(ctx);
     campcat::llm_result res = g_host.run_turn(root, prompt);
     g_host.set_tool_context({}); // `adb` dies with this lambda
@@ -638,6 +640,24 @@ void draw_approval_bubble(const campcat::llm_approval &_a) {
   ImGui::PopStyleColor();
 }
 
+/// While a script the tools are running is in flight: one line and a Stop, so a
+/// loop that never ends can be stopped without quitting the app.
+void draw_script_bubble() {
+  ImGui::PushStyleColor(ImGuiCol_ChildBg, k_bot_bg);
+  ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, k_bubble_rounding);
+  ImGui::BeginChild("script_run", ImVec2(0.0F, 0.0F),
+                    ImGuiChildFlags_AutoResizeY |
+                        ImGuiChildFlags_AlwaysUseWindowPadding,
+                    ImGuiWindowFlags_NoScrollbar);
+  ImGui::TextUnformatted("Running script...");
+  if (ImGui::Button("Stop")) {
+    campcat::llm::request_script_stop();
+  }
+  ImGui::EndChild();
+  ImGui::PopStyleVar();
+  ImGui::PopStyleColor();
+}
+
 /// Draws the conversation. Returns true when the user asked to clear it via the
 /// context menu, so the caller can start the reset on the worker.
 bool draw_log() {
@@ -673,6 +693,14 @@ bool draw_log() {
     draw_approval_bubble(approval);
   }
 
+  // A script in flight, next to where the approval bubble was: the same place the
+  // user is already looking. Only shown when there is really a script to stop, so
+  // it never becomes a button that does nothing.
+  if (campcat::llm::script_running()) {
+    ImGui::Spacing();
+    draw_script_bubble();
+  }
+
   // Follow new content only while the user is already at the bottom.
   if (g_pin_bottom) {
     ImGui::SetScrollHereY(1.0F);
@@ -698,6 +726,9 @@ void llm_ui_shutdown_gl() {
   // Unblock a question nobody can answer any more: without this the worker stays
   // inside service_approval and the join below never returns.
   g_host.cancel_approval();
+  // A long script keeps the worker inside run_script, where cancel_approval means
+  // nothing; without this the join below waits for the script to finish on its own.
+  campcat::llm::request_script_stop();
   if (g_thread.joinable()) {
     g_thread.join();
   }
