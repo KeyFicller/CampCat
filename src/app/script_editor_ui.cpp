@@ -18,6 +18,7 @@
 #include <iterator>
 #include <map>
 #include <memory>
+#include <optional>
 #include <string>
 #include <system_error>
 #include <utility>
@@ -55,6 +56,22 @@ std::vector<std::unique_ptr<script_editor>> g_editors;
 /// The last scan of the bundle directory, refreshed at most once a second.
 std::vector<std::string> g_names;
 double g_next_scan = 0.0;
+
+/// The deletion being confirmed, and -- when `g_delete_error` is set -- the
+/// reason there is nothing to confirm.
+constexpr char k_delete_popup[] = "Delete script";
+std::string g_delete_name;
+std::string g_delete_error;
+bool g_delete_pending = false;
+
+/// The rename being confirmed. `g_rename_buf` is the name field; when
+/// `g_rename_error` is set the popup shows why the rename was refused instead.
+constexpr char k_rename_popup[] = "Rename script";
+std::string g_rename_name; ///< the bundle being renamed
+std::string g_rename_error;
+std::vector<std::string> g_rename_referrers; ///< shown as the rewrite blast radius
+char g_rename_buf[64] = {};
+bool g_rename_pending = false;
 
 /// A decoded template, kept between hovers: key is the absolute path.
 struct preview_tex {
@@ -222,7 +239,9 @@ void draw_template_preview(const std::filesystem::path &_path,
   ImGui::EndTooltip();
 }
 
-void draw_list(const std::filesystem::path &_dir, float _w, float _h) {
+std::optional<std::string> draw_list(const std::filesystem::path &_dir, float _w,
+                                     float _h, std::string *_rename) {
+  std::optional<std::string> to_delete;
   ImGui::BeginChild("script_list", ImVec2(_w, _h), ImGuiChildFlags_Borders);
   ImGui::SeparatorText("Available Scripts");
   if (g_names.empty()) {
@@ -243,9 +262,141 @@ void draw_list(const std::filesystem::path &_dir, float _w, float _h) {
         open_editor(_dir, name);
       }
     }
+    // Behind a right click: the column is 180 wide and the row is one Selectable,
+    // so a button of its own would squeeze the name.
+    if (ImGui::BeginPopupContextItem("ctx")) {
+      if (ImGui::MenuItem("Rename")) {
+        *_rename = name;
+      }
+      if (ImGui::MenuItem("Delete")) {
+        to_delete = name;
+      }
+      ImGui::EndPopup();
+    }
     ImGui::PopID();
   }
   ImGui::EndChild();
+  return to_delete;
+}
+
+/// The rename prompt. It says up front which scripts the rename will rewrite,
+/// and a refusal is shown inside it so the name can be corrected in place.
+void draw_rename_modal(const std::filesystem::path &_dir) {
+  if (g_rename_pending) {
+    ImGui::OpenPopup(k_rename_popup);
+    g_rename_pending = false;
+  }
+  if (!ImGui::BeginPopupModal(k_rename_popup, nullptr,
+                              ImGuiWindowFlags_AlwaysAutoResize)) {
+    return;
+  }
+
+  ImGui::Text("Rename \"%s\" to:", g_rename_name.c_str());
+  ImGui::SetNextItemWidth(240.0F);
+  if (ImGui::IsWindowAppearing()) {
+    ImGui::SetKeyboardFocusHere();
+  }
+  ImGui::InputText("##new_name", g_rename_buf, sizeof(g_rename_buf));
+
+  if (!g_rename_referrers.empty()) {
+    std::string also;
+    for (const std::string &referrer : g_rename_referrers) {
+      if (!also.empty()) {
+        also += ", ";
+      }
+      also += referrer;
+    }
+    ImGui::TextDisabled("This also rewrites every script that runs it: %s.",
+                        also.c_str());
+  }
+  if (!g_rename_error.empty()) {
+    ImGui::TextWrapped("%s", g_rename_error.c_str());
+  }
+
+  if (ImGui::Button("Rename")) {
+    // A trailing space is invisible and would leave a directory nobody can type.
+    std::string typed(g_rename_buf);
+    const std::size_t first = typed.find_first_not_of(" \t");
+    const std::size_t last = typed.find_last_not_of(" \t");
+    typed = first == std::string::npos
+                ? std::string()
+                : typed.substr(first, last - first + 1);
+
+    g_rename_error.clear();
+    std::vector<std::string> rewritten;
+    if (campcat::ccat_lang::rename_bundle(_dir, g_rename_name, typed, &rewritten,
+                                          &g_rename_error) ==
+        campcat::ccat_lang::rename_status::ok) {
+      // The window follows its script; its file is the same one, renamed.
+      if (script_editor *open = find_editor(g_rename_name)) {
+        open->name = typed;
+        open->main_path = campcat::ccat_lang::bundle_main(_dir, typed);
+      }
+      g_next_scan = 0.0; // show the new name now instead of within a second
+      ImGui::CloseCurrentPopup();
+      g_rename_name.clear();
+      g_rename_referrers.clear();
+    }
+  }
+  ImGui::SameLine();
+  if (ImGui::Button("Cancel")) {
+    ImGui::CloseCurrentPopup();
+    g_rename_name.clear();
+    g_rename_referrers.clear();
+    g_rename_error.clear();
+  }
+  ImGui::EndPopup();
+}
+
+/// The confirmation for a deletion, or -- when the guard refused -- the reason
+/// there is nothing to confirm. Decided when the menu item is clicked, so nobody
+/// is asked to confirm a deletion that was never going to happen.
+void draw_delete_modal(const std::filesystem::path &_dir) {
+  if (g_delete_pending) {
+    ImGui::OpenPopup(k_delete_popup);
+    g_delete_pending = false;
+  }
+  if (!ImGui::BeginPopupModal(k_delete_popup, nullptr,
+                              ImGuiWindowFlags_AlwaysAutoResize)) {
+    return;
+  }
+
+  if (!g_delete_error.empty()) {
+    ImGui::TextWrapped("%s", g_delete_error.c_str());
+    if (ImGui::Button("OK")) {
+      ImGui::CloseCurrentPopup();
+      g_delete_name.clear();
+      g_delete_error.clear();
+    }
+    ImGui::EndPopup();
+    return;
+  }
+
+  ImGui::Text("Delete \"%s\"?", g_delete_name.c_str());
+  ImGui::TextDisabled("This removes the whole %s/ directory, main.ccat and every "
+                      "template in it.\nIt cannot be undone.",
+                      g_delete_name.c_str());
+  if (ImGui::Button("Delete")) {
+    std::string err;
+    if (campcat::ccat_lang::delete_bundle(_dir, g_delete_name, &err) ==
+        campcat::ccat_lang::delete_status::ok) {
+      // Its file is gone, so a Save in that window could only fail.
+      if (script_editor *open = find_editor(g_delete_name)) {
+        open->open = false;
+      }
+      g_next_scan = 0.0; // drop the row now instead of within a second
+      ImGui::CloseCurrentPopup();
+      g_delete_name.clear();
+    } else {
+      g_delete_error = err;
+    }
+  }
+  ImGui::SameLine();
+  if (ImGui::Button("Cancel")) {
+    ImGui::CloseCurrentPopup();
+    g_delete_name.clear();
+  }
+  ImGui::EndPopup();
 }
 
 void draw_editor(const std::filesystem::path &_dir, script_editor &_e) {
@@ -337,7 +488,33 @@ void script_ui_set_mono_font(ImFont *_font) { g_mono = _font; }
 void script_ui_draw(const std::filesystem::path &_script_dir, float _list_w,
                     float _list_h) {
   scan_scripts(_script_dir);
-  draw_list(_script_dir, _list_w, _list_h);
+  std::string rename_clicked;
+  if (const std::optional<std::string> clicked =
+          draw_list(_script_dir, _list_w, _list_h, &rename_clicked)) {
+    g_delete_name = *clicked;
+    g_delete_error.clear();
+    std::string err;
+    // Asked before the popup opens: a refusal should be the first thing the
+    // person sees, not something they reach by confirming.
+    if (campcat::ccat_lang::check_bundle_deletable(_script_dir, g_delete_name,
+                                                   &err) !=
+        campcat::ccat_lang::delete_status::ok) {
+      g_delete_error = err;
+    }
+    g_delete_pending = true;
+  }
+  if (!rename_clicked.empty()) {
+    g_rename_name = rename_clicked;
+    // Which scripts would be rewritten is known before a name is, so the prompt
+    // can say what is at stake while it is being typed.
+    g_rename_referrers =
+        campcat::ccat_lang::bundle_referrers(_script_dir, rename_clicked);
+    g_rename_error.clear();
+    std::snprintf(g_rename_buf, sizeof(g_rename_buf), "%s", rename_clicked.c_str());
+    g_rename_pending = true;
+  }
+  draw_delete_modal(_script_dir);
+  draw_rename_modal(_script_dir);
   for (const std::unique_ptr<script_editor> &entry : g_editors) {
     draw_editor(_script_dir, *entry);
   }

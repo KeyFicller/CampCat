@@ -147,9 +147,6 @@ private:
   exec_program_stmts(const Program &_program,
                      const std::function<bool()> &_should_stop);
 
-  std::filesystem::path
-  resolve_script_path(const std::string &_rel) const;
-
   void dump_match_debug(const char *_op, const std::filesystem::path &_templ,
                         const cv::Mat &_screen, const match_result &_r);
 

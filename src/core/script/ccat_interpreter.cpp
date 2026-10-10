@@ -5,6 +5,7 @@
 #include "core/automation_log.h"
 #include "core/template_matcher.h"
 
+#include "core/script/ccat_bundle.h"
 #include "core/script/ccat_parser.h"
 
 #include <opencv2/imgcodecs.hpp>
@@ -393,18 +394,6 @@ CcatInterpreter::home_impl(const std::function<bool()> &_should_stop) {
   return std::nullopt;
 }
 
-std::filesystem::path
-CcatInterpreter::resolve_script_path(const std::string &_rel) const {
-  std::filesystem::path p(_rel);
-  if (!p.is_absolute()) {
-    p = m_images_base / p;
-  }
-  std::error_code ec;
-  const std::filesystem::path canon =
-      std::filesystem::weakly_canonical(p, ec);
-  return ec ? p.lexically_normal() : canon;
-}
-
 stmt_exec_outcome CcatInterpreter::exec_program_stmts(
     const Program &_program, const std::function<bool()> &_should_stop) {
   for (const auto &st : _program.stmts) {
@@ -432,7 +421,8 @@ CcatInterpreter::run_script_impl(const std::string &_rel,
     return std::string("run: max call depth exceeded");
   }
 
-  const std::filesystem::path abs = resolve_script_path(_rel);
+  const std::filesystem::path abs =
+      resolve_script_path_from(m_images_base, _rel);
   for (const auto &frame : m_run_stack) {
     if (frame == abs) {
       return std::string("run: cyclic call to ") + abs.string();

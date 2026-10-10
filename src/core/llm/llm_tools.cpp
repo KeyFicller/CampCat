@@ -116,19 +116,16 @@ bool box_on_screen(int _img_w, int _img_h, int _x, int _y, int _w, int _h,
   return true;
 }
 
-/// A name that can only land inside the directory it is meant for: non-empty,
-/// not `.` or `..` (walking up), no separator (walking out or into a sibling),
-/// and no control byte (a NUL would truncate the path in the OS call).
-bool safe_leaf_name(const std::string &_s) {
-  if (_s.empty() || _s == "." || _s == "..") {
-    return false;
-  }
-  for (const unsigned char c : _s) {
-    if (c == '/' || c == '\\' || c < 0x20U || c == 0x7FU) {
-      return false;
+/// The names, comma-separated, for a sentence read back to the model.
+std::string join_names(const std::vector<std::string> &_names) {
+  std::string out;
+  for (const std::string &name : _names) {
+    if (!out.empty()) {
+      out += ", ";
     }
+    out += name;
   }
-  return true;
+  return out;
 }
 
 /// The known bundles, comma-separated for an error message, or "none yet".
@@ -209,7 +206,7 @@ bool frame_mat(const std::optional<int> &_shot, cv::Mat *_out, std::string *_err
 /// Validates a new bundle name and refuses one that is taken.
 std::unique_ptr<ccat_lang::Program> check_new_bundle(const std::string &_name,
                                                      const std::string &_source) {
-  if (!safe_leaf_name(_name)) {
+  if (!ccat_lang::safe_leaf_name(_name)) {
     throw js::bind_error("name \"" + _name + "\" is not a plain file name");
   }
   std::unique_ptr<ccat_lang::Program> prog = parse_or_throw(_source);
@@ -233,10 +230,10 @@ std::unique_ptr<ccat_lang::Program> check_new_bundle(const std::string &_name,
 cv::Mat check_template_target(const std::string &_bundle, const std::string &_name,
                               const rect &_box, const std::optional<int> &_shot,
                               std::string *_file, std::string *_frame_png) {
-  if (!safe_leaf_name(_bundle)) {
+  if (!ccat_lang::safe_leaf_name(_bundle)) {
     throw js::bind_error("bundle \"" + _bundle + "\" is not a plain file name");
   }
-  if (!safe_leaf_name(_name)) {
+  if (!ccat_lang::safe_leaf_name(_name)) {
     throw js::bind_error("name \"" + _name + "\" is not a plain file name");
   }
   std::error_code ec;
@@ -671,7 +668,7 @@ CPP_REFLECT_TOOL(list_scripts)
                             "it from what this returns rather than from memory.")}]]
 [[= js::param_docs(js::str("Bundle name, as list_scripts showed it."))]]
 std::string read_script(std::string name) {
-  if (!safe_leaf_name(name)) {
+  if (!ccat_lang::safe_leaf_name(name)) {
     throw js::bind_error("name \"" + name + "\" is not a plain file name");
   }
   const std::filesystem::path path = ccat_lang::bundle_main(g_ctx.script_dir, name);
@@ -733,7 +730,7 @@ struct template_cut {
                    js::str("Every template the bundle should have afterwards."))]]
 std::string update_script(std::string name, std::string source,
                           std::vector<template_cut> templates) {
-  if (!safe_leaf_name(name)) {
+  if (!ccat_lang::safe_leaf_name(name)) {
     throw js::bind_error("name \"" + name + "\" is not a plain file name");
   }
   std::error_code ec;
@@ -752,7 +749,7 @@ std::string update_script(std::string name, std::string source,
   std::vector<std::string> declared;
   for (const template_cut &entry : templates) {
     const std::string file = with_png_ext(entry.name);
-    if (!safe_leaf_name(file)) {
+    if (!ccat_lang::safe_leaf_name(file)) {
       throw js::bind_error("template name \"" + entry.name +
                            "\" is not a plain file name");
     }
@@ -899,6 +896,100 @@ std::string update_script(std::string name, std::string source,
          name + "/main.ccat\")";
 }
 CPP_REFLECT_TOOL(update_script)
+
+[[= js::doc{.text = js::str("Deletes a saved script bundle: its main.ccat and every template in the "
+                            "folder. It cannot be undone. It is refused while another script reaches it "
+                            "with run(...) -- update or delete that script first (list_scripts shows what "
+                            "exists). While human approval is on, the deletion is shown to the user and "
+                            "nothing is removed unless they approve it.")}]]
+[[= js::param_docs(js::str("Bundle to delete, as list_scripts showed it."))]]
+std::string delete_script(std::string name) {
+  if (!ccat_lang::safe_leaf_name(name)) {
+    throw js::bind_error("name \"" + name + "\" is not a plain file name");
+  }
+  // Guard first: a deletion that cannot go through is answered here, rather than
+  // by showing a human an approval for something that was never going to happen.
+  std::string err;
+  const ccat_lang::delete_status checked =
+      ccat_lang::check_bundle_deletable(g_ctx.script_dir, name, &err);
+  if (checked != ccat_lang::delete_status::ok) {
+    throw js::bind_error(err);
+  }
+  if (g_ctx.require_approval) {
+    if (!g_ctx.request_approval) {
+      throw js::bind_error("no human available to approve deleting the script");
+    }
+    llm::approval_request req;
+    req.tool = "delete_script";
+    req.summary = "delete script bundle \"" + name + "\"";
+    const llm::approval_decision decision = g_ctx.request_approval(req);
+    if (!decision.approved) {
+      throw js::bind_error(decision.guidance.empty()
+                               ? "user rejected deleting the script"
+                               : "user rejected deleting the script: " +
+                                     decision.guidance);
+    }
+  }
+  if (ccat_lang::delete_bundle(g_ctx.script_dir, name, &err) !=
+      ccat_lang::delete_status::ok) {
+    // The guard passed a moment ago, so this is the editor having deleted it in
+    // between, or the filesystem refusing.
+    throw js::bind_error(err);
+  }
+  return "deleted \"" + name + "\"";
+}
+CPP_REFLECT_TOOL(delete_script)
+
+[[= js::doc{.text = js::str("Renames a saved script bundle and rewrites every script that runs it, so "
+                            "nothing is left pointing at the old name -- do not edit those scripts "
+                            "yourself afterwards, it is already done here. Refused when a script reaches "
+                            "it through a `defs` name instead of a literal path (there is no text to "
+                            "rewrite; update that script first), and when the new name is taken or is "
+                            "not a plain file name. While human approval is on, the rename and the "
+                            "scripts it will update are shown to the user and nothing happens unless "
+                            "they approve it.")}]]
+[[= js::param_docs(js::str("Bundle to rename, as list_scripts showed it."),
+                   js::str("The new name: a plain file name, not a path."))]]
+std::string rename_script(std::string name, std::string new_name) {
+  if (!ccat_lang::safe_leaf_name(name) || !ccat_lang::safe_leaf_name(new_name)) {
+    throw js::bind_error("the name must be a plain file name, not a path");
+  }
+  // Guard first: a rename that cannot go through is answered here, rather than by
+  // showing a human an approval for something that was never going to happen.
+  std::vector<std::string> referrers;
+  std::string err;
+  if (ccat_lang::check_bundle_renamable(g_ctx.script_dir, name, new_name, &referrers,
+                                        &err) != ccat_lang::rename_status::ok) {
+    throw js::bind_error(err);
+  }
+  if (g_ctx.require_approval) {
+    if (!g_ctx.request_approval) {
+      throw js::bind_error("no human available to approve renaming the script");
+    }
+    llm::approval_request req;
+    req.tool = "rename_script";
+    // The blast radius is part of what the human is approving.
+    req.summary = "rename script bundle \"" + name + "\" to \"" + new_name + "\"" +
+                  (referrers.empty()
+                       ? " (nothing runs it)"
+                       : " (also updates " + join_names(referrers) + ")");
+    const llm::approval_decision decision = g_ctx.request_approval(req);
+    if (!decision.approved) {
+      throw js::bind_error(decision.guidance.empty()
+                               ? "user rejected renaming the script"
+                               : "user rejected renaming the script: " +
+                                     decision.guidance);
+    }
+  }
+  std::vector<std::string> rewritten;
+  if (ccat_lang::rename_bundle(g_ctx.script_dir, name, new_name, &rewritten, &err) !=
+      ccat_lang::rename_status::ok) {
+    throw js::bind_error(err);
+  }
+  return "renamed \"" + name + "\" to \"" + new_name + "\"" +
+         (rewritten.empty() ? "" : " (updated " + join_names(rewritten) + ")");
+}
+CPP_REFLECT_TOOL(rename_script)
 
 // ponytail: deliberately not registered -- swipe is unverified on a real device.
 // Add `CPP_REFLECT_TOOL(swipe)` back once it has been tried there; until then the
