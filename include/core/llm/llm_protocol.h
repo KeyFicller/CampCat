@@ -11,7 +11,9 @@ namespace campcat::llm_protocol {
 /// 5: `tool_call` no longer carries `image_b64` -- the host keeps the session's
 ///    numbered screenshots itself -- and `tool_result` carries the `shot` number
 ///    an image-returning tool filed its frame under.
-constexpr int k_protocol_version = 5;
+/// 6: `turn` carries `memory`, the long-term notes the host read off disk, and
+///    `memorize` asks the sidecar to fold the session into them.
+constexpr int k_protocol_version = 6;
 
 /**
  * @brief One decoded line from the sidecar's stdout.
@@ -67,9 +69,12 @@ std::string base64_encode(const unsigned char *_data, std::size_t _len);
  *
  * @param[in] _text The user's instruction; blank asks for nothing.
  * @param[in] _tools_json OpenAI tools array; empty to offer no tools.
+ * @param[in] _memory Long-term notes about this user, read off disk by the host.
+ *                    Sent even when empty, so the field's shape never moves.
  */
 std::string build_turn_request(long _id, std::string_view _text,
-                               std::string_view _tools_json);
+                               std::string_view _tools_json,
+                               std::string_view _memory);
 
 /**
  * @brief Build one `tool_result` line answering a `tool_call`.
@@ -90,6 +95,17 @@ std::string build_tool_result(std::string_view _call_id, bool _ok,
  * @brief Build one `reset` request line, dropping the sidecar's history.
  */
 std::string build_reset_request(long _id);
+
+/**
+ * @brief Build one `memorize` request line: fold this session into the memory.
+ *
+ * The sidecar already holds the conversation, so nothing but the current notes
+ * crosses the wire; the reply's `text` is the rewritten notes, for the host to
+ * write to disk.
+ *
+ * @param[in] _memory The notes as they stand now; empty when there are none.
+ */
+std::string build_memorize_request(long _id, std::string_view _memory);
 
 /**
  * @brief Parse one sidecar line. Never throws.

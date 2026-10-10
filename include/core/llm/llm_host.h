@@ -35,6 +35,16 @@ struct llm_approval {
   std::vector<llm::rect> highlight;
 };
 
+/// How long an idle consolidation may take. One model call and a file write, so
+/// minutes are already generous; deliberately not the per-turn timeout, which
+/// exists only because a turn chains many tool rounds.
+constexpr int k_memorize_timeout_ms = 120000;
+
+/// How long the process may stay alive behind an already-closed window to finish
+/// the last consolidation. Only the tail of the session is at stake: the idle
+/// pass has usually folded everything else already.
+constexpr int k_shutdown_memorize_timeout_ms = 5000;
+
 /**
  * @brief Owns the persistent Python sidecar and speaks NDJSON to it.
  *
@@ -55,17 +65,34 @@ public:
 
   /**
    * @brief Ask the sidecar for one turn on `_prompt`.
-   * @param[in] _repo_root Directory holding `config/`; anchors `.venv` and `llm/`.
+   * @param[in] _config_home The config directory; it holds the memory file this
+   *                         turn carries, and its parent anchors `.venv`/`llm/`.
    * @param[in] _prompt The user's instruction. Blank is rejected.
    */
-  llm_result run_turn(const std::filesystem::path &_repo_root,
+  llm_result run_turn(const std::filesystem::path &_config_home,
                       const std::string &_prompt);
+
+  /**
+   * @brief Fold this session into the long-term notes on disk.
+   *
+   * Reads the notes, has the sidecar rewrite them from the conversation it
+   * already holds, and writes the result back. A failed read is fatal to this
+   * call: notes that cannot be read are never overwritten.
+   *
+   * @param[in] _config_home The config directory, holding the memory file.
+   * @param[in] _timeout_ms Hard limit on the whole request. Consolidation can be
+   *                        slow, but the shutdown call must not be.
+   */
+  llm_result memorize(const std::filesystem::path &_config_home, int _timeout_ms);
 
   /**
    * @brief Clear the sidecar's conversation history.
    *
    * Succeeds without spawning anything when no child is running, since there
    * is then no history to clear.
+   *
+   * Does not touch the memory file: callers that want the session kept run
+   * `memorize` first, because this is what forgets the conversation it reads.
    */
   llm_result reset(const std::filesystem::path &_repo_root);
 
@@ -157,8 +184,9 @@ private:
   /// Claim the next request id, clearing the result slot and the stream.
   long next_request_id();
   /// Write one request line and block until its result arrives, serving any
-  /// tool calls the sidecar raises in between.
-  llm_result exchange(const std::string &_request_line);
+  /// tool calls the sidecar raises in between. `_timeout_ms` bounds the whole
+  /// exchange, tool calls included -- not just the model's first reply.
+  llm_result exchange(const std::string &_request_line, int _timeout_ms);
   /// Run one tool call and build its `tool_result` line.
   std::string run_tool(const llm_protocol::message &_call);
   void record_note(const std::string &_note);

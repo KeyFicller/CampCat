@@ -4,6 +4,7 @@
 #include "core/app_config.h"
 #include "core/automation_log.h"
 #include "core/llm/llm_host.h"
+#include "core/llm/llm_memory.h"
 
 #include "app/gl_texture.h"
 #include "app/script_editor_ui.h"
@@ -65,6 +66,7 @@ struct llm_turn {
 struct handoff {
   bool has = false;
   bool is_reset = false;
+  bool is_memory = false;
   campcat::llm_result res;
 };
 
@@ -157,10 +159,92 @@ void draw_ime_preedit(const ImVec2 &_box_min, const ImVec2 &_box_max,
 
 // Worker state.
 std::atomic<bool> g_running{false};
+/// True while the worker is consolidating memory rather than answering a turn.
+/// Only changes the Send button's label; the disable itself is `g_running`.
+/// Set and cleared inside the worker that does the consolidating, so there is
+/// no path that can leave it stuck on.
+std::atomic<bool> g_memorizing{false};
 std::thread g_thread;
+/// The last consolidation, run at shutdown. A thread of its own because it is
+/// deliberately not joined where `g_thread` is: the window has to close first.
+std::thread g_shutdown_thread;
 campcat::llm_host g_host;
 std::mutex g_done_mu;
 handoff g_done;
+
+/// UI-thread only. Time of the last LLM request, which is what "idle" is
+/// measured from: an agent nobody is talking to is an agent that can tidy up.
+double g_last_llm = 0.0;
+/// How long the conversation must have been quiet before consolidating.
+constexpr double k_idle_seconds = 600.0; // 10 minutes
+/// Remembered every frame so the shutdown pass knows where the memory file is,
+/// since `llm_ui_shutdown_gl` has no config of its own.
+std::filesystem::path g_config_home;
+
+/// The Long-term memory window, and the copy it displays.
+bool g_mem_open = false;
+std::vector<char> g_mem_buf;
+
+/// (Re)read the memory file into the window's buffer.
+void reload_memory() {
+  std::string text;
+  if (!campcat::llm::read_memory(g_config_home, &text)) {
+    text = "(the memory file could not be read)";
+  } else if (text.empty()) {
+    text = "(no memory yet)";
+  }
+  g_mem_buf.assign(text.begin(), text.end());
+  g_mem_buf.push_back('\0');
+}
+
+/// Read-only view of the notes, with the one destructive action behind a
+/// confirmation: the app never edits them here, so there is nothing to save.
+void draw_memory_window() {
+  if (!g_mem_open) {
+    return;
+  }
+  ImGui::SetNextWindowSize(ImVec2(620.0F, 440.0F), ImGuiCond_FirstUseEver);
+  if (!ImGui::Begin("Long-term memory", &g_mem_open)) {
+    ImGui::End();
+    return;
+  }
+
+  // Shown selectable on purpose: the point of it is that the user can open the
+  // file in an editor of their own instead of fighting this box.
+  ImGui::TextUnformatted(campcat::llm::memory_path(g_config_home).string().c_str());
+  ImGui::TextDisabled(
+      "Kept in this file. Written when the conversation goes idle, and before "
+      "it is cleared.");
+  if (ImGui::Button("Reload")) {
+    reload_memory();
+  }
+  ImGui::SameLine();
+  if (ImGui::Button("Clear memory")) {
+    ImGui::OpenPopup("clear_memory_confirm");
+  }
+  if (ImGui::BeginPopupModal("clear_memory_confirm", nullptr,
+                             ImGuiWindowFlags_AlwaysAutoResize)) {
+    ImGui::TextUnformatted("Delete the long-term memory file?");
+    if (ImGui::Button("Delete", ImVec2(120.0F, 0.0F))) {
+      if (!campcat::llm::clear_memory(g_config_home)) {
+        campcat::automation_log::emit("[llm] memory file not deleted");
+      }
+      reload_memory();
+      ImGui::CloseCurrentPopup();
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Cancel", ImVec2(120.0F, 0.0F))) {
+      ImGui::CloseCurrentPopup();
+    }
+    ImGui::EndPopup();
+  }
+
+  ImGui::Separator();
+  ImGui::InputTextMultiline("##memory", g_mem_buf.data(), g_mem_buf.size(),
+                            ImGui::GetContentRegionAvail(),
+                            ImGuiInputTextFlags_ReadOnly);
+  ImGui::End();
+}
 
 /// Bubble backgrounds. The colours also tell the two speakers apart, which is
 /// why the "You" / "CampCat" labels are gone.
@@ -313,8 +397,7 @@ void pump_stream() {
 }
 
 /// Run one turn on the worker.
-void start_turn(const campcat::app_config &_cfg, std::string _repo_root,
-                std::string _prompt) {
+void start_turn(const campcat::app_config &_cfg, std::string _prompt) {
   if (g_thread.joinable()) {
     g_thread.join();
   }
@@ -322,8 +405,7 @@ void start_turn(const campcat::app_config &_cfg, std::string _repo_root,
   // The whole snapshot, by value: the script tools need the interpreter's config
   // (`tool_context::cfg`), and `_cfg` is a per-frame copy in the caller's frame,
   // so a pointer to it would dangle the moment the frame ends.
-  g_thread = std::thread([cfg_snapshot = _cfg, root = std::move(_repo_root),
-                          prompt = std::move(_prompt)]() {
+  g_thread = std::thread([cfg_snapshot = _cfg, prompt = std::move(_prompt)]() {
     // A per-turn client, built the way the automation cycle builds one. Every
     // tool runs on this thread, so nothing here races the UI.
     campcat::adb_client adb(cfg_snapshot.adb_path, cfg_snapshot.adb_serial);
@@ -335,7 +417,8 @@ void start_turn(const campcat::app_config &_cfg, std::string _repo_root,
     ctx.cfg = &cfg_snapshot;
     ctx.script_dir = cfg_snapshot.config_home / "scripts/llm";
     g_host.set_tool_context(ctx);
-    campcat::llm_result res = g_host.run_turn(root, prompt);
+    campcat::llm_result res =
+        g_host.run_turn(cfg_snapshot.config_home, prompt);
     g_host.set_tool_context({}); // `adb` dies with this lambda
     {
       std::lock_guard<std::mutex> lk(g_done_mu);
@@ -347,13 +430,45 @@ void start_turn(const campcat::app_config &_cfg, std::string _repo_root,
   });
 }
 
-void start_reset(std::filesystem::path _repo_root) {
+/// Consolidate the session into the long-term notes, on the worker.
+void start_memorize(std::filesystem::path _config_home) {
   if (g_thread.joinable()) {
     g_thread.join();
   }
   g_running.store(true);
-  g_thread = std::thread([root = std::move(_repo_root)]() {
-    campcat::llm_result res = g_host.reset(root);
+  g_memorizing.store(true);
+  g_thread = std::thread([config_home = std::move(_config_home)]() {
+    campcat::llm_result res =
+        g_host.memorize(config_home, campcat::k_memorize_timeout_ms);
+    g_memorizing.store(false);
+    {
+      std::lock_guard<std::mutex> lk(g_done_mu);
+      g_done = handoff{};
+      g_done.has = true;
+      g_done.is_memory = true;
+      g_done.res = std::move(res);
+    }
+    g_running.store(false);
+  });
+}
+
+void start_reset(std::filesystem::path _config_home) {
+  if (g_thread.joinable()) {
+    g_thread.join();
+  }
+  g_running.store(true);
+  g_thread = std::thread([config_home = std::move(_config_home)]() {
+    // Keep the session before forgetting it: `reset` is what drops the history
+    // the consolidation reads, so the order here is the whole point. A failed
+    // consolidation is not a reason to refuse the clear the user asked for.
+    g_memorizing.store(true);
+    campcat::llm_result kept =
+        g_host.memorize(config_home, campcat::k_memorize_timeout_ms);
+    g_memorizing.store(false);
+    if (!kept.ok) {
+      campcat::automation_log::emit("[llm] memory not saved: " + kept.error);
+    }
+    campcat::llm_result res = g_host.reset(config_home.parent_path());
     {
       std::lock_guard<std::mutex> lk(g_done_mu);
       g_done = handoff{};
@@ -375,6 +490,18 @@ void consume_handoff() {
     }
     h = std::move(g_done);
     g_done = handoff{};
+  }
+
+  // Every finished request restarts the idle clock, consolidation included:
+  // without this, finishing a memory pass would immediately satisfy the idle
+  // condition again and it would loop.
+  g_last_llm = ImGui::GetTime();
+
+  if (h.is_memory) {
+    campcat::automation_log::emit(
+        h.res.ok ? "[llm] long-term memory updated"
+                 : "[llm] memory not saved: " + h.res.error);
+    return;
   }
 
   if (!h.is_reset) {
@@ -410,7 +537,7 @@ void send_current(campcat::app_config &_cfg) {
   // minute starting the interpreter, and until then the new bubble would show
   // the previous request's leftovers.
   g_host.clear_stream();
-  start_turn(_cfg, _cfg.config_home.parent_path(), prompt);
+  start_turn(_cfg, prompt);
 }
 
 /// "Thinking" (when the sidecar says so) plus 1..3 dots on the frame clock, so
@@ -644,6 +771,13 @@ bool draw_log(const ImVec2 &_size) {
                         !g_running.load() && !g_turns.empty())) {
       clear_requested = true;
     }
+    ImGui::Separator();
+    // Readable at any time, running turn or not: it is a file, not conversation
+    // state, so there is nothing to wait for.
+    if (ImGui::MenuItem("Long-term memory...")) {
+      g_mem_open = true;
+      reload_memory();
+    }
     ImGui::EndPopup();
   }
   if (g_turns.empty()) {
@@ -703,11 +837,33 @@ void llm_ui_shutdown_gl() {
   if (g_thread.joinable()) {
     g_thread.join();
   }
-  g_host.stop();
+
+  // The last consolidation is started, not awaited: this runs with the window
+  // still on screen, so blocking here would look like a freeze. It finishes in
+  // `llm_ui_shutdown_finish`, once there is nothing left to freeze.
+  if (!g_config_home.empty()) {
+    g_shutdown_thread = std::thread([]() {
+      const campcat::llm_result res =
+          g_host.memorize(g_config_home, campcat::k_shutdown_memorize_timeout_ms);
+      if (!res.ok) {
+        campcat::automation_log::emit("[llm] memory not saved: " + res.error);
+      }
+    });
+  }
+
   campcat::app::delete_tex(&g_appr_tex, &g_appr_w, &g_appr_h);
   g_appr_id = -1;
   drop_all_turns();
   g_thinking = false;
+}
+
+void llm_ui_shutdown_finish() {
+  // Nothing visible is left to stall: the window is gone, so this wait is only
+  // the process outliving it. Bounded by the timeout handed to `memorize`.
+  if (g_shutdown_thread.joinable()) {
+    g_shutdown_thread.join();
+  }
+  g_host.stop();
 }
 
 void llm_ui_draw_panel(campcat::app_config &_cfg, bool _adb_busy) {
@@ -717,6 +873,10 @@ void llm_ui_draw_panel(campcat::app_config &_cfg, bool _adb_busy) {
   // An automation cycle or the scheduler is using adb, so tools must refuse
   // rather than contend with it.
   g_adb_busy.store(_adb_busy);
+
+  // Kept for the shutdown pass and the memory window, neither of which is handed
+  // the config: this panel is the only place that sees it.
+  g_config_home = _cfg.config_home;
 
   const bool busy = g_running.load();
 
@@ -732,8 +892,10 @@ void llm_ui_draw_panel(campcat::app_config &_cfg, bool _adb_busy) {
   const bool clear_requested =
       draw_log(ImVec2(ImGui::GetContentRegionAvail().x, -g_footer_h));
   if (clear_requested) {
-    start_reset(_cfg.config_home.parent_path());
+    start_reset(_cfg.config_home);
   }
+
+  draw_memory_window();
 
   // Top of whatever comes below the log: the reference for the footer height.
   const float footer_top = ImGui::GetCursorScreenPos().y;
@@ -742,6 +904,17 @@ void llm_ui_draw_panel(campcat::app_config &_cfg, bool _adb_busy) {
   // form: the text becomes the correction the model gets back. One input, one
   // habit, instead of a second box inside the bubble.
   const bool awaiting = g_host.pending_approval().pending;
+
+  // Idle consolidation. Measured from the last LLM request rather than from
+  // mouse or keyboard activity: an agent nobody is talking to is an agent that
+  // can tidy up, and a turn in flight or a half-typed prompt means somebody is
+  // still here. Runs on the same worker as a turn, so the two never interleave
+  // on the sidecar's stdin.
+  if (!g_running.load() && !awaiting && !g_turns.empty() && is_blank(g_input) &&
+      !g_config_home.empty() &&
+      ImGui::GetTime() - g_last_llm > k_idle_seconds) {
+    start_memorize(g_config_home);
+  }
 
   // ImGui is kept out of the keys while a composition is live (see
   // macos_ime.mm), so an Enter here is a real Enter.
@@ -766,10 +939,16 @@ void llm_ui_draw_panel(campcat::app_config &_cfg, bool _adb_busy) {
 
   ImGui::SameLine();
   const bool can_send = awaiting || (!busy && !is_blank(g_input));
+  const bool memorizing = g_memorizing.load();
   if (!can_send) {
     ImGui::BeginDisabled();
   }
-  const bool clicked = ImGui::Button("Send", ImVec2(104.0F, 0.0F));
+  // A disabled Send with no explanation reads as a hung app, so an idle
+  // consolidation says what it is doing instead. Wider, because the label no
+  // longer fits the "Send" button's own width.
+  const bool clicked = ImGui::Button(
+      memorizing ? "Summarizing..." : "Send",
+      ImVec2(memorizing ? 132.0F : 104.0F, 0.0F));
   if (!can_send) {
     ImGui::EndDisabled();
   }

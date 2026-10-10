@@ -1118,5 +1118,8 @@ int main(int argc, char **argv) {
 
   glfwDestroyWindow(window);
   glfwTerminate();
+  // After the window is gone: this waits for the last memory write, and a wait
+  // nobody can see is the whole point of splitting shutdown in two.
+  llm_ui_shutdown_finish();
   return 0;
 }

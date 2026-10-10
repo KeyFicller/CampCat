@@ -50,7 +50,8 @@ std::string base64_encode(const unsigned char *_data, std::size_t _len) {
 }
 
 std::string build_turn_request(long _id, std::string_view _text,
-                               std::string_view _tools_json) {
+                               std::string_view _tools_json,
+                               std::string_view _memory) {
   nlohmann::json j;
   j["type"] = "turn";
   j["id"] = _id;
@@ -60,6 +61,7 @@ std::string build_turn_request(long _id, std::string_view _text,
     // JSON array, not as a string the sidecar would then have to re-parse.
     j["tools"] = nlohmann::json::parse(_tools_json, nullptr, false);
   }
+  j["memory"] = std::string(_memory);
   return j.dump();
 }
 
@@ -87,6 +89,14 @@ std::string build_reset_request(long _id) {
   nlohmann::json j;
   j["type"] = "reset";
   j["id"] = _id;
+  return j.dump();
+}
+
+std::string build_memorize_request(long _id, std::string_view _memory) {
+  nlohmann::json j;
+  j["type"] = "memorize";
+  j["id"] = _id;
+  j["memory"] = std::string(_memory);
   return j.dump();
 }
 

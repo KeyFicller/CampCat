@@ -187,6 +187,7 @@ add_library(campcat_core STATIC
   src/core/script/ccat_repl.cpp
   src/core/process.cpp
   src/core/llm/llm_protocol.cpp
+  src/core/llm/llm_memory.cpp
   src/core/llm/llm_tools.cpp
   src/core/llm/llm_host.cpp
   src/ccat_script/ccat_script_profile.cpp

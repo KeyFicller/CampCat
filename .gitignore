@@ -20,3 +20,4 @@ imgui.ini
 /tests/smoke/user
 
 /.worktrees/
+/config/llm/memory.md

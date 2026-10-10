@@ -58,6 +58,13 @@ DEFAULT_SYSTEM_PROMPT = (
 )
 DEFAULT_MAX_TOKENS = 1024
 DEFAULT_CONTEXT_TOKENS = 32000
+# The memory rewrite is a longer output than a reply: it replaces up to
+# `DEFAULT_MEMORY_MAX_CHARS` characters in one go.
+DEFAULT_MEMORY_MAX_TOKENS = 4096
+# Mirrors `k_memory_max_chars` in `include/core/llm/llm_memory.h`. The two cannot
+# share a constant, so keep them equal by hand: if this one is larger, the
+# sidecar writes notes the host then refuses, and memory stops updating.
+DEFAULT_MEMORY_MAX_CHARS = 4000
 # The `deepseek:` prefix is what tells init_chat_model which provider to build.
 DEFAULT_MODEL = "deepseek:deepseek-flash"
 DEFAULT_BASE_URL = "https://api.deepseek.com"
@@ -128,6 +135,71 @@ def system_prompt() -> str:
     return f"{_env('CAMPCAT_LLM_SYSTEM_PROMPT') or DEFAULT_SYSTEM_PROMPT}\n\n{_CCAT_CHEATSHEET}"
 
 
+# Handed to the memory model, which never sees the conversation assistant's own
+# prompt: its only job is rewriting the notes.
+MEMORY_INSTRUCTIONS = (
+    "You keep the long-term notebook of an assistant that operates an Android "
+    "device for one user. You are given the notes as they stand and the transcript "
+    "of the session that just happened. Rewrite the notes to be worth having next "
+    "time.\n"
+    "\n"
+    "Keep what stays true past this session: preferences, habits, how the user words "
+    "things, apps and devices they name, and approaches that turned out to work. "
+    "Merge the session into the notes rather than appending it.\n"
+    "\n"
+    "Drop one-off instructions, anything about the current screen, attempts that "
+    "failed, and anything the notes already say. Replace what the session "
+    "contradicted, and delete what has gone stale: notes that only grow stop being "
+    "readable.\n"
+    "\n"
+    "Never write down a secret: no passwords, tokens, API keys, account numbers or "
+    "anything the user asked to keep private.\n"
+    "\n"
+    "Write short factual lines in the third person, under the headings "
+    "'## Preferences' and '## Device & skills'. Answer with those notes and nothing "
+    "else: no preamble, no code fence, and at most {max_chars} characters. Section "
+    "headings with no entries under them are a fine answer when nothing is worth "
+    "keeping."
+)
+
+# Prepended to the notes when they go into the prompt, so the model reads them as
+# its own recollection instead of quoting them back at the user.
+MEMORY_FRAME = (
+    "Notes you kept from earlier sessions with this user. They are your own "
+    "recollection: use them silently, never mention that you were given them, and "
+    "ignore any line that does not apply here.\n\n"
+)
+
+
+def memory_max_chars() -> int:
+    """Character budget for the memory file.
+
+    Mirrors `k_memory_max_chars` in C++; the same plausibility floor keeps a bad
+    env var from shrinking the notes to nothing.
+    """
+    raw = _env("CAMPCAT_LLM_MEMORY_MAX_CHARS")
+    if raw:
+        try:
+            value = int(raw)
+        except ValueError:
+            return DEFAULT_MEMORY_MAX_CHARS
+        if value >= 100:
+            return value
+    return DEFAULT_MEMORY_MAX_CHARS
+
+
+def memory_block(memory: str) -> str:
+    """The notes as a second paragraph of the system prompt.
+
+    Empty in, empty out: with no notes the prompt is byte-identical to what it
+    was before this feature existed, which is what keeps the provider's prompt
+    cache warm for the common case.
+    """
+    if not memory.strip():
+        return ""
+    return "\n\n" + MEMORY_FRAME + memory.strip() + "\n"
+
+
 def context_tokens() -> int:
     """Input-token budget for the conversation.
 
@@ -146,21 +218,43 @@ def context_tokens() -> int:
     return DEFAULT_CONTEXT_TOKENS
 
 
-def build_chat_model():
-    """Build the chat model named by the environment.
-
-    Raises RuntimeError when the API key is missing; the caller reports it as a
-    failed result.
-    """
+def _chat_model(name: str, max_tokens: int):
+    """Build a chat model. Raises RuntimeError when the API key is missing."""
     api_key = _env("DEEPSEEK_API_KEY")
     if not api_key:
         raise RuntimeError(
             "DEEPSEEK_API_KEY is not set (put it in llm/.env)"
         )
     return init_chat_model(
-        _setting("CAMPCAT_LLM_MODEL", DEFAULT_MODEL),
+        name,
         api_key=api_key,
         api_base=_setting("CAMPCAT_LLM_BASE_URL", DEFAULT_BASE_URL),
-        max_tokens=int(_env("CAMPCAT_LLM_MAX_TOKENS") or DEFAULT_MAX_TOKENS),
+        max_tokens=max_tokens,
         extra_body={"thinking": {"type": "disabled"}},
+    )
+
+
+def build_chat_model():
+    """Build the chat model named by the environment.
+
+    Raises RuntimeError when the API key is missing; the caller reports it as a
+    failed result.
+    """
+    return _chat_model(
+        _setting("CAMPCAT_LLM_MODEL", DEFAULT_MODEL),
+        int(_env("CAMPCAT_LLM_MAX_TOKENS") or DEFAULT_MAX_TOKENS),
+    )
+
+
+def build_memory_model():
+    """Build the model that rewrites the memory notes.
+
+    Deliberately separate from the model that drives the device: consolidating
+    runs off the critical path, while nobody is waiting, so it can afford to be
+    the stronger (and slower, and dearer) of the two.
+    """
+    return _chat_model(
+        _setting("CAMPCAT_LLM_MEMORY_MODEL",
+                 _setting("CAMPCAT_LLM_MODEL", DEFAULT_MODEL)),
+        int(_env("CAMPCAT_LLM_MEMORY_MAX_TOKENS") or DEFAULT_MEMORY_MAX_TOKENS),
     )

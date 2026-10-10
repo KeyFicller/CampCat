@@ -1,6 +1,7 @@
 #include "core/llm/llm_host.h"
 
 #include "core/automation_log.h"
+#include "core/llm/llm_memory.h"
 #include "core/llm/llm_protocol.h"
 
 #include <chrono>
@@ -26,6 +27,7 @@ constexpr int k_startup_timeout_ms = 60000;
 /// sidecar allows (`MAX_TOOL_ROUNDS` in llm/graph.py). Too short and a long but
 /// healthy turn dies as "sidecar timed out" rather than finishing.
 constexpr int k_request_timeout_ms = 86400000;
+
 /// Hard stop on a runaway tool loop, kept above the sidecar's round budget: a
 /// round may issue several calls, and this must not cut a turn the sidecar still
 /// considers legal. The deadline above is what bounds total time.
@@ -356,7 +358,8 @@ std::string llm_host::run_tool(const llm_protocol::message &_call) {
                                          reply.error, image_b64, reply.shot);
 }
 
-llm_result llm_host::exchange(const std::string &_request_line) {
+llm_result llm_host::exchange(const std::string &_request_line,
+                              int _timeout_ms) {
   llm_result r;
   std::string err;
   if (!write_all(_request_line, &err)) {
@@ -368,7 +371,7 @@ llm_result llm_host::exchange(const std::string &_request_line) {
   // One deadline for the whole exchange, tool calls included: a model that
   // keeps tapping must not extend its own budget indefinitely.
   auto deadline = std::chrono::steady_clock::now() +
-                  std::chrono::milliseconds(k_request_timeout_ms);
+                  std::chrono::milliseconds(_timeout_ms);
   std::unique_lock<std::mutex> lk(m_mu);
   while (true) {
     const bool signalled = m_cv.wait_until(
@@ -377,7 +380,7 @@ llm_result llm_host::exchange(const std::string &_request_line) {
       lk.unlock();
       teardown();
       r.error = "sidecar timed out after " +
-                std::to_string(k_request_timeout_ms) + " ms";
+                std::to_string(_timeout_ms) + " ms";
       return r;
     }
     if (m_has_result) {
@@ -408,7 +411,7 @@ llm_result llm_host::exchange(const std::string &_request_line) {
   }
 }
 
-llm_result llm_host::run_turn(const std::filesystem::path &_repo_root,
+llm_result llm_host::run_turn(const std::filesystem::path &_config_home,
                               const std::string &_prompt) {
   llm_result r;
   if (_prompt.empty()) {
@@ -428,21 +431,74 @@ llm_result llm_host::run_turn(const std::filesystem::path &_repo_root,
   llm::set_context(ctx);
 
   std::string err;
-  if (!ensure_running(_repo_root, &err)) {
+  if (!ensure_running(_config_home.parent_path(), &err)) {
     r.error = err;
     return r;
   }
 
+  // Read fresh every turn rather than cached: the file is small, and editing it
+  // outside the app then has to show up on the very next request.
+  std::string memory;
+  if (!llm::read_memory(_config_home, &memory)) {
+    // Unreadable is not empty, but it is also no reason to refuse the turn: the
+    // model just goes without notes this time, and `memorize` will refuse to
+    // overwrite the file it cannot read.
+    memory.clear();
+    record_note("long-term memory file is unreadable; continuing without it");
+  }
+
   const long id = next_request_id();
-  std::string request =
-      llm_protocol::build_turn_request(id, _prompt, llm::tools_json());
+  std::string request = llm_protocol::build_turn_request(
+      id, _prompt, llm::tools_json(), memory);
   request.push_back('\n');
-  const llm_result turn = exchange(request);
+  const llm_result turn = exchange(request, k_request_timeout_ms);
   // This turn may have replaced the screenshot; take it back for the next one to
   // inject. A turn that never called `screenshot` hands back what it was given,
   // so this cannot blank the session's picture.
   llm::current_screen(&m_screen);
   return turn;
+}
+
+llm_result llm_host::memorize(const std::filesystem::path &_config_home,
+                              int _timeout_ms) {
+  llm_result r;
+
+  std::string current;
+  if (!llm::read_memory(_config_home, &current)) {
+    r.error = "long-term memory file is unreadable; not overwriting it";
+    return r;
+  }
+
+  std::string err;
+  if (!ensure_running(_config_home.parent_path(), &err)) {
+    r.error = err;
+    return r;
+  }
+
+  const long id = next_request_id();
+  std::string request = llm_protocol::build_memorize_request(id, current);
+  request.push_back('\n');
+  const llm_result out = exchange(request, _timeout_ms);
+  if (!out.ok) {
+    return out;
+  }
+
+  // Nothing new since the last pass: the sidecar hands the notes straight back,
+  // and rewriting an identical file would only move its timestamp.
+  if (out.text == current) {
+    r.ok = true;
+    r.text = out.text;
+    return r;
+  }
+
+  if (!llm::write_memory(_config_home, out.text)) {
+    r.error = "long-term memory was not written (unreadable, empty, or over " +
+              std::to_string(llm::k_memory_max_chars) + " characters)";
+    return r;
+  }
+  r.ok = true;
+  r.text = out.text;
+  return r;
 }
 
 llm_result llm_host::reset(const std::filesystem::path &_repo_root) {
@@ -467,7 +523,7 @@ llm_result llm_host::reset(const std::filesystem::path &_repo_root) {
   const long id = next_request_id();
   std::string request = llm_protocol::build_reset_request(id);
   request.push_back('\n');
-  return exchange(request);
+  return exchange(request, k_request_timeout_ms);
 }
 
 void llm_host::teardown() {
@@ -523,7 +579,7 @@ long llm_host::tool_image_id() const { return 0; }
 
 void llm_host::record_note(const std::string &) {}
 
-llm_result llm_host::exchange(const std::string &) {
+llm_result llm_host::exchange(const std::string &, int) {
   llm_result r;
   r.error = "the LLM sidecar is not supported on Windows";
   return r;
@@ -546,6 +602,12 @@ bool llm_host::ensure_running(const std::filesystem::path &,
 
 llm_result llm_host::run_turn(const std::filesystem::path &,
                               const std::string &) {
+  llm_result r;
+  r.error = "the LLM sidecar is not supported on Windows";
+  return r;
+}
+
+llm_result llm_host::memorize(const std::filesystem::path &, int) {
   llm_result r;
   r.error = "the LLM sidecar is not supported on Windows";
   return r;
