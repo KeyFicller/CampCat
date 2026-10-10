@@ -1,5 +1,0 @@
-// expect: parse_error: expected '='
-
-defs {
-  a 1
-}

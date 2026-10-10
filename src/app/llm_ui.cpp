@@ -5,6 +5,9 @@
 #include "core/automation_log.h"
 #include "core/llm/llm_host.h"
 
+#include "app/gl_texture.h"
+#include "app/script_editor_ui.h"
+
 #if defined(__APPLE__)
 #include "app/macos_ime.h"
 #endif
@@ -180,37 +183,6 @@ constexpr float k_approval_max_w = 420.0F;
 constexpr int k_turn_img_max_w = 640;
 
 /// Upload `_bgr` as a texture. Returns 0 on failure.
-GLuint upload_bgr(const cv::Mat &_bgr, int *_w, int *_h) {
-  if (_bgr.empty() || _bgr.type() != CV_8UC3) {
-    return 0;
-  }
-  cv::Mat rgba;
-  cv::cvtColor(_bgr, rgba, cv::COLOR_BGR2RGBA);
-
-  GLuint tex = 0;
-  glGenTextures(1, &tex);
-  glBindTexture(GL_TEXTURE_2D, tex);
-  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-  glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
-  glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, rgba.cols, rgba.rows, 0, GL_RGBA,
-               GL_UNSIGNED_BYTE, rgba.ptr());
-  glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
-  glBindTexture(GL_TEXTURE_2D, 0);
-  *_w = rgba.cols;
-  *_h = rgba.rows;
-  return tex;
-}
-
-void delete_tex(GLuint *_tex, int *_w, int *_h) {
-  if (*_tex != 0) {
-    glDeleteTextures(1, _tex);
-    *_tex = 0;
-  }
-  *_w = 0;
-  *_h = 0;
-}
-
 /// Take the host's latest tool image into the turn, if a new one appeared.
 /// Compares ids, not pixels, so the per-frame cost does not include a megabyte
 /// of PNG. A turn that arrives after the image was produced still gets it.
@@ -221,7 +193,7 @@ void adopt_tool_image(llm_turn &_t) {
   }
   _t.image_id = id;
   _t.image_png = g_host.tool_image_png();
-  delete_tex(&_t.tex, &_t.tex_w, &_t.tex_h);
+  campcat::app::delete_tex(&_t.tex, &_t.tex_w, &_t.tex_h);
   _t.tex_tried = false; // the next draw decodes the new bytes
 }
 
@@ -242,16 +214,16 @@ void ensure_turn_texture(llm_turn &_t) {
     const double scale = static_cast<double>(k_turn_img_max_w) / bgr.cols;
     cv::Mat small;
     cv::resize(bgr, small, cv::Size(), scale, scale, cv::INTER_AREA);
-    _t.tex = upload_bgr(small, &_t.tex_w, &_t.tex_h);
+    _t.tex = campcat::app::upload_bgr(small, &_t.tex_w, &_t.tex_h);
     return;
   }
-  _t.tex = upload_bgr(bgr, &_t.tex_w, &_t.tex_h);
+  _t.tex = campcat::app::upload_bgr(bgr, &_t.tex_w, &_t.tex_h);
 }
 
 /// Drop every turn, releasing the textures they own. The GL context must be live.
 void drop_all_turns() {
   for (llm_turn &t : g_turns) {
-    delete_tex(&t.tex, &t.tex_w, &t.tex_h);
+    campcat::app::delete_tex(&t.tex, &t.tex_w, &t.tex_h);
   }
   g_turns.clear();
 }
@@ -294,7 +266,7 @@ void append_user_turn(std::string _prompt) {
 
   g_turns.push_back(std::move(t));
   while (static_cast<int>(g_turns.size()) > k_turn_cap) {
-    delete_tex(&g_turns.front().tex, &g_turns.front().tex_w, &g_turns.front().tex_h);
+    campcat::app::delete_tex(&g_turns.front().tex, &g_turns.front().tex_w, &g_turns.front().tex_h);
     g_turns.erase(g_turns.begin());
   }
   g_pin_bottom = true;
@@ -570,14 +542,14 @@ long g_appr_id = -1;
 /// question is waiting.
 bool sync_approval_texture(const campcat::llm_approval &_a) {
   if (!_a.pending) {
-    delete_tex(&g_appr_tex, &g_appr_w, &g_appr_h);
+    campcat::app::delete_tex(&g_appr_tex, &g_appr_w, &g_appr_h);
     g_appr_id = -1;
     return false;
   }
   if (_a.id == g_appr_id) {
     return true;
   }
-  delete_tex(&g_appr_tex, &g_appr_w, &g_appr_h);
+  campcat::app::delete_tex(&g_appr_tex, &g_appr_w, &g_appr_h);
   g_appr_id = _a.id;
   const std::string png = g_host.approval_screen_png();
   if (png.empty()) {
@@ -586,7 +558,7 @@ bool sync_approval_texture(const campcat::llm_approval &_a) {
   const cv::Mat buf(1, static_cast<int>(png.size()), CV_8UC1,
                     const_cast<char *>(png.data()));
   const cv::Mat bgr = cv::imdecode(buf, cv::IMREAD_COLOR);
-  g_appr_tex = upload_bgr(bgr, &g_appr_w, &g_appr_h);
+  g_appr_tex = campcat::app::upload_bgr(bgr, &g_appr_w, &g_appr_h);
   return true;
 }
 
@@ -660,10 +632,9 @@ void draw_script_bubble() {
 
 /// Draws the conversation. Returns true when the user asked to clear it via the
 /// context menu, so the caller can start the reset on the worker.
-bool draw_log() {
+bool draw_log(const ImVec2 &_size) {
   bool clear_requested = false;
-  ImGui::BeginChild("llm_log", ImVec2(0.0F, -g_footer_h),
-                    ImGuiChildFlags_Borders,
+  ImGui::BeginChild("llm_log", _size, ImGuiChildFlags_Borders,
                     ImGuiWindowFlags_HorizontalScrollbar);
   if (ImGui::BeginPopupContextWindow("llm_log_ctx",
                                      ImGuiPopupFlags_MouseButtonRight)) {
@@ -733,7 +704,7 @@ void llm_ui_shutdown_gl() {
     g_thread.join();
   }
   g_host.stop();
-  delete_tex(&g_appr_tex, &g_appr_w, &g_appr_h);
+  campcat::app::delete_tex(&g_appr_tex, &g_appr_w, &g_appr_h);
   g_appr_id = -1;
   drop_all_turns();
   g_thinking = false;
@@ -750,7 +721,17 @@ void llm_ui_draw_panel(campcat::app_config &_cfg, bool _adb_busy) {
   const bool busy = g_running.load();
 
   pump_stream();
-  if (draw_log()) {
+  // Saved skills in a fixed column on the left, conversation on the right, the
+  // prompt box below both. Side by side because the list is an index, not a
+  // second conversation: stacked, it took height off every reply.
+  script_ui_draw(_cfg.config_home / "scripts/llm", k_script_list_w, -g_footer_h);
+  ImGui::SameLine();
+  // Measured, not another negative width: a negative size is resolved against
+  // the window's content region, not against what is left past the cursor, so
+  // "-list_w" here would leave the list's width blank at the right edge too.
+  const bool clear_requested =
+      draw_log(ImVec2(ImGui::GetContentRegionAvail().x, -g_footer_h));
+  if (clear_requested) {
     start_reset(_cfg.config_home.parent_path());
   }
 

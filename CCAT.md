@@ -28,6 +28,9 @@ existing skill with `update_script`, which replaces the script and its template 
 Counts and timeouts are non-negative integer literals: `wait(0)` and `loop(0)` are fine, `wait_until("a.png", 0)` and
 `retry(0)` are rejected while parsing. No arithmetic: `wait(1000 + 500)` is a syntax error.
 
+Waits are **capped, not rejected**: `wait(ms)` runs at most `5000` ms and `wait_until("a.png", ms)` at most `20000` ms,
+so a larger number silently becomes the cap rather than an error.
+
 ```ccat
 defs { claim = "claim.png" }
 if (claim) { tap(claim) } else { log("no claim") }
@@ -42,8 +45,8 @@ if (claim) { tap(claim) } else { log("no claim") }
 | `tap_offset("a.png", dx, dy)` | tap center + `(dx, dy)` x screen | point lands off screen |
 | `swipe("a.png", "b.png")` | one screenshot, center to center | either not found |
 | `swipe_at(x1, y1, x2, y2)` | swipe normalized endpoints | a coordinate outside `[0,1]` |
-| `wait(ms)` | sleep | nothing |
-| `wait_until("a.png", ms)` | poll until matched | timeout |
+| `wait(ms)` | sleep, at most 5000 ms | nothing |
+| `wait_until("a.png", ms)` | poll until matched, timeout at most 20000 ms | timeout |
 | `log("msg")` | one log line | nothing |
 | `home` | HOME + force-stop recents | adb failure |
 | `run("other.ccat")` | another script, relative to this file | unreadable; cyclic; deeper than 16; callee error |

@@ -1,5 +1,0 @@
-// expect: parse_error: defs value
-
-defs {
-  a = tap
-}

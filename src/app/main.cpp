@@ -37,6 +37,7 @@
 #include "core/scheduler.h"
 #include "app/template_capture_ui.h"
 #include "app/llm_ui.h"
+#include "app/script_editor_ui.h"
 #include "app/macos_ime.h"
 #include "app/native_file_dialog.h"
 #include "ccat_script/ccat_script_profile.h"
@@ -451,6 +452,23 @@ int main(int argc, char **argv) {
     font_title = font_bold;
   }
   llm_ui_set_bold_font(font_bold);
+
+  // The script editor is a character grid, so it needs one width for every
+  // glyph: with a proportional face the caret and the selection drift off the
+  // text. CJK is merged in for the same reason as the other faces -- comments
+  // in a script are written in whatever language its author thinks in.
+  // Probed like the CJK faces below: AddFontFromFileTTF asserts on a missing
+  // file, and this one is not guaranteed on every machine. The full merge
+  // doubles the atlas to 4096x16384 (measured); the 2500 common set would keep
+  // it at 4096x8192 but draw "?" for hanzi outside it, which the editor hits
+  // while typing, not only while drawing.
+  ImFont *font_mono = nullptr;
+  const char *mono_path = "/System/Library/Fonts/Menlo.ttc";
+  std::error_code mono_ec;
+  if (std::filesystem::exists(mono_path, mono_ec)) {
+    font_mono = load_font(mono_path, 16.0F, true);
+  }
+  script_ui_set_mono_font(font_mono);
 
   ImGui_ImplGlfw_InitForOpenGL(window, true);
   ImGui_ImplOpenGL3_Init(glsl_version);
@@ -1093,6 +1111,7 @@ int main(int argc, char **argv) {
 
   template_capture_shutdown_gl();
   llm_ui_shutdown_gl();
+  script_ui_shutdown_gl(); // preview textures, before the context goes
   ImGui_ImplOpenGL3_Shutdown();
   ImGui_ImplGlfw_Shutdown();
   ImGui::DestroyContext();

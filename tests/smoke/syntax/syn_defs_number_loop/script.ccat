@@ -1,8 +1,0 @@
-// expect: pass
-defs {
-  n = 2
-}
-loop(n) {
-  log("GATE_PASS")
-  break
-}

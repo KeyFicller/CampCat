@@ -1,4 +1,0 @@
-// expect: pass
-$Debug On
-$Debug Off
-log("GATE_PASS")

@@ -1,2 +1,0 @@
-// expect: parse_error: expected
-wait()

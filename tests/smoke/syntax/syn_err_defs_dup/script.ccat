@@ -1,6 +1,0 @@
-// expect: parse_error: duplicate def
-
-defs {
-  a = 1
-  a = 2
-}

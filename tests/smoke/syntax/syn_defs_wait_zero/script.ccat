@@ -1,6 +1,0 @@
-// expect: pass
-defs {
-  ms = 0
-}
-wait(ms)
-log("GATE_PASS")

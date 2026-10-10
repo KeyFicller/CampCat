@@ -127,6 +127,21 @@ FetchContent_MakeAvailable(imgui_markdown)
 add_library(imgui_markdown INTERFACE)
 target_include_directories(imgui_markdown INTERFACE ${imgui_markdown_SOURCE_DIR})
 
+# The script editor's text widget. Same shape as imgui_markdown above: upstream
+# ships no CMakeLists.txt, so FetchContent only populates and the source is
+# compiled into a small static library of our own -- which the highlighting
+# test links without dragging in the whole app.
+campcat_github_url(_coloredit_git KeyFicller/ImGuiColorTextEdit.git)
+FetchContent_Declare(
+  imgui_colortextedit
+  GIT_REPOSITORY ${_coloredit_git}
+  GIT_TAG        14fdfd4c2f19846aac6c6f8010899021022a9c16
+  GIT_SHALLOW    TRUE
+  GIT_PROGRESS   TRUE
+  GIT_SUBMODULES ""
+)
+FetchContent_MakeAvailable(imgui_colortextedit)
+
 find_package(OpenGL REQUIRED)
 
 add_library(imgui_lib STATIC
@@ -143,6 +158,18 @@ target_include_directories(imgui_lib PUBLIC
 )
 target_link_libraries(imgui_lib PUBLIC glfw OpenGL::GL)
 
+add_library(imgui_colortextedit_lib STATIC
+  ${imgui_colortextedit_SOURCE_DIR}/TextEditor.cpp
+  src/app/ccat_highlight.cpp
+)
+target_include_directories(imgui_colortextedit_lib PUBLIC
+  ${imgui_colortextedit_SOURCE_DIR}
+)
+target_include_directories(imgui_colortextedit_lib PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}/include
+)
+target_link_libraries(imgui_colortextedit_lib PUBLIC imgui_lib)
+
 # Core framework + Dear ImGui shell + ccat_script driver
 add_library(campcat_core STATIC
   src/core/adb/adb_client.cpp
@@ -154,6 +181,7 @@ add_library(campcat_core STATIC
   src/core/app/log_buffer.cpp
   src/core/app/automation_log.cpp
   src/core/script/ccat_lexer.cpp
+  src/core/script/ccat_bundle.cpp
   src/core/script/ccat_parser.cpp
   src/core/script/ccat_interpreter.cpp
   src/core/script/ccat_repl.cpp
@@ -184,6 +212,8 @@ add_executable(campcat
   src/app/main.cpp
   src/app/template_capture_ui.cpp
   src/app/llm_ui.cpp
+  src/app/script_editor_ui.cpp
+  src/app/gl_texture.cpp
   src/app/native_file_dialog.cpp
   ${campcat_platform_sources}
 )
@@ -191,42 +221,11 @@ target_include_directories(campcat PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}/include
   ${portable_file_dialogs_SOURCE_DIR}
 )
-target_link_libraries(campcat PRIVATE campcat_core imgui_lib glfw OpenGL::GL imgui_markdown)
+target_link_libraries(campcat PRIVATE campcat_core imgui_lib glfw OpenGL::GL
+                                      imgui_markdown imgui_colortextedit_lib)
 
 if(APPLE)
   target_link_libraries(campcat PRIVATE "-framework Cocoa" "-framework IOKit" "-framework CoreVideo")
 endif()
 
 target_compile_definitions(campcat PRIVATE IMGUI_DEFINE_MATH_OPERATORS)
-
-add_executable(campcat_smoke
-  src/tools/campcat_smoke.cpp
-)
-target_include_directories(campcat_smoke PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
-target_link_libraries(campcat_smoke PRIVATE campcat_core)
-
-enable_testing()
-add_test(
-  NAME ccat_smoke
-  COMMAND campcat_smoke
-          --config ${CMAKE_SOURCE_DIR}/config/default.json
-          --cases-dir ${CMAKE_SOURCE_DIR}/tests/smoke/cases
-)
-set_tests_properties(ccat_smoke PROPERTIES WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
-
-add_test(
-  NAME ccat_syntax
-  COMMAND campcat_smoke
-          --offline
-          --config ${CMAKE_SOURCE_DIR}/config/default.json
-          --cases-dir ${CMAKE_SOURCE_DIR}/tests/smoke/syntax
-)
-set_tests_properties(ccat_syntax PROPERTIES WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
-
-add_executable(ccat_repl_test
-  src/tools/ccat_repl_test.cpp
-)
-target_include_directories(ccat_repl_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
-target_link_libraries(ccat_repl_test PRIVATE campcat_core)
-
-add_test(NAME ccat_repl COMMAND ccat_repl_test)

@@ -1,5 +1,6 @@
 #include "core/script/ccat_parser.h"
 
+#include <algorithm>
 #include <cctype>
 #include <cmath>
 #include <cstdlib>
@@ -12,6 +13,11 @@
 namespace campcat::ccat_lang {
 
 namespace {
+
+/// Waits are capped, not rejected: a script asking for longer still runs, for
+/// the longest wait the language allows. Documented in CCAT.md; keep in step.
+constexpr int k_wait_max_ms = 5000;
+constexpr int k_wait_until_max_ms = 20000;
 
 enum class DefKind { number, string, boolean };
 
@@ -410,7 +416,7 @@ private:
     const int ms = parse_non_negative_int("wait(ms)");
     expect(TokKind::RParen, "expected ')' after wait duration");
     auto node = std::make_unique<WaitStmt>();
-    node->milliseconds = ms;
+    node->milliseconds = std::min(ms, k_wait_max_ms);
     return node;
   }
 
@@ -497,7 +503,7 @@ private:
     expect(TokKind::RParen, "expected ')' after wait_until");
     auto node = std::make_unique<WaitUntilStmt>();
     node->image_path = std::move(img);
-    node->timeout_ms = ms;
+    node->timeout_ms = std::min(ms, k_wait_until_max_ms);
     return node;
   }
 

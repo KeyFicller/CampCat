@@ -3,6 +3,7 @@
 #include "ccat_script/ccat_program_runner.h" // run_ccat_program
 #include "core/adb_client.h"
 #include "core/app_config.h"
+#include "core/script/ccat_bundle.h"  // bundle_main / bundle_names / ...
 #include "core/script/ccat_parser.h" // parse_program / parse_error
 
 // Private: <meta> and the consteval cost stay out of include/.
@@ -130,31 +131,9 @@ bool safe_leaf_name(const std::string &_s) {
   return true;
 }
 
-/// The script a bundle is: `<script_dir>/<name>/main.ccat`. Its existence is
-/// also what makes a bundle exist, for both tools that name one.
-std::filesystem::path bundle_main(const std::string &_name) {
-  return g_ctx.script_dir / _name / "main.ccat";
-}
-
-/// The bundles in the sandbox, sorted. A bundle is a directory holding a
-/// main.ccat; sorted because directory order is not stable, and an error message
-/// that changes every call reads as a different error.
-std::vector<std::string> bundle_names() {
-  std::vector<std::string> names;
-  std::error_code ec;
-  for (const auto &entry : std::filesystem::directory_iterator(g_ctx.script_dir, ec)) {
-    if (entry.is_directory(ec) &&
-        std::filesystem::is_regular_file(entry.path() / "main.ccat", ec)) {
-      names.push_back(entry.path().filename().string());
-    }
-  }
-  std::sort(names.begin(), names.end());
-  return names;
-}
-
-/// Same names, comma-separated for an error message, or "none yet".
+/// The known bundles, comma-separated for an error message, or "none yet".
 std::string existing_bundles() {
-  const std::vector<std::string> names = bundle_names();
+  const std::vector<std::string> names = ccat_lang::bundle_names(g_ctx.script_dir);
   if (names.empty()) {
     return "none yet";
   }
@@ -166,42 +145,6 @@ std::string existing_bundles() {
     out += name;
   }
   return out;
-}
-
-/// The bundle's one-line description: the text after `//` on the first line of
-/// its main.ccat, trimmed. Only the *first* line counts -- a comment further down
-/// is a comment about a statement, not a summary of the skill -- so a bundle
-/// whose first line is blank or code has no description.
-std::string bundle_description(const std::string &_name) {
-  std::ifstream in(bundle_main(_name), std::ios::binary);
-  std::string line;
-  if (!in || !std::getline(in, line)) {
-    return {};
-  }
-  const std::size_t first = line.find_first_not_of(" \t");
-  if (first == std::string::npos || line.compare(first, 2, "//") != 0) {
-    return {};
-  }
-  const std::size_t start = line.find_first_not_of(" \t", first + 2);
-  if (start == std::string::npos) {
-    return {};
-  }
-  const std::size_t end = line.find_last_not_of(" \t\r");
-  return line.substr(start, end - start + 1);
-}
-
-/// The template PNGs in a bundle, sorted.
-std::vector<std::string> bundle_templates(const std::string &_name) {
-  std::vector<std::string> names;
-  std::error_code ec;
-  for (const auto &entry :
-       std::filesystem::directory_iterator(g_ctx.script_dir / _name, ec)) {
-    if (entry.is_regular_file(ec) && entry.path().extension() == ".png") {
-      names.push_back(entry.path().filename().string());
-    }
-  }
-  std::sort(names.begin(), names.end());
-  return names;
 }
 
 /// ", "-joined, or the caller's word for "none".
@@ -271,7 +214,7 @@ std::unique_ptr<ccat_lang::Program> check_new_bundle(const std::string &_name,
   }
   std::unique_ptr<ccat_lang::Program> prog = parse_or_throw(_source);
   std::error_code ec;
-  if (std::filesystem::exists(bundle_main(_name), ec)) {
+  if (std::filesystem::exists(ccat_lang::bundle_main(g_ctx.script_dir, _name), ec)) {
     throw js::bind_error("script bundle \"" + _name +
                          "\" already exists; pick another name (existing: " +
                          existing_bundles() + ")");
@@ -297,7 +240,7 @@ cv::Mat check_template_target(const std::string &_bundle, const std::string &_na
     throw js::bind_error("name \"" + _name + "\" is not a plain file name");
   }
   std::error_code ec;
-  if (!std::filesystem::is_regular_file(bundle_main(_bundle), ec)) {
+  if (!std::filesystem::is_regular_file(ccat_lang::bundle_main(g_ctx.script_dir, _bundle), ec)) {
     throw js::bind_error("unknown script bundle \"" + _bundle +
                          "\"; save_script first (existing: " + existing_bundles() +
                          ")");
@@ -595,7 +538,7 @@ std::string save_script(std::string name, std::string source) {
                                : "user rejected saving the script: " + decision.guidance);
     }
   }
-  const std::filesystem::path path = bundle_main(name);
+  const std::filesystem::path path = ccat_lang::bundle_main(g_ctx.script_dir, name);
   std::error_code ec;
   std::filesystem::create_directories(path.parent_path(), ec);
   std::ofstream out(path, std::ios::binary | std::ios::trunc);
@@ -704,13 +647,13 @@ CPP_REFLECT_TOOL(ccat_help)
                             "works or update_script to change it. The description is the "
                             "first // comment line of that bundle's main.ccat.")}]]
 std::string list_scripts() {
-  const std::vector<std::string> names = bundle_names();
+  const std::vector<std::string> names = ccat_lang::bundle_names(g_ctx.script_dir);
   if (names.empty()) {
     return "none yet";
   }
   std::string out;
   for (const std::string &name : names) {
-    const std::string description = bundle_description(name);
+    const std::string description = ccat_lang::bundle_description(g_ctx.script_dir, name);
     if (!out.empty()) {
       out += "\n";
     }
@@ -731,7 +674,7 @@ std::string read_script(std::string name) {
   if (!safe_leaf_name(name)) {
     throw js::bind_error("name \"" + name + "\" is not a plain file name");
   }
-  const std::filesystem::path path = bundle_main(name);
+  const std::filesystem::path path = ccat_lang::bundle_main(g_ctx.script_dir, name);
   std::error_code ec;
   if (!std::filesystem::is_regular_file(path, ec)) {
     throw js::bind_error("unknown script bundle \"" + name +
@@ -743,10 +686,10 @@ std::string read_script(std::string name) {
   }
   const std::string source{std::istreambuf_iterator<char>(in),
                            std::istreambuf_iterator<char>()};
-  const std::string description = bundle_description(name);
+  const std::string description = ccat_lang::bundle_description(g_ctx.script_dir, name);
   return "bundle \"" + name + "\": " +
          (description.empty() ? std::string("(no description)") : description) +
-         "\ntemplates: " + joined(bundle_templates(name), "none") + "\n\n" + source;
+         "\ntemplates: " + joined(ccat_lang::bundle_templates(g_ctx.script_dir, name), "none") + "\n\n" + source;
 }
 CPP_REFLECT_TOOL(read_script)
 
@@ -794,7 +737,7 @@ std::string update_script(std::string name, std::string source,
     throw js::bind_error("name \"" + name + "\" is not a plain file name");
   }
   std::error_code ec;
-  if (!std::filesystem::is_regular_file(bundle_main(name), ec)) {
+  if (!std::filesystem::is_regular_file(ccat_lang::bundle_main(g_ctx.script_dir, name), ec)) {
     throw js::bind_error("unknown script bundle \"" + name +
                          "\"; save_script creates a new one (existing: " +
                          existing_bundles() + ")");
@@ -877,7 +820,7 @@ std::string update_script(std::string name, std::string source,
   // Everything left in the bundle that is not declared goes, which is what makes
   // the declared set the bundle's template set.
   std::vector<std::string> to_delete;
-  for (const std::string &file : bundle_templates(name)) {
+  for (const std::string &file : ccat_lang::bundle_templates(g_ctx.script_dir, name)) {
     if (std::find(declared.begin(), declared.end(), file) == declared.end()) {
       to_delete.push_back(file);
     }
@@ -923,7 +866,7 @@ std::string update_script(std::string name, std::string source,
   // Approved: the script first, then the templates it names, then the leftovers.
   // Nothing above this point touched the disk, so a refusal leaves it byte-for-byte
   // what it was.
-  const std::filesystem::path main_path = bundle_main(name);
+  const std::filesystem::path main_path = ccat_lang::bundle_main(g_ctx.script_dir, name);
   {
     std::ofstream out(main_path, std::ios::binary | std::ios::trunc);
     out.write(source.data(), static_cast<std::streamsize>(source.size()));

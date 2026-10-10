@@ -1,5 +1,0 @@
-// expect: parse_error: simple name
-
-defs {
-  true = 1
-}

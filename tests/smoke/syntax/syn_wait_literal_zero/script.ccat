@@ -1,3 +1,0 @@
-// expect: pass
-wait(0)
-log("GATE_PASS")

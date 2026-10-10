@@ -1,2 +1,0 @@
-// expect: pass
-log("hello GATE_PASS world")

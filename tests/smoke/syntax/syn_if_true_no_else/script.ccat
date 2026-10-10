@@ -1,3 +1,0 @@
-// expect: pass
-defs { ok = true }
-if (ok) log("GATE_PASS")

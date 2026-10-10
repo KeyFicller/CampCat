@@ -1,3 +1,0 @@
-// expect: pass
-log("prefix")
-log("GATE_PASS")

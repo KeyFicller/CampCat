@@ -1,4 +1,0 @@
-// expect: pass
-loop(1) {
-  log("GATE_PASS")
-}

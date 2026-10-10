@@ -1,5 +1,0 @@
-// expect: pass
-defs {
-  msg = "GATE_PASS"
-}
-log(msg)

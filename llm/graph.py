@@ -294,6 +294,12 @@ def run_tools(state: TurnState) -> dict:
     messages = list(state.get("messages") or [])
     calls = getattr(messages[-1], "tool_calls", None) or []
     results: list = []
+    # The pictures are held back and appended after every result, never between
+    # them. Once a round asks for more than one tool, a user turn wedged in
+    # mid-way makes the provider read the round as having answered only the
+    # calls before it and reject the whole request (400 "insufficient tool
+    # messages following tool_calls message").
+    pictures: list = []
     for call in calls:
         name = call.get("name", "")
         args = call.get("args") or {}
@@ -314,7 +320,7 @@ def run_tools(state: TurnState) -> dict:
                 # to be checked against.
                 continue
             _LATEST_NUM, _LATEST_B64 = shot, image
-            results.append(
+            pictures.append(
                 HumanMessage(content=_shot_content(
                     _shot_caption(shot, "Screenshot")))
             )
@@ -322,14 +328,14 @@ def run_tools(state: TurnState) -> dict:
             # Every other image tool returns a marked-up copy for the user to
             # look at. It is not stored: its box and label would be baked into
             # any template cut from it.
-            results.append(
+            pictures.append(
                 HumanMessage(content=[
                     {"type": "text", "text": f"Image after {name}."},
                     {"type": "image_url",
                      "image_url": {"url": f"data:{MIME};base64,{image}"}},
                 ])
             )
-    return {"messages": messages + results,
+    return {"messages": messages + results + pictures,
             "tool_rounds": state.get("tool_rounds", 0) + 1}
 
 

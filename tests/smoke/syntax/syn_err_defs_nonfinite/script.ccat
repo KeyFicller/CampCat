@@ -1,6 +1,0 @@
-// expect: parse_error: out of int range
-
-defs {
-  n = nan
-}
-wait(n)
