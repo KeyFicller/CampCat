@@ -20,6 +20,11 @@ directory of the `.ccat` file being run. Strings are `"..."` with `\n`, `\t`, `\
 Scripts you save live in a bundle, `config/scripts/llm/<name>/main.ccat` with their templates beside it; run one from
 another script with `run("<name>/main.ccat")`.
 
+**`<name>` is a skill.** The first line of `main.ccat` is its one-line description when it starts with `//`:
+`// taps the login button and waits for the feed`. `list_scripts` shows every bundle with its description; read one
+before writing a new skill, and build on what is there with `run()` rather than copying its statements. Change an
+existing skill with `update_script`, which replaces the script and its template set together.
+
 Counts and timeouts are non-negative integer literals: `wait(0)` and `loop(0)` are fine, `wait_until("a.png", 0)` and
 `retry(0)` are rejected while parsing. No arithmetic: `wait(1000 + 500)` is a syntax error.
 
@@ -45,6 +50,10 @@ if (claim) { tap(claim) } else { log("no claim") }
 
 **A named file that is missing fails the statement**, which is why `tap`, `tap_offset`, `swipe`, `wait_until` and
 `run` need their files to exist first. `if` is the exception (below).
+
+`update_script` checks exactly this list: every template a `tap`, `tap_offset`, `swipe` or `wait_until` names must be
+in the declared template set, and it refuses the update naming the ones that are not. `if` conditions and `run()`
+targets are not checked; absolute paths are not bundle files, so they are not either.
 
 After a tap or swipe the script waits `max(tap_delay_ms, action_gap_ms)` (config, 1000 ms), so you rarely need `wait`
 after an action.

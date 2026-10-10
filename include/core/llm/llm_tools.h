@@ -89,7 +89,13 @@ struct tool_reply {
   std::string image_png;
   /// Line the UI's tool note shows instead of `text`; non-empty also marks the
   /// text as a document for the model, too long to print (see `js::quiet`).
-  std::string_view quiet_note;
+  /// `{param}` in it is filled from this call's arguments, so the log can say
+  /// which script was read rather than only that one was.
+  std::string quiet_note;
+  /// The session number this call filed a frame under. Only `screenshot` sets it;
+  /// it is what the model's `shot` arguments name later, so the host puts it on
+  /// the wire and the sidecar puts it in the caption below the picture.
+  int shot = 0;
 };
 
 /// Sets the context every tool reads. Called once per turn by the worker that
@@ -108,12 +114,7 @@ std::string tools_json();
 
 /// Runs one tool by name against the model's raw `arguments` JSON text.
 /// Never throws: every failure comes back as `ok == false`.
-///
-/// `_image_b64` is a screenshot the sidecar kept from earlier in the session,
-/// attached when the arguments ask for one (a `shot` number). Empty when the
-/// call needs no picture, which is every call but `save_template`.
-tool_reply dispatch(std::string_view _name, std::string_view _args_json,
-                    std::string_view _image_b64 = "");
+tool_reply dispatch(std::string_view _name, std::string_view _args_json);
 
 /// True while a script started by `run_script` is executing. The UI polls it to
 /// decide whether its stop control is worth showing.
@@ -122,5 +123,10 @@ bool script_running();
 /// Asks the script that is running to stop before its next statement. Safe to
 /// call when nothing is running.
 void request_script_stop();
+
+/// Drops every numbered screenshot this session kept, so `shot` numbering starts
+/// over. Called when the session ends, in step with clearing the current screen:
+/// a frame from a finished conversation must not answer a later lookup.
+void forget_frames();
 
 } // namespace campcat::llm

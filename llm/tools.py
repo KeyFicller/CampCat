@@ -15,7 +15,7 @@ import protocol
 import transport
 
 
-def call_cpp(name: str, args: dict, image_b64: str = "") -> dict:
+def call_cpp(name: str, args: dict) -> dict:
     """Run one tool on the host and return its `tool_result` message.
 
     The host runs the call inline while it waits for its own request to finish,
@@ -23,13 +23,12 @@ def call_cpp(name: str, args: dict, image_b64: str = "") -> dict:
     host's per-request budget is the bound, and it reports its own failure
     rather than leaving this waiting.
 
-    `image_b64` is the screenshot `args["shot"]` named, when the arguments ask
-    for one; see `resolve_shot`.
+    The arguments go over as the model wrote them. A `shot` number in them names
+    a frame the host kept itself, so there is nothing to look up or attach here.
     """
     call_id = f"{name}-{uuid4().hex}"
     transport.emit(
-        protocol.build_tool_call(transport.get_current_rid(), call_id, name, args,
-                                 image_b64)
+        protocol.build_tool_call(transport.get_current_rid(), call_id, name, args)
     )
     while True:
         msg = transport.read_message()
@@ -41,20 +40,3 @@ def call_cpp(name: str, args: dict, image_b64: str = "") -> dict:
         # the request loop, which is blocked inside this very call.
         if msg.get("type") != "log":
             transport.push_back(msg)
-
-
-def resolve_shot(args: dict, images: dict[int, str]) -> str:
-    """The base64 for this call's `shot`, or "" when it has none or cannot resolve.
-
-    `shot` is the number a screenshot's caption showed; omitting it means the
-    most recent screenshot. An unresolvable value returns "" rather than raising,
-    so the host reports the missing picture and the model can correct itself.
-    """
-    if "shot" not in args:
-        return images[max(images)] if images else ""
-    value = args.get("shot")
-    # bool first: Python says True is an int, and a model that means "yes" here
-    # means nothing we can look up.
-    if isinstance(value, bool) or not isinstance(value, int):
-        return ""
-    return images.get(value, "")

@@ -12,7 +12,11 @@ from pathlib import Path
 from langchain.chat_models import init_chat_model
 
 DEFAULT_SYSTEM_PROMPT = (
-    "You operate an Android device through the provided tools. Take a screenshot "
+    "You operate an Android device through the provided tools. When the request "
+    "means doing something on the device, look for a saved skill before anything "
+    "else: call `list_scripts`, `read_script` any that looks close, and when one "
+    "already does the job run it with `run(\"<name>/main.ccat\")` instead of "
+    "writing its steps again. Take a screenshot "
     "first, since you cannot see the screen otherwise, and look at the result "
     "before deciding the next step. When the user only asks a question, answer it "
     "instead of acting. Write replies in Markdown, limited to what the viewer "
@@ -113,6 +117,8 @@ _CCAT_CHEATSHEET = (
     "Statements that need a PNG (`tap`, `tap_offset`, `swipe`, `wait_until`) or a `.ccat` "
     "(`run`) fail when the file is missing; an `if` with a missing template is just false.\n"
     "  * `save_script` / `save_template` save a script and its templates as a bundle; run it with `run(\"<name>/main.ccat\")`."
+    " Change a skill you already have with `update_script` (new source plus its template set in one step), "
+    "not by saving another name."
 )
 
 

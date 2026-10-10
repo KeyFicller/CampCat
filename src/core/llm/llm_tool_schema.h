@@ -24,6 +24,7 @@
 //   * Handing a consteval result to runtime code needs `define_static_string`.
 
 #include <meta>
+#include <array>
 #include <cstddef>
 #include <cstdio>
 #include <cstdlib>
@@ -91,6 +92,12 @@ inline constexpr image_result_t image_result{};
 /// instead: [[= js::quiet{.text = js::str("Read CCAT.md")}]]. The text itself
 /// still reaches the model unchanged. Same shape as `doc` above, so
 /// `text_of<^^quiet, Fn>()` reads it.
+///
+/// `{param}` in that text names one of the tool's own parameters and is filled
+/// from the call's arguments, so the log can say which script was read rather
+/// than only that one was. Checked when the tool registers: a name that is not a
+/// parameter of the tool, or one whose type cannot be printed (a vector, a
+/// struct), fails the build. A param that is optional and absent prints nothing.
 template <std::size_t N = 1>
 struct quiet {
   str<N> text;
@@ -102,6 +109,24 @@ template <typename T>
 struct is_optional : std::false_type {};
 template <typename T>
 struct is_optional<std::optional<T>> : std::true_type {};
+
+/// std::vector becomes a JSON array. Its `value_type` is what the items are
+/// described and bound as, so nested vectors and vectors of structs work.
+/// std::array is deliberately absent: without the trait it would fall through to
+/// the class branch below and reflect on its internal members, which would
+/// produce a schema that is wrong rather than absent. `is_std_array_v` turns that
+/// into the compile error the class branch cannot give on its own.
+template <typename T>
+struct is_sequence : std::false_type {};
+template <typename T, typename A>
+struct is_sequence<std::vector<T, A>> : std::true_type {
+  using value_type = T;
+};
+
+template <typename T>
+inline constexpr bool is_std_array_v = false;
+template <typename T, std::size_t N>
+inline constexpr bool is_std_array_v<std::array<T, N>> = true;
 
 // --- JSON helpers -----------------------------------------------------------
 
@@ -131,6 +156,52 @@ struct bind_error : std::runtime_error {
   using std::runtime_error::runtime_error;
 };
 
+// Forward declarations: `from_json` below recurses through its own branches, and
+// P2996 reflects members in a second lookup phase that needs these visible
+// before the body that uses them.
+template <typename T>
+T from_json(const nlohmann::json &_j);
+
+template <typename T>
+consteval std::size_t member_count();
+
+template <typename T>
+consteval std::array<std::meta::info, member_count<T>()> member_infos();
+
+template <typename T, std::size_t I>
+consteval std::meta::info member_at() {
+  return member_infos<T>()[I];
+}
+
+/// Assigns one member from the object, splicing the member into the lvalue.
+/// A key that is absent and not optional is an error, same rule as a missing
+/// tool argument: a silently zeroed field is a mistap waiting to happen.
+template <std::meta::info M>
+void assign_member(auto &_out, const nlohmann::json &_j) {
+  using MT = std::remove_cvref_t<typename[: std::meta::type_of(M) :]>;
+  const std::string key(std::meta::identifier_of(M));
+  const auto it = _j.find(key);
+  if (it == _j.end()) {
+    if constexpr (is_optional<MT>::value) {
+      return;
+    } else {
+      throw bind_error("missing required member: " + key);
+    }
+  }
+  try {
+    _out.[: M :] = from_json<MT>(*it);
+  } catch (const bind_error &e) {
+    throw bind_error(key + ": " + e.what());
+  }
+}
+
+template <typename T, std::size_t... Is>
+T object_from_json(const nlohmann::json &_j, std::index_sequence<Is...>) {
+  T out{};
+  (assign_member<member_at<T, Is>()>(out, _j), ...);
+  return out;
+}
+
 /// Accepts only the exact JSON type. "540" is an error, not a coercion.
 template <typename T>
 T from_json(const nlohmann::json &_j) {
@@ -154,11 +225,31 @@ T from_json(const nlohmann::json &_j) {
       throw bind_error("expected number");
     }
     return _j.get<T>();
+  } else if constexpr (is_sequence<T>::value) {
+    if (!_j.is_array()) {
+      throw bind_error("expected array");
+    }
+    using V = typename T::value_type;
+    T out{};
+    out.reserve(_j.size());
+    for (const auto &element : _j) {
+      out.push_back(from_json<V>(element));
+    }
+    return out;
   } else if constexpr (std::is_same_v<T, std::string>) {
     if (!_j.is_string()) {
       throw bind_error("expected string");
     }
     return _j.get<std::string>();
+  } else if constexpr (std::is_class_v<T>) {
+    // Reached by struct parameters only: std::string and std::string_view are
+    // taken by the branch above.
+    static_assert(!is_std_array_v<T>,
+                  "js::from_json: std::array is not supported yet; use std::vector");
+    if (!_j.is_object()) {
+      throw bind_error("expected object");
+    }
+    return object_from_json<T>(_j, std::make_index_sequence<member_count<T>()>());
   } else {
     static_assert(!sizeof(T), "js::from_json: unsupported parameter type "
                               "(add a branch when a tool needs it)");
@@ -249,6 +340,13 @@ consteval bool has_image_annotation() {
   return has_annotation<^^image_result_t>(Fn);
 }
 
+/// True when every `{name}` in the tool's `js::quiet` text names one of the
+/// tool's parameters and that parameter can be printed. Defined beside
+/// `param_at` below, because it needs the parameter list; it is declared here so
+/// `quiet_note_of` can assert on it.
+template <detail::meta::info Fn>
+consteval bool quiet_note_ok();
+
 /// The line the UI log shows in place of a quiet tool's result, i.e. the text of
 /// its [[= js::quiet]] annotation. Empty when the tool carries no such annotation,
 /// which is also the signal that it is not quiet: a non-empty value is what
@@ -258,6 +356,9 @@ consteval bool has_image_annotation() {
 /// resolve unqualified.
 template <detail::meta::info Fn>
 consteval std::string_view quiet_note_of() {
+  static_assert(quiet_note_ok<Fn>(),
+                "js::quiet: every {name} must be a parameter of this tool whose "
+                "type can be printed as text (text or number)");
   return std::string_view(std::define_static_string(text_of<^^quiet, Fn>()));
 }
 
@@ -272,13 +373,65 @@ consteval std::string with_description(std::string _schema, std::string_view _de
          json_escape(_desc) + "\"}";
 }
 
-/// JSON Schema for one C++ type. std::optional unwraps to its value type.
-/// Anything else is a deliberate compile error: the schema and the binder must
-/// gain matching support together, never one without the other.
+/// JSON Schema for one C++ type. std::optional unwraps to its value type;
+/// sequences become arrays; other classes become nested objects. Anything else
+/// is a deliberate compile error: the schema and the binder must gain matching
+/// support together, never one without the other.
+template <typename T>
+consteval std::string param_schema();
+
+template <typename T>
+consteval std::size_t member_count() {
+  return detail::meta::nonstatic_data_members_of(
+             ^^T, detail::meta::access_context::unchecked())
+      .size();
+}
+
+template <typename T>
+consteval std::array<detail::meta::info, member_count<T>()> member_infos() {
+  const auto members = detail::meta::nonstatic_data_members_of(
+      ^^T, detail::meta::access_context::unchecked());
+  std::array<detail::meta::info, member_count<T>()> out{};
+  for (std::size_t i = 0; i < members.size(); ++i) {
+    out[i] = members[i];
+  }
+  return out;
+}
+
+/// An object schema from the type's own members. A member without a default
+/// (`std::optional`) is not in `required`, which is how the model says "keep
+/// what is there" as opposed to "make me one of these".
+template <typename T, std::size_t... Is>
+consteval std::string object_schema_impl(std::index_sequence<Is...>) {
+  constexpr auto infos = member_infos<T>();
+  std::string properties;
+  std::string required;
+  ((void)([&] {
+     using MT = std::remove_cvref_t<typename[: detail::meta::type_of(infos[Is]) :]>;
+     const std::string name(detail::meta::identifier_of(infos[Is]));
+     if (!properties.empty()) {
+       properties += ",";
+     }
+     properties += "\"" + name + "\":" +
+                   with_description(param_schema<MT>(), text_of<^^doc, infos[Is]>());
+     if constexpr (!is_optional<MT>::value) {
+       if (!required.empty()) {
+         required += ",";
+       }
+       required += "\"" + name + "\"";
+     }
+   }()), ...);
+  return "{\"type\":\"object\",\"properties\":{" + properties +
+         "},\"required\":[" + required + "]}";
+}
+
 template <typename T>
 consteval std::string param_schema() {
   if constexpr (is_optional<T>::value) {
     return param_schema<typename T::value_type>();
+  } else if constexpr (is_sequence<T>::value) {
+    return "{\"type\":\"array\",\"items\":" +
+           param_schema<typename T::value_type>() + "}";
   } else if constexpr (std::is_same_v<T, bool>) {
     return "{\"type\":\"boolean\"}";
   } else if constexpr (std::is_integral_v<T>) {
@@ -288,6 +441,10 @@ consteval std::string param_schema() {
   } else if constexpr (std::is_same_v<T, std::string> ||
                        std::is_same_v<T, std::string_view>) {
     return "{\"type\":\"string\"}";
+  } else if constexpr (std::is_class_v<T>) {
+    static_assert(!is_std_array_v<T>,
+                  "js::param_schema: std::array is not supported yet; use std::vector");
+    return object_schema_impl<T>(std::make_index_sequence<member_count<T>()>());
   } else {
     static_assert(!sizeof(T), "js::param_schema: unsupported parameter type "
                               "(add a branch when a tool needs it)");
@@ -310,6 +467,69 @@ consteval detail::meta::info param_at() {
 
 template <detail::meta::info Fn, std::size_t I>
 using param_type_at = std::remove_cvref_t<typename[: detail::meta::type_of(param_at<Fn, I>()) :]>;
+
+/// True when a parameter can be written into a one-line log message: text and
+/// numbers can, an optional of either can, and everything else (a vector, a
+/// struct) would need a format nobody asked for. Reflecting those would also be
+/// wrong: it would print the fields rather than the value.
+template <typename T>
+consteval bool quiet_renderable() {
+  if constexpr (is_optional<T>::value) {
+    return quiet_renderable<typename T::value_type>();
+  } else {
+    return std::is_same_v<T, std::string> || std::is_same_v<T, std::string_view> ||
+           std::is_arithmetic_v<T>;
+  }
+}
+
+/// One bool per parameter, in declaration order. A template fold so the splice
+/// in `param_type_at` only ever sees a constant index.
+template <detail::meta::info Fn, std::size_t... Is>
+consteval std::array<bool, sizeof...(Is)> quiet_renderable_table(
+    std::index_sequence<Is...>) {
+  return {quiet_renderable<param_type_at<Fn, Is>>()...};
+}
+
+/// The parameter names, in declaration order: the same fold shape, because
+/// `param_at` is a template and cannot be indexed with a loop variable.
+template <detail::meta::info Fn, std::size_t... Is>
+consteval std::array<std::string_view, sizeof...(Is)> quiet_param_names(
+    std::index_sequence<Is...>) {
+  return {detail::meta::identifier_of(param_at<Fn, Is>())...};
+}
+
+template <detail::meta::info Fn>
+consteval bool quiet_note_ok() {
+  const std::string note = text_of<^^quiet, Fn>();
+  constexpr std::size_t count = param_count<Fn>();
+  constexpr auto renderable =
+      quiet_renderable_table<Fn>(std::make_index_sequence<count>{});
+  constexpr auto names = quiet_param_names<Fn>(std::make_index_sequence<count>{});
+  std::size_t at = 0;
+  while (at < note.size()) {
+    const std::size_t open = note.find('{', at);
+    if (open == std::string::npos) {
+      break;
+    }
+    const std::size_t close = note.find('}', open);
+    if (close == std::string::npos) {
+      return false; // an unclosed brace is a typo, not text
+    }
+    const std::string key = note.substr(open + 1, close - open - 1);
+    bool ok = false;
+    for (std::size_t i = 0; i < count; ++i) {
+      if (names[i] == key) {
+        ok = renderable[i];
+        break;
+      }
+    }
+    if (!ok) {
+      return false;
+    }
+    at = close + 1;
+  }
+  return true;
+}
 
 /// `required` lists only the parameters the model must supply: an optional
 /// parameter may be omitted, and the tool body then applies its own default.

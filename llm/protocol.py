@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 
-PROTOCOL_VERSION = 4
+PROTOCOL_VERSION = 5
 
 
 def encode(obj: dict) -> str:
@@ -55,16 +55,11 @@ def build_error_result(rid: object, error: str) -> dict:
     return build_result(rid, False, "", error)
 
 
-def build_tool_call(rid: object, call_id: str, name: str, args: dict,
-                    image_b64: str = "") -> dict:
+def build_tool_call(rid: object, call_id: str, name: str, args: dict) -> dict:
     """Ask the host to run one tool. The host answers with `tool_result`.
 
-    `image_b64` (raw base64, no data URL) carries a screenshot kept from earlier
-    in the session, for the tools whose arguments name one. Omitted when empty,
-    so every other call keeps its original shape.
+    A `shot` number inside `args` names a screenshot the host keeps itself, so
+    nothing is attached here: the host looks the frame up.
     """
-    msg = {"type": "tool_call", "id": rid, "call_id": call_id, "name": name,
-           "args": args}
-    if image_b64:
-        msg["image_b64"] = image_b64
-    return msg
+    return {"type": "tool_call", "id": rid, "call_id": call_id, "name": name,
+            "args": args}

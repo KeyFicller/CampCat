@@ -331,7 +331,7 @@ std::string llm_host::run_tool(const llm_protocol::message &_call) {
   }
 
   const llm::tool_reply reply =
-      llm::dispatch(_call.tool_name, _call.tool_args_json, _call.image_b64);
+      llm::dispatch(_call.tool_name, _call.tool_args_json);
   if (reply.ok) {
     const std::string shown =
         reply.quiet_note.empty() ? reply.text : std::string(reply.quiet_note);
@@ -353,7 +353,7 @@ std::string llm_host::run_tool(const llm_protocol::message &_call) {
                 reinterpret_cast<const unsigned char *>(reply.image_png.data()),
                 reply.image_png.size());
   return llm_protocol::build_tool_result(_call.call_id, reply.ok, reply.text,
-                                         reply.error, image_b64);
+                                         reply.error, image_b64, reply.shot);
 }
 
 llm_result llm_host::exchange(const std::string &_request_line) {
@@ -447,10 +447,12 @@ llm_result llm_host::run_turn(const std::filesystem::path &_repo_root,
 
 llm_result llm_host::reset(const std::filesystem::path &_repo_root) {
   llm_result r;
-  // The session is over: the screenshot goes with it, at the same moment the
-  // sidecar drops its picture store. Before the early return below -- no child
-  // means there was no history, and a stale screenshot would only mislead.
+  // The session is over: the screenshot goes with it, and so do the numbered
+  // frames the tools kept, at the same moment the sidecar drops its history.
+  // Before the early return below -- no child means there was no history, and a
+  // stale screenshot or frame would only mislead.
   m_screen = llm::screen_state{};
+  llm::forget_frames();
   {
     std::lock_guard<std::mutex> lk(m_mu);
     if (m_child.pid() <= 0 || m_broken || !m_ready) {
@@ -550,6 +552,10 @@ llm_result llm_host::run_turn(const std::filesystem::path &,
 }
 
 llm_result llm_host::reset(const std::filesystem::path &) {
+  // Unreachable in practice -- the Windows host never spawns a sidecar -- but
+  // "a reset drops the frame table" holds on every platform, so it is not
+  // conditional here.
+  llm::forget_frames();
   llm_result r;
   r.error = "the LLM sidecar is not supported on Windows";
   return r;

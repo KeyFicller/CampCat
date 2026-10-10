@@ -8,7 +8,10 @@ namespace campcat::llm_protocol {
 /// Current protocol revision. The sidecar states its own in `ready`; a mismatch
 /// means one side was rebuilt without the other, which breaks the tools.
 /// 4: `tool_call` may carry `image_b64`, a screenshot the sidecar kept.
-constexpr int k_protocol_version = 4;
+/// 5: `tool_call` no longer carries `image_b64` -- the host keeps the session's
+///    numbered screenshots itself -- and `tool_result` carries the `shot` number
+///    an image-returning tool filed its frame under.
+constexpr int k_protocol_version = 5;
 
 /**
  * @brief One decoded line from the sidecar's stdout.
@@ -34,7 +37,6 @@ struct message {
   std::string call_id;        ///< echoed back in the answering tool_result
   std::string tool_name;
   std::string tool_args_json; ///< the model's raw arguments object, unparsed
-  std::string image_b64;      ///< a screenshot this call needs, empty when none
 
   // log
   std::string level;
@@ -53,21 +55,6 @@ struct message {
  * @param[in] _len Number of bytes to encode.
  */
 std::string base64_encode(const unsigned char *_data, std::size_t _len);
-
-/**
- * @brief Decode standard base64 (RFC 4648), with or without `=` padding.
- *
- * Strict about the alphabet: any space, newline or other byte outside the
- * alphabet fails rather than being skipped, so a mangled line cannot decode
- * into plausible-looking bytes. The two to four bits left over from the final
- * group are discarded without being required to be zero, which matches what a
- * canonical encoder produces.
- *
- * @param[in] _in Undecoded text.
- * @param[out] _out Decoded bytes; cleared before decoding and on failure.
- * @return False when the input is not valid base64.
- */
-bool base64_decode(std::string_view _in, std::string *_out);
 
 /**
  * @brief Build one `turn` request line (no trailing newline).
@@ -91,10 +78,13 @@ std::string build_turn_request(long _id, std::string_view _text,
  * `call_id`, and the request ids stay unambiguous.
  *
  * @param[in] _image_b64 Set only by image-returning tools.
+ * @param[in] _shot The frame number that image was filed under, so the sidecar
+ *                  can caption it and name it in later `shot` arguments. 0 when
+ *                  the result has no picture.
  */
 std::string build_tool_result(std::string_view _call_id, bool _ok,
                               std::string_view _text, std::string_view _error,
-                              std::string_view _image_b64);
+                              std::string_view _image_b64, int _shot = 0);
 
 /**
  * @brief Build one `reset` request line, dropping the sidecar's history.
