@@ -12,6 +12,7 @@ import functools
 import re
 import struct
 import sys
+import time
 from typing import Iterator, TypedDict
 
 from langchain.agents.middleware import SummarizationMiddleware
@@ -81,6 +82,14 @@ _MEMORIZED_UPTO = 0
 # are not re-sent, only the last one is.
 _LATEST_NUM = 0
 _LATEST_B64 = ""
+# When those bytes were captured, as a wall clock. The ride-along frame carries
+# it so a later request can tell how stale the screen it is shown is. Not a
+# delta: across turns the gap would be the user's typing, not the device's.
+_LATEST_TIME = 0.0
+# Monotonic time of the previous screenshot in the turn now being served, or
+# None before its first one. Reset per turn, because only inside one turn are
+# two frames separated by device time instead of by the user thinking.
+_TURN_PREV_SHOT = None
 
 # Built lazily: both the budget and the model come from the environment, which
 # main.py loads from llm/.env before the first request. A summary lands in
@@ -91,10 +100,12 @@ _MW = None
 
 def reset_history() -> None:
     """Drop every turn. The next request starts a fresh conversation."""
-    global _MW, _LATEST_NUM, _LATEST_B64, _MEMORIZED_UPTO
+    global _MW, _LATEST_NUM, _LATEST_B64, _LATEST_TIME, _MEMORIZED_UPTO, _TURN_PREV_SHOT
     _MESSAGES.clear()
     _LATEST_NUM = 0
     _LATEST_B64 = ""
+    _LATEST_TIME = 0.0
+    _TURN_PREV_SHOT = None
     _MW = None
     _MEMORIZED_UPTO = 0
 
@@ -192,6 +203,8 @@ def precheck(state: TurnState) -> dict:
     Rejected here rather than at the model, so a stray space in the input box
     never turns into a paid round trip.
     """
+    global _TURN_PREV_SHOT
+    _TURN_PREV_SHOT = None
     text = (state.get("text") or "").strip()
     if not text:
         return {"error": "empty request"}
@@ -238,7 +251,8 @@ def build_messages(state: TurnState) -> dict:
     if _LATEST_NUM:
         messages.append(
             HumanMessage(content=_shot_content(
-                _shot_caption(_LATEST_NUM, "The last screenshot you took:")))
+                _shot_caption(_LATEST_NUM, "The last screenshot you took:",
+                              _LATEST_TIME)))
         )
     messages.append(HumanMessage(content=state.get("text", "")))
     return {"messages": messages}
@@ -317,15 +331,23 @@ def png_size(png_b64: str) -> tuple[int, int] | None:
     return struct.unpack(">II", head[16:24])
 
 
-def _shot_caption(shot: int, lead: str) -> str:
-    """`lead` plus the number and size, which is what names this frame later.
+def _shot_caption(shot: int, lead: str, captured: float = 0.0,
+                  since_previous: float | None = None) -> str:
+    """`lead` plus the number, size and time, which is what names this frame later.
 
     `save_template`'s `shot` is this number and its box is in these pixels, so
-    both have to be on screen next to the picture.
+    both have to be on screen next to the picture. The time is what lets a wait
+    be reasoned about instead of guessed: `since_previous` is how long passed
+    between this frame and the one before it in the same turn.
     """
     size = png_size(_LATEST_B64)
-    return (f"{lead} #{shot} ({size[0]}x{size[1]} pixels)." if size
-            else f"{lead} #{shot}.")
+    parts = [f"#{shot}" + (f" ({size[0]}x{size[1]} pixels)" if size else "")]
+    if captured:
+        stamp = time.strftime("%H:%M:%S", time.localtime(captured))
+        parts.append(f"taken {stamp}.{int(captured * 1000) % 1000:03d}")
+    if since_previous is not None:
+        parts.append(f"+{since_previous:.1f}s since the previous screenshot")
+    return f"{lead} {', '.join(parts)}."
 
 
 def _shot_content(caption: str) -> list[dict]:
@@ -349,7 +371,7 @@ def run_tools(state: TurnState) -> dict:
     model as the tool's result rather than raised, so it can correct itself on
     the next round.
     """
-    global _LATEST_NUM, _LATEST_B64
+    global _LATEST_NUM, _LATEST_B64, _LATEST_TIME, _TURN_PREV_SHOT
     messages = list(state.get("messages") or [])
     calls = getattr(messages[-1], "tool_calls", None) or []
     results: list = []
@@ -378,10 +400,14 @@ def run_tools(state: TurnState) -> dict:
                 # worse than no picture, because a cut box would have no frame
                 # to be checked against.
                 continue
+            now = time.monotonic()
+            since = None if _TURN_PREV_SHOT is None else now - _TURN_PREV_SHOT
+            _TURN_PREV_SHOT = now
             _LATEST_NUM, _LATEST_B64 = shot, image
+            _LATEST_TIME = time.time()
             pictures.append(
                 HumanMessage(content=_shot_content(
-                    _shot_caption(shot, "Screenshot")))
+                    _shot_caption(shot, "Screenshot", _LATEST_TIME, since)))
             )
         else:
             # Every other image tool returns a marked-up copy for the user to

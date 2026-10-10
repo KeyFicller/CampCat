@@ -61,6 +61,26 @@ targets are not checked; absolute paths are not bundle files, so they are not ei
 After a tap or swipe the script waits `max(tap_delay_ms, action_gap_ms)` (config, 1000 ms), so you rarely need `wait`
 after an action.
 
+## Anchoring a step
+
+After an action, assert the screen it should have produced with `wait_until`. The anchor
+is the image that only appears when the action worked:
+
+```ccat
+tap(login.png)
+wait_until("feed.png", 5000)   // anchor: the feed only appears if the tap landed
+```
+
+`wait_until` polls every 50 ms until the template matches. If it never does, the statement
+fails with `wait_until: timeout after <ms> ms for <file>`, and a failing statement stops
+the script, so the error names the step that did not land instead of letting the rest of
+the script run against a stale screen. Anchor after `run()` too: a callee that succeeds
+can still leave the screen somewhere you did not expect.
+
+`wait_until` is not `if`. `if ("a.png")` takes one screenshot and treats a missing template
+as false, which is how you branch on the screen you are on. `wait_until` waits for the
+screen you expect, and fails rather than falling through.
+
 ## Control flow
 
 `if ("a.png") { ... } else { ... }` takes one screenshot, then runs a branch. **A missing template is not an error

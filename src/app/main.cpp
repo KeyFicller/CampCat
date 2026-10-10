@@ -405,6 +405,25 @@ int main(int argc, char **argv) {
       {"/System/Library/Fonts/Supplemental/Arial Unicode.ttf", 0},
   };
 
+  // ImGui's ChineseFull set stops at the CJK blocks, so Unicode's Arrows block
+  // (→, ←, ⇒) is never asked for and draws as nothing, even though both CJK
+  // faces above have the glyph. Appended to ImGui's own list rather than copied,
+  // so it cannot drift from it. `static` because ImGui keeps the pointer until
+  // the atlas is built, not just for the call.
+  static const std::vector<ImWchar> cjk_ranges = [&io] {
+    std::vector<ImWchar> r;
+    for (const ImWchar *p = io.Fonts->GetGlyphRangesChineseFull();
+         p[0] != 0 && p[1] != 0; p += 2) {
+      r.push_back(p[0]);
+      r.push_back(p[1]);
+    }
+    r.push_back(0x2190); // Arrows
+    r.push_back(0x21FF);
+    r.push_back(0); // zero-terminated, as ImGui requires
+    r.push_back(0);
+    return r;
+  }();
+
   // MergeMode appends to the font added just before it, so each merge is issued
   // right after its own base font. AddFontFromFileTTF asserts on a missing file,
   // so the CJK candidate is probed first. The full set (~21k hanzi) costs a few
@@ -429,8 +448,7 @@ int main(int argc, char **argv) {
       ImFontConfig merge;
       merge.MergeMode = true; // add to that font instead of replacing it
       merge.FontNo = cjk.face; // a .ttc holds several faces
-      io.Fonts->AddFontFromFileTTF(cjk.path, _size, &merge,
-                                   io.Fonts->GetGlyphRangesChineseFull());
+      io.Fonts->AddFontFromFileTTF(cjk.path, _size, &merge, cjk_ranges.data());
       break;
     }
     return font;
