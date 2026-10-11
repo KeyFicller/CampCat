@@ -253,6 +253,10 @@ const ImVec4 k_user_bg{0.19F, 0.31F, 0.45F, 1.0F};
 const ImVec4 k_bot_bg{0.16F, 0.18F, 0.20F, 1.0F};
 const ImVec4 k_err_col{0.95F, 0.45F, 0.35F, 1.0F};
 const ImVec4 k_err_bg{0.30F, 0.16F, 0.16F, 1.0F}; ///< failed-reply bubble
+/// Send is the one primary action here; plain buttons are surfaces (main.cpp).
+const ImVec4 k_primary{0.243F, 0.400F, 0.529F, 1.0F};
+const ImVec4 k_primary_hi{0.302F, 0.478F, 0.616F, 1.0F};
+const ImVec4 k_primary_lo{0.200F, 0.341F, 0.463F, 1.0F};
 
 /// A bubble takes at most this share of the log width before it wraps.
 constexpr float k_bubble_frac = 0.72F;
@@ -1149,8 +1153,11 @@ void llm_ui_draw_panel(campcat::app_config &_cfg, bool _adb_busy) {
   // macos_ime.mm), so an Enter here is a real Enter.
   const std::string preedit = ime_preedit();
 
-  // Leaves room for the Send button and the spacing before it.
-  ImGui::SetNextItemWidth(-116.0F);
+  // The reservation has to track the widest label the button can carry: at
+  // 132px plus the 10px ItemSpacing it needs 142, so the old flat -116 pushed
+  // "Summarizing..." 26px past the content region.
+  const bool memorizing = g_memorizing.load();
+  ImGui::SetNextItemWidth(memorizing ? -144.0F : -116.0F);
   const bool submitted = ImGui::InputTextWithHint(
       "##llm_prompt",
       // While composing the hint is blanked: the composition is painted over the
@@ -1168,16 +1175,19 @@ void llm_ui_draw_panel(campcat::app_config &_cfg, bool _adb_busy) {
 
   ImGui::SameLine();
   const bool can_send = awaiting || (!busy && !is_blank(g_input));
-  const bool memorizing = g_memorizing.load();
   if (!can_send) {
     ImGui::BeginDisabled();
   }
   // A disabled Send with no explanation reads as a hung app, so an idle
   // consolidation says what it is doing instead. Wider, because the label no
   // longer fits the "Send" button's own width.
+  ImGui::PushStyleColor(ImGuiCol_Button, k_primary);
+  ImGui::PushStyleColor(ImGuiCol_ButtonHovered, k_primary_hi);
+  ImGui::PushStyleColor(ImGuiCol_ButtonActive, k_primary_lo);
   const bool clicked = ImGui::Button(
       memorizing ? "Summarizing..." : "Send",
       ImVec2(memorizing ? 132.0F : 104.0F, 0.0F));
+  ImGui::PopStyleColor(3);
   if (!can_send) {
     ImGui::EndDisabled();
   }

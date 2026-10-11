@@ -172,8 +172,8 @@ void template_capture_draw_panel(campcat::app_config &_cfg,
     return;
   }
 
-  ImGui::Separator();
-  ImGui::TextUnformatted("Template from screenshot (CampCat)");
+  // No title and no separator here: the caller draws this inside the
+  // "Screenshot crop (ADB)" collapsing header, which already names it.
   ImGui::TextDisabled(
       "Drag on image after Capture to select ROI. Preview is 1:1 device "
       "pixels; scroll when larger than viewport.");

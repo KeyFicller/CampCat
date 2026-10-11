@@ -9,6 +9,8 @@
   "match_multiscale": false,
   "match_threshold": 0.7,
   "max_step_retries": 12,
+  "mumu_device_index": 0,
+  "mumutool_path": "/Applications/MuMuPlayer.app/Contents/MacOS/mumutool",
   "require_tool_approval": true,
   "scheduler": {
     "enabled": true,

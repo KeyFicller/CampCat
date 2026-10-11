@@ -9,12 +9,17 @@
 #include <functional>
 #include <iomanip>
 #include <mutex>
+#include <optional>
 #include <sstream>
 #include <string>
 #include <thread>
 #include <utility>
 #include <vector>
 #include <tuple>
+
+#ifndef _WIN32
+#include <unistd.h>
+#endif
 
 #if defined(__APPLE__)
 #define GL_SILENCE_DEPRECATION
@@ -34,6 +39,7 @@
 #include "core/automation/game_automation.h"
 #include "core/automation_log.h"
 #include "core/log_buffer.h"
+#include "core/mumu_launcher.h"
 #include "core/scheduler.h"
 #include "app/template_capture_ui.h"
 #include "app/llm_ui.h"
@@ -51,6 +57,14 @@ namespace shell_sid = campcat::shell_script_id;
 
 constexpr char k_default_config_relative[] = "config/default.json";
 
+/// How long the start button waits for the instance to leave its not-ready
+/// states before it gives up. Booting the VM is slow; this only bounds it.
+constexpr int k_mumu_ready_timeout_ms = 180000;
+
+/// How long the start button waits for MuMuPlayer's service to answer after the
+/// app is launched. Shorter than a VM boot: this is just an app coming up.
+constexpr int k_mumu_service_timeout_ms = 60000;
+
 inline bool acquire_cycle(std::atomic<bool> &_cycle_running) {
   bool expected = false;
   return _cycle_running.compare_exchange_strong(expected, true);
@@ -64,11 +78,32 @@ void shell_merge_buffer_paths(campcat::app_config *_dst,
                               const campcat::app_config &_ui,
                               const char *_adb_path_buf,
                               const char *_serial_buf,
-                              const char *_adb_connect_buf) {
+                              const char *_adb_connect_buf,
+                              const char *_mumutool_buf, int _mumu_index) {
   *_dst = _ui;
   _dst->adb_path = _adb_path_buf;
   _dst->adb_serial = _serial_buf;
   _dst->adb_connect_address = _adb_connect_buf;
+  _dst->mumutool_path = _mumutool_buf;
+  _dst->mumu_device_index = _mumu_index;
+}
+
+const char *mumu_state_label(campcat::mumu_state _state) {
+  switch (_state) {
+  case campcat::mumu_state::stopped:
+    return "stopped";
+  case campcat::mumu_state::starting:
+    return "starting";
+  case campcat::mumu_state::running:
+    return "running";
+  case campcat::mumu_state::service_down:
+    return "service down";
+  case campcat::mumu_state::failed:
+    return "failed";
+  case campcat::mumu_state::unknown:
+    break;
+  }
+  return "unknown";
 }
 
 std::string script_display_label(const std::string &_id) {
@@ -173,6 +208,21 @@ int main(int argc, char **argv) {
   std::atomic<bool> cycle_running{false};
   std::atomic<bool> stop_requested{false};
   std::thread worker_thread;
+
+  // The MuMu instance we started, if any. `mumu_launched_*` is written when the
+  // instance comes up, never re-read from `cfg`: the user can edit the path or
+  // index after starting one, and closing the wrong instance is worse than
+  // closing none. Recording it does not wait on the watchdog, so an instance we
+  // started is closed on a clean exit even when none could be armed.
+  std::mutex mumu_mu;
+  campcat::mumu_status mumu_report;
+  std::atomic<bool> mumu_launching{false};
+  std::optional<campcat::process::child> mumu_watchdog;
+  std::string mumu_launched_path;
+  int mumu_launched_index = -1;
+  /// Bundle this run started, empty when it started none. Same rule as above:
+  /// only what we launched gets quit, and the path is frozen at launch time.
+  std::string mumu_app_started;
 
   std::deque<std::string> log_scroll;
 
@@ -305,6 +355,98 @@ int main(int argc, char **argv) {
     }
   };
 
+  /// Start the MuMu instance, then arm the watchdog that outlives us.
+  auto start_mumu_job = [&]() {
+    if (!acquire_cycle(cycle_running)) {
+      append_log("[mumu] busy");
+      return;
+    }
+    stop_requested.store(false);
+    if (worker_thread.joinable()) {
+      worker_thread.join();
+    }
+    const campcat::app_config shell = snapshot_cfg();
+    mumu_launching.store(true);
+    try {
+      worker_thread = std::thread([&, shell]() {
+        const std::string tool = shell.mumutool_path;
+        const std::string app = campcat::mumu_app_path(tool);
+        const int index = shell.mumu_device_index;
+        // The app this run launched, if any; feeds the watchdog and is what
+        // the shutdown path quits. Empty keeps somebody else's app alive.
+        std::string app_owned;
+        auto finish = [&](const campcat::mumu_status &_st) {
+          {
+            std::lock_guard<std::mutex> lk(mumu_mu);
+            mumu_report = _st;
+          }
+          mumu_launching.store(false);
+          release_cycle(cycle_running);
+        };
+
+        campcat::mumu_status st = campcat::mumu_query_state(tool, index);
+        if (st.state == campcat::mumu_state::service_down) {
+          // mumutool is only a client of MuMuPlayer's service: with the app down
+          // it cannot answer `info` at all, so the app has to come first.
+          st = campcat::mumu_launch_app(app);
+          if (st.state != campcat::mumu_state::failed) {
+            app_owned = app;
+            {
+              std::lock_guard<std::mutex> lk(mumu_mu);
+              mumu_app_started = app;
+            }
+            st = campcat::mumu_wait_service(tool, index,
+                                            k_mumu_service_timeout_ms);
+          }
+        }
+        if (st.state == campcat::mumu_state::failed) {
+          finish(st);
+          return;
+        }
+        if (st.state != campcat::mumu_state::stopped) {
+          // Somebody already had it up. Leave it alone and arm no watchdog:
+          // that would close an instance we did not start. An app we just
+          // launched is still ours to quit; `mumu_app_started` holds that.
+          st.message = "already up";
+          finish(st);
+          return;
+        }
+
+        st = campcat::mumu_open(tool, index);
+        if (st.state == campcat::mumu_state::failed) {
+          finish(st);
+          return;
+        }
+        st = campcat::mumu_wait_ready(tool, index, k_mumu_ready_timeout_ms);
+        if (st.state == campcat::mumu_state::failed) {
+          finish(st);
+          return;
+        }
+
+        // Spawn first: the watchdog then covers the gap before anything is
+        // recorded. Record either way, so an instance we started is still closed
+        // on a clean exit when no watchdog could be armed.
+        auto wd = campcat::mumu_spawn_watchdog(
+            tool, index, static_cast<long>(::getpid()), app_owned);
+        const bool armed = wd.has_value();
+        {
+          std::lock_guard<std::mutex> lk(mumu_mu);
+          mumu_launched_path = tool;
+          mumu_launched_index = index;
+          mumu_watchdog = std::move(wd);
+        }
+        if (!armed) {
+          st.message = "started, but no watchdog could be armed";
+        }
+        finish(st);
+      });
+    } catch (const std::exception &ex) {
+      mumu_launching.store(false);
+      release_cycle(cycle_running);
+      append_log(std::string("[mumu] failed to start worker: ") + ex.what());
+    }
+  };
+
   auto refresh_scheduler_locked = [&](bool immediate_first_tick = false) {
     scheduler.stop();
     const auto snap = snapshot_cfg();
@@ -373,25 +515,104 @@ int main(int argc, char **argv) {
   {
     ImGuiStyle &style = ImGui::GetStyle();
     style.WindowRounding = 0.0F;
-    style.ChildRounding = 4.0F;
-    style.FrameRounding = 4.0F;
-    style.GrabRounding = 3.0F;
-    style.ScrollbarRounding = 4.0F;
+    style.ChildRounding = 6.0F;
+    style.FrameRounding = 5.0F;
+    style.GrabRounding = 4.0F;
+    style.ScrollbarRounding = 6.0F;
+    style.PopupRounding = 6.0F;
     style.WindowPadding = ImVec2(10.0F, 10.0F);
     style.FramePadding = ImVec2(10.0F, 6.0F);
     style.ItemSpacing = ImVec2(10.0F, 8.0F);
     style.ItemInnerSpacing = ImVec2(8.0F, 5.0F);
-    ImVec4 *colors = style.Colors;
-    colors[ImGuiCol_WindowBg] = ImVec4(0.09F, 0.10F, 0.11F, 1.0F);
-    colors[ImGuiCol_ChildBg] = ImVec4(0.11F, 0.12F, 0.13F, 1.0F);
-    colors[ImGuiCol_Border] = ImVec4(0.22F, 0.24F, 0.26F, 1.0F);
-    colors[ImGuiCol_FrameBg] = ImVec4(0.16F, 0.17F, 0.19F, 1.0F);
-    colors[ImGuiCol_Button] = ImVec4(0.22F, 0.35F, 0.48F, 1.0F);
-    colors[ImGuiCol_ButtonHovered] = ImVec4(0.28F, 0.44F, 0.58F, 1.0F);
-    colors[ImGuiCol_ButtonActive] = ImVec4(0.18F, 0.30F, 0.42F, 1.0F);
-    colors[ImGuiCol_Header] = ImVec4(0.20F, 0.32F, 0.42F, 0.85F);
-    colors[ImGuiCol_HeaderHovered] = ImVec4(0.26F, 0.40F, 0.52F, 0.95F);
-    colors[ImGuiCol_HeaderActive] = ImVec4(0.22F, 0.36F, 0.48F, 1.0F);
+    style.ScrollbarSize = 12.0F;
+    style.GrabMinSize = 12.0F;
+    style.WindowBorderSize = 0.0F;
+    style.ChildBorderSize = 1.0F;
+    style.FrameBorderSize = 0.0F;
+    style.PopupBorderSize = 1.0F;
+    style.DisabledAlpha = 0.50F;
+
+    // One palette, every slot filled. A partly themed style leaves the rest on
+    // ImGui's defaults -- bright scrollbars and checkmarks, a saturated blue
+    // on every header -- and that mix is what reads as unfinished. Values are
+    // low-contrast on purpose: the accent marks what is active, nothing shouts.
+    const ImVec4 bg{0.086F, 0.094F, 0.106F, 1.00F};
+    const ImVec4 panel{0.106F, 0.116F, 0.133F, 1.00F};
+    const ImVec4 field{0.145F, 0.157F, 0.176F, 1.00F};
+    const ImVec4 field_hi{0.176F, 0.192F, 0.216F, 1.00F};
+    const ImVec4 line{0.196F, 0.212F, 0.239F, 1.00F};
+    const ImVec4 line_hi{0.278F, 0.302F, 0.337F, 1.00F};
+    const ImVec4 ink{0.847F, 0.871F, 0.898F, 1.00F};
+    const ImVec4 ink_dim{0.478F, 0.510F, 0.549F, 1.00F};
+    const ImVec4 accent{0.243F, 0.400F, 0.529F, 1.00F};
+    const ImVec4 accent_hi{0.302F, 0.478F, 0.616F, 1.00F};
+    const ImVec4 accent_lo{0.200F, 0.341F, 0.463F, 1.00F};
+    // Headers and rows get a wash of the accent, not a solid fill, so an
+    // expanded section reads as a group instead of a second toolbar.
+    const ImVec4 wash{0.243F, 0.400F, 0.529F, 0.28F};
+    const ImVec4 wash_hi{0.243F, 0.400F, 0.529F, 0.46F};
+
+    ImVec4 *c = style.Colors;
+    c[ImGuiCol_Text] = ink;
+    c[ImGuiCol_TextDisabled] = ink_dim;
+    c[ImGuiCol_WindowBg] = bg;
+    c[ImGuiCol_ChildBg] = panel;
+    c[ImGuiCol_PopupBg] = ImVec4(0.118F, 0.129F, 0.149F, 0.98F);
+    c[ImGuiCol_Border] = line;
+    c[ImGuiCol_BorderShadow] = ImVec4(0.0F, 0.0F, 0.0F, 0.0F);
+    c[ImGuiCol_FrameBg] = field;
+    c[ImGuiCol_FrameBgHovered] = field_hi;
+    c[ImGuiCol_FrameBgActive] = accent_lo;
+    c[ImGuiCol_TitleBg] = bg;
+    c[ImGuiCol_TitleBgActive] = ImVec4(0.129F, 0.145F, 0.169F, 1.00F);
+    c[ImGuiCol_TitleBgCollapsed] = bg;
+    c[ImGuiCol_MenuBarBg] = ImVec4(0.098F, 0.106F, 0.122F, 1.00F);
+    c[ImGuiCol_ScrollbarBg] = ImVec4(0.0F, 0.0F, 0.0F, 0.0F);
+    c[ImGuiCol_ScrollbarGrab] = ImVec4(0.235F, 0.255F, 0.286F, 1.00F);
+    c[ImGuiCol_ScrollbarGrabHovered] = line_hi;
+    c[ImGuiCol_ScrollbarGrabActive] = accent;
+    c[ImGuiCol_CheckMark] = accent_hi;
+    c[ImGuiCol_SliderGrab] = accent;
+    c[ImGuiCol_SliderGrabActive] = accent_hi;
+    // A plain button is a surface, not a primary. Filled with the accent, every
+    // button on a page looked equally important -- Run once, Stop and Send all
+    // read as the one thing to press. The accent is spent on the single primary
+    // per page instead; see the Send button in llm_ui.cpp.
+    c[ImGuiCol_Button] = field_hi;
+    c[ImGuiCol_ButtonHovered] = line_hi;
+    c[ImGuiCol_ButtonActive] = accent_lo;
+    c[ImGuiCol_Header] = wash;
+    c[ImGuiCol_HeaderHovered] = wash_hi;
+    c[ImGuiCol_HeaderActive] = accent;
+    c[ImGuiCol_Separator] = line;
+    c[ImGuiCol_SeparatorHovered] = line_hi;
+    c[ImGuiCol_SeparatorActive] = accent_hi;
+    c[ImGuiCol_ResizeGrip] = ImVec4(0.0F, 0.0F, 0.0F, 0.0F);
+    c[ImGuiCol_ResizeGripHovered] = accent;
+    c[ImGuiCol_ResizeGripActive] = accent_hi;
+    c[ImGuiCol_TabHovered] = wash_hi;
+    c[ImGuiCol_Tab] = panel;
+    c[ImGuiCol_TabSelected] = accent_lo;
+    c[ImGuiCol_TabSelectedOverline] = accent_hi;
+    c[ImGuiCol_TabDimmed] = panel;
+    c[ImGuiCol_TabDimmedSelected] = field_hi;
+    c[ImGuiCol_TabDimmedSelectedOverline] = ImVec4(0.0F, 0.0F, 0.0F, 0.0F);
+    c[ImGuiCol_PlotLines] = accent_hi;
+    c[ImGuiCol_PlotLinesHovered] = accent_hi;
+    c[ImGuiCol_PlotHistogram] = accent; // ProgressBar fill
+    c[ImGuiCol_PlotHistogramHovered] = accent_hi;
+    c[ImGuiCol_TableHeaderBg] = ImVec4(0.129F, 0.141F, 0.165F, 1.00F);
+    c[ImGuiCol_TableBorderStrong] = line;
+    c[ImGuiCol_TableBorderLight] = ImVec4(0.153F, 0.165F, 0.188F, 1.00F);
+    c[ImGuiCol_TableRowBg] = ImVec4(0.0F, 0.0F, 0.0F, 0.0F);
+    c[ImGuiCol_TableRowBgAlt] = ImVec4(1.0F, 1.0F, 1.0F, 0.015F);
+    c[ImGuiCol_TextLink] = accent_hi;
+    c[ImGuiCol_TextSelectedBg] = wash_hi;
+    c[ImGuiCol_DragDropTarget] = accent_hi;
+    c[ImGuiCol_NavCursor] = accent_hi;
+    c[ImGuiCol_NavWindowingHighlight] = ImVec4(1.0F, 1.0F, 1.0F, 0.70F);
+    c[ImGuiCol_NavWindowingDimBg] = ImVec4(0.0F, 0.0F, 0.0F, 0.45F);
+    c[ImGuiCol_ModalWindowDimBg] = ImVec4(0.0F, 0.0F, 0.0F, 0.55F);
   }
 
   // Every UI font is one family: Arial for Latin, with the same CJK face merged
@@ -401,6 +622,15 @@ int main(int argc, char **argv) {
     const char *path;
     int face;
   } cjk_fonts[] = {
+      // PingFang is the current macOS Chinese face, but here it is a
+      // downloadable asset: it lives under an AssetsV2 hash rather than the
+      // stable Fonts directory. Stable path first, hash second, and Hiragino
+      // (older, always present) as the fallback. ponytail: an OS update that
+      // rehashes the asset silently falls back to Hiragino -- cosmetic only.
+      {"/System/Library/Fonts/PingFang.ttc", 3}, // PingFang SC / Regular
+      {"/System/Library/AssetsV2/com_apple_MobileAsset_Font7/"
+       "3419f2a427639ad8c8e139149a287865a90fa17e.asset/AssetData/PingFang.ttc",
+       3},
       {"/System/Library/Fonts/Hiragino Sans GB.ttc", 0},
       {"/System/Library/Fonts/Supplemental/Arial Unicode.ttf", 0},
   };
@@ -434,9 +664,11 @@ int main(int argc, char **argv) {
   // atlas to 4096x16384 (+320 MB RSS, +128 MB VRAM) for strings that are all
   // ASCII today. A Chinese title would draw "?"; add the merge then if it
   // becomes worth that.
-  auto load_font = [&io](const char *_path, float _size,
-                         bool _cjk) -> ImFont * {
-    ImFont *font = io.Fonts->AddFontFromFileTTF(_path, _size);
+  auto load_font = [&io](const char *_path, float _size, bool _cjk,
+                         int _face) -> ImFont * {
+    ImFontConfig base;
+    base.FontNo = _face; // a .ttc holds several faces
+    ImFont *font = io.Fonts->AddFontFromFileTTF(_path, _size, &base);
     if (font == nullptr || !_cjk) {
       return font;
     }
@@ -454,18 +686,22 @@ int main(int argc, char **argv) {
     return font;
   };
 
-  ImFont *font_body =
-      load_font("/System/Library/Fonts/Supplemental/Arial.ttf", 16.0F, true);
+  // Arial for Latin. San Francisco is unusable: it is a variable font and
+  // ImGui's rasterizer ignores variation axes, so every weight -- titles
+  // included -- would draw Regular. (Helvetica Neue has real faces if that
+  // trade is ever worth making.)
+  ImFont *font_body = load_font("/System/Library/Fonts/Supplemental/Arial.ttf",
+                                16.0F, true, 0);
   if (font_body == nullptr) {
     font_body = io.Fonts->AddFontDefault();
   }
   ImFont *font_bold = load_font(
-      "/System/Library/Fonts/Supplemental/Arial Bold.ttf", 16.0F, true);
+      "/System/Library/Fonts/Supplemental/Arial Bold.ttf", 16.0F, true, 0);
   if (font_bold == nullptr) {
     font_bold = font_body;
   }
   ImFont *font_title = load_font(
-      "/System/Library/Fonts/Supplemental/Arial Bold.ttf", 20.0F, false);
+      "/System/Library/Fonts/Supplemental/Arial Bold.ttf", 20.0F, false, 0);
   if (font_title == nullptr) {
     font_title = font_bold;
   }
@@ -484,7 +720,7 @@ int main(int argc, char **argv) {
   const char *mono_path = "/System/Library/Fonts/Menlo.ttc";
   std::error_code mono_ec;
   if (std::filesystem::exists(mono_path, mono_ec)) {
-    font_mono = load_font(mono_path, 16.0F, true);
+    font_mono = load_font(mono_path, 16.0F, true, 0);
   }
   script_ui_set_mono_font(font_mono);
 
@@ -503,6 +739,8 @@ int main(int argc, char **argv) {
   static char adb_path_buf[512]{};
   static char serial_buf[256]{};
   static char adb_connect_buf[256]{};
+  static char mumutool_buf[512]{};
+  static int mumu_index_buf = 0;
   static bool buffers_init = false;
 
   campcat::ccat_script_profile ccat_ui = snapshot_ccat_live();
@@ -580,6 +818,9 @@ int main(int argc, char **argv) {
                     cfg_view.adb_serial.c_str());
       std::snprintf(adb_connect_buf, sizeof(adb_connect_buf), "%s",
                     cfg_view.adb_connect_address.c_str());
+      std::snprintf(mumutool_buf, sizeof(mumutool_buf), "%s",
+                    cfg_view.mumutool_path.c_str());
+      mumu_index_buf = cfg_view.mumu_device_index;
       last_script_seen = cfg_view.active_script_id;
       buffers_init = true;
     }
@@ -594,7 +835,8 @@ int main(int argc, char **argv) {
           std::string err;
           campcat::app_config to_write{};
           shell_merge_buffer_paths(&to_write, cfg_view, adb_path_buf,
-                                   serial_buf, adb_connect_buf);
+                                   serial_buf, adb_connect_buf, mumutool_buf,
+                                   mumu_index_buf);
           // Persist first (outside cfg_mu); commit to memory only on success so
           // a failed write cannot desync the automation config from disk.
           const bool ok =
@@ -651,7 +893,7 @@ int main(int argc, char **argv) {
 
     auto push_job_snapshot = [&]() {
       shell_merge_buffer_paths(&cfg_view, cfg_view, adb_path_buf, serial_buf,
-                               adb_connect_buf);
+                               adb_connect_buf, mumutool_buf, mumu_index_buf);
       std::lock_guard<std::mutex> lk(cfg_mu);
       cfg = cfg_view;
       ccat_live = ccat_ui;
@@ -704,7 +946,6 @@ int main(int argc, char **argv) {
       ImGui::PushFont(font_title);
       ImGui::TextUnformatted("CampCat");
       ImGui::PopFont();
-      ImGui::TextDisabled("Shell");
       ImGui::Spacing();
       ImGui::Separator();
       ImGui::Spacing();
@@ -834,13 +1075,7 @@ int main(int argc, char **argv) {
         }
         ImGui::PopFont();
 
-        ImGui::Spacing();
-        ImGui::Separator();
-        ImGui::Spacing();
-
-        ImGui::PushFont(font_bold);
-        ImGui::TextUnformatted("Scheduler");
-        ImGui::PopFont();
+        ImGui::SeparatorText("Scheduler");
         if (!cfg_view.scheduler.enabled) {
           ImGui::TextDisabled(
               "Scheduler is off. Use Start schedule to enable and arm it.");
@@ -860,10 +1095,6 @@ int main(int argc, char **argv) {
           }
         }
 
-        ImGui::Spacing();
-        ImGui::Separator();
-        ImGui::Spacing();
-
         std::vector<std::string> script_ids;
         script_ids.reserve(cfg_view.script_config_paths.size() + 1);
         script_ids.push_back("none");
@@ -874,7 +1105,7 @@ int main(int argc, char **argv) {
 
         const std::string preview_str =
             script_display_label(cfg_view.active_script_id);
-        ImGui::TextUnformatted("Active script");
+        ImGui::SeparatorText("Active script");
         ImGui::SetNextItemWidth(-1.0F);
         if (ImGui::BeginCombo("##active_script", preview_str.c_str())) {
           for (const std::string &sid : script_ids) {
@@ -901,9 +1132,16 @@ int main(int argc, char **argv) {
               "CampCat uses a .ccat script and a bundle JSON under "
               "config/scripts/.");
           ImGui::Spacing();
+          // Both panels configure the script picked above, so they sit one
+          // level in instead of flushing left with the page title. Indented
+          // before the Spacing they each draw, so the gap stays outside.
+          ImGui::Indent();
 
-          if (ImGui::CollapsingHeader("Paths###script_ccat_paths",
-                                      ImGuiTreeNodeFlags_DefaultOpen)) {
+          ImGui::PushFont(font_bold);
+          const bool paths_open = ImGui::CollapsingHeader(
+              "Paths###script_ccat_paths", ImGuiTreeNodeFlags_DefaultOpen);
+          ImGui::PopFont();
+          if (paths_open) {
             static char v_src[512]{};
             std::snprintf(v_src, sizeof(v_src), "%s",
                           ccat_ui.source_rel.c_str());
@@ -965,12 +1203,16 @@ int main(int argc, char **argv) {
                 ccat_ui.images_base(cfg_view.config_home).string().c_str());
           }
 
-          if (ImGui::CollapsingHeader(
-                  "Screenshot crop (ADB)###script_ccat_cap",
-                  ImGuiTreeNodeFlags_DefaultOpen)) {
+          ImGui::PushFont(font_bold);
+          const bool cap_open = ImGui::CollapsingHeader(
+              "Screenshot crop (ADB)###script_ccat_cap",
+              ImGuiTreeNodeFlags_DefaultOpen);
+          ImGui::PopFont();
+          if (cap_open) {
             template_capture_draw_panel(cfg_view, &ccat_ui,
                                         lock_manual_single);
           }
+          ImGui::Unindent();
         } else {
           ImGui::TextDisabled("Choose CampCat to edit script paths.");
         }
@@ -986,6 +1228,11 @@ int main(int argc, char **argv) {
             "console_history",
             ImVec2(0.0F, -ImGui::GetFrameHeightWithSpacing() * 2.5F),
             ImGuiChildFlags_Borders);
+        // An empty bordered box reads as a drawing glitch rather than as "no
+        // output yet".
+        if (console_repl.history.empty()) {
+          ImGui::TextDisabled("No output yet.");
+        }
         for (const auto &line : console_repl.history) {
           ImGui::TextUnformatted(line.c_str());
         }
@@ -1068,6 +1315,7 @@ int main(int argc, char **argv) {
           ImGui::Checkbox("Multi-scale match", &cfg_view.match_multiscale);
         }
 
+        ImGui::Spacing();
         if (ImGui::CollapsingHeader("ADB###cfg_adb",
                                     ImGuiTreeNodeFlags_DefaultOpen)) {
           ImGui::InputText("ADB path", adb_path_buf,
@@ -1076,8 +1324,35 @@ int main(int argc, char **argv) {
                            IM_ARRAYSIZE(serial_buf));
           ImGui::InputText("Connect address", adb_connect_buf,
                            IM_ARRAYSIZE(adb_connect_buf));
+          ImGui::InputText("MuMu tool", mumutool_buf,
+                           IM_ARRAYSIZE(mumutool_buf));
+          ImGui::InputInt("Instance index", &mumu_index_buf);
+          // The button starts a VM, which takes a while; the wait runs on the
+          // worker so the frame keeps drawing while it happens.
+          const bool launching = mumu_launching.load();
+          if (launching) {
+            ImGui::BeginDisabled();
+          }
+          const bool start_clicked = ImGui::Button("Start emulator");
+          if (launching) {
+            ImGui::EndDisabled();
+          }
+          if (start_clicked) {
+            start_mumu_job();
+          }
+          ImGui::SameLine();
+          {
+            std::lock_guard<std::mutex> lk(mumu_mu);
+            std::string status_line = mumu_state_label(mumu_report.state);
+            if (!mumu_report.message.empty() &&
+                mumu_report.message != status_line) {
+              status_line += " - " + mumu_report.message;
+            }
+            ImGui::TextDisabled("%s", status_line.c_str());
+          }
         }
 
+        ImGui::Spacing();
         if (ImGui::CollapsingHeader("Scheduler###cfg_sched",
                                     ImGuiTreeNodeFlags_DefaultOpen)) {
           ImGui::Checkbox("Enable scheduler", &cfg_view.scheduler.enabled);
@@ -1088,7 +1363,7 @@ int main(int argc, char **argv) {
                            900);
           ImGui::Checkbox("Skip if busy", &cfg_view.scheduler.skip_if_busy);
           ImGui::TextDisabled(
-              "Arm the scheduler from the Run page with Start schedule.");
+              "Arm the scheduler from the Script page with Start schedule.");
         }
       }
 
@@ -1117,7 +1392,7 @@ int main(int argc, char **argv) {
     {
       std::lock_guard<std::mutex> lk(cfg_mu);
       shell_merge_buffer_paths(&cfg, cfg_view, adb_path_buf, serial_buf,
-                               adb_connect_buf);
+                               adb_connect_buf, mumutool_buf, mumu_index_buf);
       ccat_live = ccat_ui;
     }
   }
@@ -1127,6 +1402,23 @@ int main(int argc, char **argv) {
 
   if (worker_thread.joinable()) {
     worker_thread.join();
+  }
+
+  // Close the instance this run started, quit the app it started, then drop the
+  // watchdog so it cannot race us. Order is load-bearing: with the app gone,
+  // mumutool cannot close anything. Dropping the watchdog last keeps it
+  // covering a death mid-close, and both of its steps are idempotent, so a
+  // concurrent fire is harmless. Both names stay empty when we started nothing,
+  // which is what keeps somebody else's instance and app alive.
+  {
+    std::lock_guard<std::mutex> lk(mumu_mu);
+    if (mumu_launched_index >= 0) {
+      campcat::mumu_close(mumu_launched_path, mumu_launched_index);
+    }
+    if (!mumu_app_started.empty()) {
+      campcat::mumu_quit_app(mumu_app_started);
+    }
+    mumu_watchdog.reset();
   }
 
   campcat::automation_log::clear_sink();

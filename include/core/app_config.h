@@ -33,6 +33,13 @@ struct app_config {
   std::string adb_serial;
   std::string adb_connect_address;
 
+  /// The MuMu `mumutool` binary: it can start and stop the emulator instance,
+  /// which adb cannot, and it is what lets the instance outlive nobody.
+  std::string mumutool_path =
+      "/Applications/MuMuPlayer.app/Contents/MacOS/mumutool";
+  /// Which MuMu instance the start button acts on (`mumutool show`).
+  int mumu_device_index = 0;
+
   int tap_delay_ms = 150;
   int action_gap_ms = 1000;
   int swipe_duration_ms = 300;

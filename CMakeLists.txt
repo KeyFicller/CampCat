@@ -189,6 +189,7 @@ target_link_libraries(imgui_colortextedit_lib PUBLIC imgui_lib)
 # Core framework + Dear ImGui shell + ccat_script driver
 add_library(campcat_core STATIC
   src/core/adb/adb_client.cpp
+  src/core/mumu/mumu_launcher.cpp
   src/core/vision/template_matcher.cpp
   src/core/vision/screen_template_ops.cpp
   src/core/config/app_config.cpp

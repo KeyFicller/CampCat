@@ -23,6 +23,8 @@ void app_config::from_json(const nlohmann::json &_j, app_config &_c) {
   _c.adb_serial = _j.value("adb_serial", _c.adb_serial);
   _c.adb_connect_address =
       _j.value("adb_connect_address", _c.adb_connect_address);
+  _c.mumutool_path = _j.value("mumutool_path", _c.mumutool_path);
+  _c.mumu_device_index = _j.value("mumu_device_index", _c.mumu_device_index);
   _c.tap_delay_ms = _j.value("tap_delay_ms", _c.tap_delay_ms);
   _c.action_gap_ms = _j.value("action_gap_ms", _c.action_gap_ms);
   _c.swipe_duration_ms = _j.value("swipe_duration_ms", _c.swipe_duration_ms);
@@ -71,6 +73,8 @@ nlohmann::json app_config::to_json(const app_config &_c) {
   j["adb_path"] = _c.adb_path;
   j["adb_serial"] = _c.adb_serial;
   j["adb_connect_address"] = _c.adb_connect_address;
+  j["mumutool_path"] = _c.mumutool_path;
+  j["mumu_device_index"] = _c.mumu_device_index;
   j["tap_delay_ms"] = _c.tap_delay_ms;
   j["action_gap_ms"] = _c.action_gap_ms;
   j["swipe_duration_ms"] = _c.swipe_duration_ms;
