@@ -4,7 +4,7 @@
 // how its *result* is presented -- [[= js::image_result]] and [[= js::quiet]].
 //
 // The generic reflection machinery (annotation types, schema generation, strict
-// JSON binding) now lives in CppReflect26 and is re-exported below, so `js::doc`
+// JSON binding) now lives in CppReflectKit and is re-exported below, so `js::doc`
 // and friends read exactly as they did when this file owned them.
 //
 // The re-exports are `using` declarations, not copies: `campcat::llm::js::doc` is
@@ -28,7 +28,7 @@
 
 namespace campcat::llm::js {
 
-// --- the generic layer, from CppReflect26 -----------------------------------
+// --- the generic layer, from CppReflectKit ----------------------------------
 using ::js::bind_error;
 using ::js::doc;
 using ::js::invoke_with_json;

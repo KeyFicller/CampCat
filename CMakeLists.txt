@@ -100,7 +100,7 @@ FetchContent_MakeAvailable(json)
 # consumed instead of kept in tree. Header-only INTERFACE targets; UI is off
 # because CampCat builds its own imgui_lib, and the library's tests are its own
 # business. nlohmann is already provided above, so the library keeps quiet.
-campcat_github_url(_cppreflect_git KeyFicller/CppReflect26.git)
+campcat_github_url(_cppreflect_git KeyFicller/CppReflectKit.git)
 set(CPPREF_WITH_UI     OFF CACHE BOOL "" FORCE)
 set(CPPREF_BUILD_TESTS OFF CACHE BOOL "" FORCE)
 FetchContent_Declare(
