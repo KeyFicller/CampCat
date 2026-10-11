@@ -1,87 +1,46 @@
 #pragma once
 
-// JSON Schema generation for LLM tool declarations, from C++26 static
-// reflection (P2996). Private to src/core/llm: <meta> and the consteval cost
-// stay out of the public include/ tree.
+// The tool layer: what a CampCat tool is, plus the two annotations that describe
+// how its *result* is presented -- [[= js::image_result]] and [[= js::quiet]].
 //
-// A tool is an ordinary free function. Its signature *is* the schema the model
-// sees, so there is exactly one place to edit when a tool changes. The shape
-// follows the working experiment at KeyFicller/CppReflect26; the differences
-// are the strict argument binding (section "binding") and the narrower type
-// support.
+// The generic reflection machinery (annotation types, schema generation, strict
+// JSON binding) now lives in CppReflect26 and is re-exported below, so `js::doc`
+// and friends read exactly as they did when this file owned them.
 //
-// Measured constraints of this compiler; do not "simplify" them away:
-//   * `std::meta::parameters_of(Fn)` takes the info directly. Writing `^^Fn`
-//     fails with "reflection operand must be a named entity".
-//   * A reflection range must be fed to `template for` inline as
-//     `std::define_static_array(...)`. Storing it in a `constexpr auto` first
-//     fails: "pointer to subobject of heap-allocated object is not a constant
-//     expression".
-//   * Annotation tests use `if constexpr`. `if consteval` is false inside a
-//     plain function, so the loop body silently never runs.
-//   * `identifier_of` / `display_string_of` return string_view; feeding one to
-//     printf("%s") compiles and then segfaults at runtime.
-//   * Handing a consteval result to runtime code needs `define_static_string`.
+// The re-exports are `using` declarations, not copies: `campcat::llm::js::doc` is
+// the same entity as `::js::doc`, so an annotation written on a tool is found by
+// the library's `text_of<^^js::doc, Fn>()`. They have to be spelled out because a
+// qualified name like `js::doc` stops at the first enclosing namespace called
+// `js`; without them the tools' annotations would not resolve.
 
 #include <meta>
+
+#include <llm/reflection_json.h>
+
 #include <array>
-#include <cstddef>
 #include <cstdio>
 #include <cstdlib>
-#include <optional>
-#include <stdexcept>
 #include <string>
 #include <string_view>
-#include <tuple>
 #include <type_traits>
 #include <utility>
 #include <vector>
 
-#include <nlohmann/json.hpp>
-
 namespace campcat::llm::js {
 
-// --- annotation value types -------------------------------------------------
-// An annotation value must be structural, so a string cannot be a string_view.
-// str<N> holds exactly N characters including the NUL, e.g. str<6>{"hello"}.
-template <std::size_t N>
-struct str {
-  char data[N]{};
-  constexpr str() = default;
-  constexpr str(const char (&_s)[N]) {
-    for (std::size_t i = 0; i < N; ++i) {
-      data[i] = _s[i];
-    }
-  }
-};
-template <std::size_t N>
-str(const char (&)[N]) -> str<N>;
+// --- the generic layer, from CppReflect26 -----------------------------------
+using ::js::bind_error;
+using ::js::doc;
+using ::js::invoke_with_json;
+using ::js::is_optional;
+using ::js::param_at;
+using ::js::param_count;
+using ::js::param_docs;
+using ::js::param_type_at;
+using ::js::str;
+using ::js::text_of;
 
-/// Documentation for a tool, applied on the function: [[= js::doc{.text = ...}]].
-template <std::size_t N = 1>
-struct doc {
-  str<N> text;
-};
-
-/// A structural, variadic list of strings. std::tuple is not structural here,
-/// so the list is rolled by hand.
-template <typename... Ts>
-struct doc_list;
-template <>
-struct doc_list<> {};
-template <typename T, typename... Ts>
-struct doc_list<T, Ts...> {
-  T head;
-  doc_list<Ts...> tail;
-};
-
-/// Parameter documentation, matched to parameters by position:
-///   [[= js::param_docs(js::str("first"), js::str("second"))]]
-/// An annotation on the parameter itself is not readable here, so the metadata
-/// lives on the function.
-consteval auto param_docs(auto... _xs) {
-  return doc_list<decltype(_xs)...>{_xs...};
-}
+// --- CampCat-only annotations -----------------------------------------------
 
 /// Marks a tool whose result is an image rather than text: [[= js::image_result]].
 struct image_result_t {};
@@ -90,7 +49,7 @@ inline constexpr image_result_t image_result{};
 /// Marks a tool whose result is a document for the model rather than log
 /// material, i.e. text too long to print, and carries the line the log shows
 /// instead: [[= js::quiet{.text = js::str("Read CCAT.md")}]]. The text itself
-/// still reaches the model unchanged. Same shape as `doc` above, so
+/// still reaches the model unchanged. Same shape as `doc`, so
 /// `text_of<^^quiet, Fn>()` reads it.
 ///
 /// `{param}` in that text names one of the tool's own parameters and is filled
@@ -103,231 +62,13 @@ struct quiet {
   str<N> text;
 };
 
-// --- type traits ------------------------------------------------------------
-
-template <typename T>
-struct is_optional : std::false_type {};
-template <typename T>
-struct is_optional<std::optional<T>> : std::true_type {};
-
-/// std::vector becomes a JSON array. Its `value_type` is what the items are
-/// described and bound as, so nested vectors and vectors of structs work.
-/// std::array is deliberately absent: without the trait it would fall through to
-/// the class branch below and reflect on its internal members, which would
-/// produce a schema that is wrong rather than absent. `is_std_array_v` turns that
-/// into the compile error the class branch cannot give on its own.
-template <typename T>
-struct is_sequence : std::false_type {};
-template <typename T, typename A>
-struct is_sequence<std::vector<T, A>> : std::true_type {
-  using value_type = T;
-};
-
-template <typename T>
-inline constexpr bool is_std_array_v = false;
-template <typename T, std::size_t N>
-inline constexpr bool is_std_array_v<std::array<T, N>> = true;
-
-// --- JSON helpers -----------------------------------------------------------
-
-// constexpr: schema assembly happens inside a consteval context.
-constexpr std::string json_escape(std::string_view _s) {
-  std::string out;
-  for (char c : _s) {
-    switch (c) {
-    case '"': out += "\\\""; break;
-    case '\\': out += "\\\\"; break;
-    case '\n': out += "\\n"; break;
-    case '\r': out += "\\r"; break;
-    case '\t': out += "\\t"; break;
-    default: out += c; break;
-    }
-  }
-  return out;
-}
-
-// --- binding: JSON value -> C++ value ---------------------------------------
-// This is a trust boundary. The model's `arguments` arrive as text that nothing
-// validates on the Python side (tools are bound as raw OpenAI dicts, so
-// LangChain has no args_schema to check against), and a silently defaulted
-// coordinate is a real mistap: a `tap` that lost its `x` would hit (0, y).
-
-struct bind_error : std::runtime_error {
-  using std::runtime_error::runtime_error;
-};
-
-// Forward declarations: `from_json` below recurses through its own branches, and
-// P2996 reflects members in a second lookup phase that needs these visible
-// before the body that uses them.
-template <typename T>
-T from_json(const nlohmann::json &_j);
-
-template <typename T>
-consteval std::size_t member_count();
-
-template <typename T>
-consteval std::array<std::meta::info, member_count<T>()> member_infos();
-
-template <typename T, std::size_t I>
-consteval std::meta::info member_at() {
-  return member_infos<T>()[I];
-}
-
-/// Assigns one member from the object, splicing the member into the lvalue.
-/// A key that is absent and not optional is an error, same rule as a missing
-/// tool argument: a silently zeroed field is a mistap waiting to happen.
-template <std::meta::info M>
-void assign_member(auto &_out, const nlohmann::json &_j) {
-  using MT = std::remove_cvref_t<typename[: std::meta::type_of(M) :]>;
-  const std::string key(std::meta::identifier_of(M));
-  const auto it = _j.find(key);
-  if (it == _j.end()) {
-    if constexpr (is_optional<MT>::value) {
-      return;
-    } else {
-      throw bind_error("missing required member: " + key);
-    }
-  }
-  try {
-    _out.[: M :] = from_json<MT>(*it);
-  } catch (const bind_error &e) {
-    throw bind_error(key + ": " + e.what());
-  }
-}
-
-template <typename T, std::size_t... Is>
-T object_from_json(const nlohmann::json &_j, std::index_sequence<Is...>) {
-  T out{};
-  (assign_member<member_at<T, Is>()>(out, _j), ...);
-  return out;
-}
-
-/// Accepts only the exact JSON type. "540" is an error, not a coercion.
-template <typename T>
-T from_json(const nlohmann::json &_j) {
-  if constexpr (is_optional<T>::value) {
-    if (_j.is_null()) {
-      return std::nullopt;
-    }
-    return std::optional{from_json<typename T::value_type>(_j)};
-  } else if constexpr (std::is_same_v<T, bool>) {
-    if (!_j.is_boolean()) {
-      throw bind_error("expected boolean");
-    }
-    return _j.get<bool>();
-  } else if constexpr (std::is_integral_v<T>) {
-    if (!_j.is_number_integer()) {
-      throw bind_error("expected integer");
-    }
-    return _j.get<T>();
-  } else if constexpr (std::is_floating_point_v<T>) {
-    if (!_j.is_number()) {
-      throw bind_error("expected number");
-    }
-    return _j.get<T>();
-  } else if constexpr (is_sequence<T>::value) {
-    if (!_j.is_array()) {
-      throw bind_error("expected array");
-    }
-    using V = typename T::value_type;
-    T out{};
-    out.reserve(_j.size());
-    for (const auto &element : _j) {
-      out.push_back(from_json<V>(element));
-    }
-    return out;
-  } else if constexpr (std::is_same_v<T, std::string>) {
-    if (!_j.is_string()) {
-      throw bind_error("expected string");
-    }
-    return _j.get<std::string>();
-  } else if constexpr (std::is_class_v<T>) {
-    // Reached by struct parameters only: std::string and std::string_view are
-    // taken by the branch above.
-    static_assert(!is_std_array_v<T>,
-                  "js::from_json: std::array is not supported yet; use std::vector");
-    if (!_j.is_object()) {
-      throw bind_error("expected object");
-    }
-    return object_from_json<T>(_j, std::make_index_sequence<member_count<T>()>());
-  } else {
-    static_assert(!sizeof(T), "js::from_json: unsupported parameter type "
-                              "(add a branch when a tool needs it)");
-  }
-}
-
-// --- annotations ------------------------------------------------------------
-
-namespace detail {
-namespace meta = std::meta;
-} // namespace detail
-
-/// First annotation on `_e` whose type is an instantiation of `Tmpl`, or an
-/// empty reflection when there is none.
-template <detail::meta::info Tmpl>
-consteval detail::meta::info find_annotation(detail::meta::info _e) {
-  for (detail::meta::info a : detail::meta::annotations_of(_e)) {
-    const detail::meta::info t = detail::meta::remove_const(detail::meta::type_of(a));
-    if (detail::meta::has_template_arguments(t) && detail::meta::template_of(t) == Tmpl) {
-      return a;
-    }
-  }
-  return {};
-}
-
-/// Text held by the first `Tmpl` annotation on `E`, or "" when there is none.
-template <detail::meta::info Tmpl, detail::meta::info E>
-consteval std::string text_of() {
-  if constexpr (find_annotation<Tmpl>(E) == detail::meta::info{}) {
-    return {};
-  } else {
-    constexpr auto cfg = detail::meta::extract<
-        typename[: detail::meta::type_of(find_annotation<Tmpl>(E)) :]>(find_annotation<Tmpl>(E));
-    return std::string(std::string_view(cfg.text.data));
-  }
-}
-
-template <detail::meta::info Fn>
-consteval std::size_t param_doc_count() {
-  if (find_annotation<^^doc_list>(Fn) == detail::meta::info{}) {
-    return 0;
-  }
-  return detail::meta::template_arguments_of(
-             detail::meta::remove_const(detail::meta::type_of(find_annotation<^^doc_list>(Fn))))
-      .size();
-}
-
-template <std::size_t I, typename List>
-consteval auto nth_doc(List _list) {
-  if constexpr (I == 0) {
-    return _list.head;
-  } else {
-    return nth_doc<I - 1>(_list.tail);
-  }
-}
-
-/// Positional description for parameter `I` of `Fn`, or "" if undocumented.
-template <detail::meta::info Fn, std::size_t I>
-consteval std::string param_description() {
-  if constexpr (find_annotation<^^doc_list>(Fn) == detail::meta::info{}) {
-    return {};
-  } else if constexpr (I < param_doc_count<Fn>()) {
-    constexpr auto list = detail::meta::extract<
-        typename[: detail::meta::type_of(find_annotation<^^doc_list>(Fn)) :]>(
-        find_annotation<^^doc_list>(Fn));
-    return std::string(std::string_view(nth_doc<I>(list).data));
-  } else {
-    return {};
-  }
-}
-
 /// True when `_e` carries an annotation whose const-removed type is exactly
-/// `Tmpl`. `find_annotation` above only matches template instantiations, so the
-/// plain marker annotations need this loop instead.
-template <detail::meta::info Tmpl>
-consteval bool has_annotation(detail::meta::info _e) {
-  for (detail::meta::info a : detail::meta::annotations_of(_e)) {
-    if (detail::meta::remove_const(detail::meta::type_of(a)) == Tmpl) {
+/// `Tmpl`. The library's `find_annotation` only matches template instantiations,
+/// so the plain marker annotations need this loop instead.
+template <std::meta::info Tmpl>
+consteval bool has_annotation(std::meta::info _e) {
+  for (std::meta::info a : std::meta::annotations_of(_e)) {
+    if (std::meta::remove_const(std::meta::type_of(a)) == Tmpl) {
       return true;
     }
   }
@@ -335,138 +76,10 @@ consteval bool has_annotation(detail::meta::info _e) {
 }
 
 /// True when the tool's result is an image, i.e. it carries [[= js::image_result]].
-template <detail::meta::info Fn>
+template <std::meta::info Fn>
 consteval bool has_image_annotation() {
   return has_annotation<^^image_result_t>(Fn);
 }
-
-/// True when every `{name}` in the tool's `js::quiet` text names one of the
-/// tool's parameters and that parameter can be printed. Defined beside
-/// `param_at` below, because it needs the parameter list; it is declared here so
-/// `quiet_note_of` can assert on it.
-template <detail::meta::info Fn>
-consteval bool quiet_note_ok();
-
-/// The line the UI log shows in place of a quiet tool's result, i.e. the text of
-/// its [[= js::quiet]] annotation. Empty when the tool carries no such annotation,
-/// which is also the signal that it is not quiet: a non-empty value is what
-/// replaces the result in the log. `define_static_string` because the result has
-/// to outlive the consteval call. Wrapped in its own function because the
-/// registration macro expands outside this namespace, where `^^quiet` would not
-/// resolve unqualified.
-template <detail::meta::info Fn>
-consteval std::string_view quiet_note_of() {
-  static_assert(quiet_note_ok<Fn>(),
-                "js::quiet: every {name} must be a parameter of this tool whose "
-                "type can be printed as text (text or number)");
-  return std::string_view(std::define_static_string(text_of<^^quiet, Fn>()));
-}
-
-// --- schema generation ------------------------------------------------------
-
-/// Splices a description into a generated schema, which is always one object.
-consteval std::string with_description(std::string _schema, std::string_view _desc) {
-  if (_desc.empty()) {
-    return _schema;
-  }
-  return _schema.substr(0, _schema.size() - 1) + ",\"description\":\"" +
-         json_escape(_desc) + "\"}";
-}
-
-/// JSON Schema for one C++ type. std::optional unwraps to its value type;
-/// sequences become arrays; other classes become nested objects. Anything else
-/// is a deliberate compile error: the schema and the binder must gain matching
-/// support together, never one without the other.
-template <typename T>
-consteval std::string param_schema();
-
-template <typename T>
-consteval std::size_t member_count() {
-  return detail::meta::nonstatic_data_members_of(
-             ^^T, detail::meta::access_context::unchecked())
-      .size();
-}
-
-template <typename T>
-consteval std::array<detail::meta::info, member_count<T>()> member_infos() {
-  const auto members = detail::meta::nonstatic_data_members_of(
-      ^^T, detail::meta::access_context::unchecked());
-  std::array<detail::meta::info, member_count<T>()> out{};
-  for (std::size_t i = 0; i < members.size(); ++i) {
-    out[i] = members[i];
-  }
-  return out;
-}
-
-/// An object schema from the type's own members. A member without a default
-/// (`std::optional`) is not in `required`, which is how the model says "keep
-/// what is there" as opposed to "make me one of these".
-template <typename T, std::size_t... Is>
-consteval std::string object_schema_impl(std::index_sequence<Is...>) {
-  constexpr auto infos = member_infos<T>();
-  std::string properties;
-  std::string required;
-  ((void)([&] {
-     using MT = std::remove_cvref_t<typename[: detail::meta::type_of(infos[Is]) :]>;
-     const std::string name(detail::meta::identifier_of(infos[Is]));
-     if (!properties.empty()) {
-       properties += ",";
-     }
-     properties += "\"" + name + "\":" +
-                   with_description(param_schema<MT>(), text_of<^^doc, infos[Is]>());
-     if constexpr (!is_optional<MT>::value) {
-       if (!required.empty()) {
-         required += ",";
-       }
-       required += "\"" + name + "\"";
-     }
-   }()), ...);
-  return "{\"type\":\"object\",\"properties\":{" + properties +
-         "},\"required\":[" + required + "]}";
-}
-
-template <typename T>
-consteval std::string param_schema() {
-  if constexpr (is_optional<T>::value) {
-    return param_schema<typename T::value_type>();
-  } else if constexpr (is_sequence<T>::value) {
-    return "{\"type\":\"array\",\"items\":" +
-           param_schema<typename T::value_type>() + "}";
-  } else if constexpr (std::is_same_v<T, bool>) {
-    return "{\"type\":\"boolean\"}";
-  } else if constexpr (std::is_integral_v<T>) {
-    return "{\"type\":\"integer\"}";
-  } else if constexpr (std::is_floating_point_v<T>) {
-    return "{\"type\":\"number\"}";
-  } else if constexpr (std::is_same_v<T, std::string> ||
-                       std::is_same_v<T, std::string_view>) {
-    return "{\"type\":\"string\"}";
-  } else if constexpr (std::is_class_v<T>) {
-    static_assert(!is_std_array_v<T>,
-                  "js::param_schema: std::array is not supported yet; use std::vector");
-    return object_schema_impl<T>(std::make_index_sequence<member_count<T>()>());
-  } else {
-    static_assert(!sizeof(T), "js::param_schema: unsupported parameter type "
-                              "(add a branch when a tool needs it)");
-  }
-}
-
-// --- function introspection -------------------------------------------------
-// Everything touching meta::info happens at consteval. The results handed to
-// the runtime string assembly are plain values.
-
-template <detail::meta::info Fn>
-consteval std::size_t param_count() {
-  return detail::meta::parameters_of(Fn).size();
-}
-
-template <detail::meta::info Fn, std::size_t I>
-consteval detail::meta::info param_at() {
-  return detail::meta::parameters_of(Fn)[I];
-}
-
-template <detail::meta::info Fn, std::size_t I>
-using param_type_at = std::remove_cvref_t<typename[: detail::meta::type_of(param_at<Fn, I>()) :]>;
 
 /// True when a parameter can be written into a one-line log message: text and
 /// numbers can, an optional of either can, and everything else (a vector, a
@@ -484,26 +97,23 @@ consteval bool quiet_renderable() {
 
 /// One bool per parameter, in declaration order. A template fold so the splice
 /// in `param_type_at` only ever sees a constant index.
-template <detail::meta::info Fn, std::size_t... Is>
-consteval std::array<bool, sizeof...(Is)> quiet_renderable_table(
-    std::index_sequence<Is...>) {
+template <std::meta::info Fn, std::size_t... Is>
+consteval std::array<bool, sizeof...(Is)> quiet_renderable_table(std::index_sequence<Is...>) {
   return {quiet_renderable<param_type_at<Fn, Is>>()...};
 }
 
 /// The parameter names, in declaration order: the same fold shape, because
 /// `param_at` is a template and cannot be indexed with a loop variable.
-template <detail::meta::info Fn, std::size_t... Is>
-consteval std::array<std::string_view, sizeof...(Is)> quiet_param_names(
-    std::index_sequence<Is...>) {
-  return {detail::meta::identifier_of(param_at<Fn, Is>())...};
+template <std::meta::info Fn, std::size_t... Is>
+consteval std::array<std::string_view, sizeof...(Is)> quiet_param_names(std::index_sequence<Is...>) {
+  return {std::meta::identifier_of(param_at<Fn, Is>())...};
 }
 
-template <detail::meta::info Fn>
+template <std::meta::info Fn>
 consteval bool quiet_note_ok() {
   const std::string note = text_of<^^quiet, Fn>();
   constexpr std::size_t count = param_count<Fn>();
-  constexpr auto renderable =
-      quiet_renderable_table<Fn>(std::make_index_sequence<count>{});
+  constexpr auto renderable = quiet_renderable_table<Fn>(std::make_index_sequence<count>{});
   constexpr auto names = quiet_param_names<Fn>(std::make_index_sequence<count>{});
   std::size_t at = 0;
   while (at < note.size()) {
@@ -531,83 +141,19 @@ consteval bool quiet_note_ok() {
   return true;
 }
 
-/// `required` lists only the parameters the model must supply: an optional
-/// parameter may be omitted, and the tool body then applies its own default.
-template <detail::meta::info Fn, std::size_t... Is>
-consteval std::string param_object_schema_impl(std::index_sequence<Is...>) {
-  std::string properties;
-  std::string required;
-  ((void)([&] {
-     using PT = param_type_at<Fn, Is>;
-     const std::string name(detail::meta::identifier_of(param_at<Fn, Is>()));
-     if (!properties.empty()) {
-       properties += ",";
-     }
-     properties += "\"" + name + "\":" +
-                   with_description(param_schema<PT>(), param_description<Fn, Is>());
-     if constexpr (!is_optional<PT>::value) {
-       if (!required.empty()) {
-         required += ",";
-       }
-       required += "\"" + name + "\"";
-     }
-   }()), ...);
-  return "{\"type\":\"object\",\"properties\":{" + properties +
-         "},\"required\":[" + required + "]}";
-}
-
-template <detail::meta::info Fn>
-consteval std::string param_object_schema() {
-  return param_object_schema_impl<Fn>(std::make_index_sequence<param_count<Fn>()>());
-}
-
-/// The complete OpenAI tool for `Fn`, materialized for runtime use.
-template <detail::meta::info Fn>
-consteval std::string_view tool_schema() {
-  std::string out = "{\"type\":\"function\",\"function\":{\"name\":\"";
-  out += detail::meta::identifier_of(Fn);
-  out += "\",\"description\":\"" + json_escape(text_of<^^doc, Fn>()) + "\",\"parameters\":";
-  out += param_object_schema<Fn>();
-  out += "}}";
-  return std::string_view(std::define_static_string(out));
-}
-
-// --- invocation -------------------------------------------------------------
-
-/// Binds parameter `I` from the model's arguments. A missing required argument
-/// is an error rather than a default-constructed value.
-template <detail::meta::info Fn, std::size_t I>
-void bind_one(auto &_args, const nlohmann::json &_j) {
-  using PT = param_type_at<Fn, I>;
-  const std::string key(detail::meta::identifier_of(param_at<Fn, I>()));
-  const auto it = _j.find(key);
-  if (it == _j.end()) {
-    if constexpr (is_optional<PT>::value) {
-      std::get<I>(_args) = PT{};
-      return;
-    } else {
-      throw bind_error("missing required argument: " + key);
-    }
-  }
-  try {
-    std::get<I>(_args) = from_json<PT>(*it);
-  } catch (const bind_error &e) {
-    throw bind_error(key + ": " + e.what());
-  }
-}
-
-template <detail::meta::info Fn, std::size_t... Is>
-std::string invoke_strict_impl(const nlohmann::json &_j, std::index_sequence<Is...>) {
-  std::tuple<param_type_at<Fn, Is>...> args{};
-  (bind_one<Fn, Is>(args, _j), ...);
-  return std::apply(&[: Fn :], args);
-}
-
-/// Builds the argument tuple and performs the real C++ call. Throws bind_error
-/// on a bad argument and whatever the tool body throws otherwise.
-template <detail::meta::info Fn>
-std::string invoke_strict(const nlohmann::json &_j) {
-  return invoke_strict_impl<Fn>(_j, std::make_index_sequence<param_count<Fn>()>());
+/// The line the UI log shows in place of a quiet tool's result, i.e. the text of
+/// its [[= js::quiet]] annotation. Empty when the tool carries no such annotation,
+/// which is also the signal that it is not quiet: a non-empty value is what
+/// replaces the result in the log. `define_static_string` because the result has
+/// to outlive the consteval call. Wrapped in its own function because the
+/// registration macro expands outside this namespace, where `^^quiet` would not
+/// resolve unqualified.
+template <std::meta::info Fn>
+consteval std::string_view quiet_note_of() {
+  static_assert(quiet_note_ok<Fn>(),
+                "js::quiet: every {name} must be a parameter of this tool whose "
+                "type can be printed as text (text or number)");
+  return std::string_view(std::define_static_string(text_of<^^quiet, Fn>()));
 }
 
 // --- registry ---------------------------------------------------------------
@@ -663,11 +209,11 @@ inline std::string tools_json() {
 #define CPP_REFLECT_TOOL(fn)                                                       \
   namespace {                                                                      \
   std::string js_run_##fn(const nlohmann::json &_j) {                              \
-    return ::campcat::llm::js::invoke_strict<^^fn>(_j);                            \
+    return ::js::invoke_with_json<^^fn>(_j);                                       \
   }                                                                                \
   [[maybe_unused]] const int js_reg_tool_##fn = [] {                               \
     ::campcat::llm::js::register_tool(::campcat::llm::js::tool_entry{              \
-        #fn, ::campcat::llm::js::tool_schema<^^fn>(), &js_run_##fn,                \
+        #fn, ::js::function_schema<^^fn, ::js::Style::OpenAiTool>(), &js_run_##fn, \
         ::campcat::llm::js::has_image_annotation<^^fn>(),                          \
         ::campcat::llm::js::quiet_note_of<^^fn>()});                               \
     return 0;                                                                      \

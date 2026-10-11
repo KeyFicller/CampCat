@@ -96,6 +96,22 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(json)
 
+# The shared reflection layer (schema generation + strict argument binding),
+# consumed instead of kept in tree. Header-only INTERFACE targets; UI is off
+# because CampCat builds its own imgui_lib, and the library's tests are its own
+# business. nlohmann is already provided above, so the library keeps quiet.
+campcat_github_url(_cppreflect_git KeyFicller/CppReflect26.git)
+set(CPPREF_WITH_UI     OFF CACHE BOOL "" FORCE)
+set(CPPREF_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+FetchContent_Declare(
+  cppreflect26
+  GIT_REPOSITORY ${_cppreflect_git}
+  GIT_TAG        2cefea7672ec76e3de15c4ca505ee40b711ef2f7
+  GIT_PROGRESS   TRUE
+)
+# No GIT_SHALLOW: a pinned commit cannot be fetched shallowly from every mirror.
+FetchContent_MakeAvailable(cppreflect26)
+
 # Header-only native file dialogs (Win / macOS / Linux).
 # Their CMakeLists still declares an old cmake_minimum_required; force policy floor.
 set(CMAKE_POLICY_VERSION_MINIMUM 3.5)
@@ -201,6 +217,7 @@ target_include_directories(campcat_core PUBLIC
 target_link_libraries(campcat_core PUBLIC
   ${OpenCV_LIBS}
   nlohmann_json::nlohmann_json
+  cppreflect::json
 )
 
 # The IME candidate-window fix is Objective-C++, so it stays Apple-only.
