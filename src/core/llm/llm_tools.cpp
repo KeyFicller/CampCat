@@ -3,7 +3,7 @@
 #include "ccat_script/ccat_program_runner.h" // run_ccat_program
 #include "core/adb_client.h"
 #include "core/app_config.h"
-#include "core/script/ccat_bundle.h"  // bundle_main / bundle_names / ...
+#include "core/script/ccat_bundle.h" // bundle_main / bundle_names / ...
 #include "core/script/ccat_parser.h" // parse_program / parse_error
 
 // Private: <meta> and the consteval cost stay out of include/.
@@ -32,34 +32,37 @@ namespace {
 /// Set by set_context() on the worker thread; read by every tool below.
 tool_context g_ctx;
 
-/// The numbered screenshots this session can still cut a template out of: number
+/// The numbered screenshots this session can still cut a template out of:
+/// number
 /// -> that frame's raw PNG. The sidecar used to keep them and attach one to a
-/// call, which capped a call at one picture; here any tool can reach any frame by
-/// number, so one call can cut from several.
+/// call, which capped a call at one picture; here any tool can reach any frame
+/// by number, so one call can cut from several.
 ///
 /// `g_ctx.screen` stays as well, keeping the latest frame as its own copy: tap
 /// and mark check coordinates against it, and the approval bubble draws on it.
 /// Two copies of one picture buy leaving set_context()/m_screen() alone.
 ///
-/// Same thread rule as g_ctx: only the worker running the sidecar exchange reads
-/// this, and forget_frames() runs at session reset, where no turn is in flight.
+/// Same thread rule as g_ctx: only the worker running the sidecar exchange
+/// reads this, and forget_frames() runs at session reset, where no turn is in
+/// flight.
 std::map<int, screen_state> g_frames;
 /// Only ever goes up, so a number the model remembers from an earlier request
 /// keeps pointing at the same picture. Reset with the table.
 int g_next_shot = 0;
 /// The number this call produced, if it produced one. Set by `screenshot`, read
-/// by dispatch() on the way out, and cleared at the top of every dispatch so one
-/// call's number can never be reported for the next.
+/// by dispatch() on the way out, and cleared at the top of every dispatch so
+/// one call's number can never be reported for the next.
 int g_last_shot = 0;
 
-/// A script is executing (the UI polls this) and it has been asked to stop (the UI
-/// writes it, the interpreter reads it). Both cross threads, hence atomics.
+/// A script is executing (the UI polls this) and it has been asked to stop (the
+/// UI writes it, the interpreter reads it). Both cross threads, hence atomics.
 std::atomic<bool> g_script_running{false};
 std::atomic<bool> g_script_stop{false};
 
-/// Clears a stale stop on entry and marks the script as running until it returns.
-/// The clear is not decoration: a turn can run a second script, and the stop the
-/// user pressed for the first one would otherwise kill it on entry.
+/// Clears a stale stop on entry and marks the script as running until it
+/// returns. The clear is not decoration: a turn can run a second script, and
+/// the stop the user pressed for the first one would otherwise kill it on
+/// entry.
 struct script_run_guard {
   script_run_guard() {
     g_script_stop.store(false);
@@ -68,7 +71,8 @@ struct script_run_guard {
   ~script_run_guard() { g_script_running.store(false); }
 };
 
-/// Parses `_source` or turns the syntax error into the bind_error the model reads.
+/// Parses `_source` or turns the syntax error into the bind_error the model
+/// reads.
 std::unique_ptr<ccat_lang::Program> parse_or_throw(const std::string &_source) {
   try {
     return ccat_lang::parse_program(_source);
@@ -144,7 +148,8 @@ std::string join_names(const std::vector<std::string> &_names) {
 
 /// The known bundles, comma-separated for an error message, or "none yet".
 std::string existing_bundles() {
-  const std::vector<std::string> names = ccat_lang::bundle_names(g_ctx.script_dir);
+  const std::vector<std::string> names =
+      ccat_lang::bundle_names(g_ctx.script_dir);
   if (names.empty()) {
     return "none yet";
   }
@@ -172,15 +177,17 @@ std::string joined(const std::vector<std::string> &_items, const char *_none) {
 
 /// `"ok"` -> `"ok.png"`; unchanged when it already ends in `.png`.
 std::string with_png_ext(const std::string &_s) {
-  return _s.size() >= 4 && _s.compare(_s.size() - 4, 4, ".png") == 0 ? _s
-                                                                    : _s + ".png";
+  return _s.size() >= 4 && _s.compare(_s.size() - 4, 4, ".png") == 0
+             ? _s
+             : _s + ".png";
 }
 
 /// The frame a call names: `_shot` picks one by number, and an omitted number
 /// means the session's current picture, which is what the sidecar used to send
 /// when the arguments did not ask for anything older. `*_error` is already a
 /// whole sentence for the model, and names the numbers that do exist.
-const screen_state *frame_for(const std::optional<int> &_shot, std::string *_error) {
+const screen_state *frame_for(const std::optional<int> &_shot,
+                              std::string *_error) {
   if (!_shot.has_value()) {
     if (g_ctx.screen.png.empty()) {
       *_error = "no screenshot yet; call screenshot first";
@@ -190,17 +197,19 @@ const screen_state *frame_for(const std::optional<int> &_shot, std::string *_err
   }
   const auto it = g_frames.find(*_shot);
   if (it == g_frames.end()) {
-    *_error = "no screenshot #" + std::to_string(*_shot) + " in this session (" +
-              (g_next_shot > 0 ? "frames so far: 1.." + std::to_string(g_next_shot)
-                               : std::string("none taken yet")) +
-              ")";
+    *_error =
+        "no screenshot #" + std::to_string(*_shot) + " in this session (" +
+        (g_next_shot > 0 ? "frames so far: 1.." + std::to_string(g_next_shot)
+                         : std::string("none taken yet")) +
+        ")";
     return nullptr;
   }
   return &it->second;
 }
 
 /// Decodes the frame a call names. `*_error` is left empty on success.
-bool frame_mat(const std::optional<int> &_shot, cv::Mat *_out, std::string *_error) {
+bool frame_mat(const std::optional<int> &_shot, cv::Mat *_out,
+               std::string *_error) {
   const screen_state *frame = frame_for(_shot, _error);
   if (frame == nullptr) {
     return false;
@@ -218,14 +227,15 @@ bool frame_mat(const std::optional<int> &_shot, cv::Mat *_out, std::string *_err
 }
 
 /// Validates a new bundle name and refuses one that is taken.
-std::unique_ptr<ccat_lang::Program> check_new_bundle(const std::string &_name,
-                                                     const std::string &_source) {
+std::unique_ptr<ccat_lang::Program>
+check_new_bundle(const std::string &_name, const std::string &_source) {
   if (!ccat_lang::safe_leaf_name(_name)) {
     throw js::bind_error("name \"" + _name + "\" is not a plain file name");
   }
   std::unique_ptr<ccat_lang::Program> prog = parse_or_throw(_source);
   std::error_code ec;
-  if (std::filesystem::exists(ccat_lang::bundle_main(g_ctx.script_dir, _name), ec)) {
+  if (std::filesystem::exists(ccat_lang::bundle_main(g_ctx.script_dir, _name),
+                              ec)) {
     throw js::bind_error("script bundle \"" + _name +
                          "\" already exists; pick another name (existing: " +
                          existing_bundles() + ")");
@@ -237,12 +247,13 @@ std::unique_ptr<ccat_lang::Program> check_new_bundle(const std::string &_name,
 /// checked against that picture's own size, not the screen's, because the
 /// picture may be an older frame of a different size.
 ///
-/// `*_frame_png` receives that same frame's raw PNG -- the approval bubble draws
-/// on the frame being cut, not on the current screen, so seeing it is how a human
-/// notices a box aimed at the wrong one. Handed back here so the caller does not
-/// have to look the frame up a second time and hope it is still there.
-cv::Mat check_template_target(const std::string &_bundle, const std::string &_name,
-                              const rect &_box, const std::optional<int> &_shot,
+/// `*_frame_png` receives that same frame's raw PNG -- the approval bubble
+/// draws on the frame being cut, not on the current screen, so seeing it is how
+/// a human notices a box aimed at the wrong one. Handed back here so the caller
+/// does not have to look the frame up a second time and hope it is still there.
+cv::Mat check_template_target(const std::string &_bundle,
+                              const std::string &_name, const rect &_box,
+                              const std::optional<int> &_shot,
                               std::string *_file, std::string *_frame_png) {
   if (!ccat_lang::safe_leaf_name(_bundle)) {
     throw js::bind_error("bundle \"" + _bundle + "\" is not a plain file name");
@@ -251,10 +262,11 @@ cv::Mat check_template_target(const std::string &_bundle, const std::string &_na
     throw js::bind_error("name \"" + _name + "\" is not a plain file name");
   }
   std::error_code ec;
-  if (!std::filesystem::is_regular_file(ccat_lang::bundle_main(g_ctx.script_dir, _bundle), ec)) {
-    throw js::bind_error("unknown script bundle \"" + _bundle +
-                         "\"; save_script first (existing: " + existing_bundles() +
-                         ")");
+  if (!std::filesystem::is_regular_file(
+          ccat_lang::bundle_main(g_ctx.script_dir, _bundle), ec)) {
+    throw js::bind_error(
+        "unknown script bundle \"" + _bundle +
+        "\"; save_script first (existing: " + existing_bundles() + ")");
   }
   *_file = with_png_ext(_name);
   std::string error;
@@ -269,14 +281,16 @@ cv::Mat check_template_target(const std::string &_bundle, const std::string &_na
     // Only reachable if a stored PNG got corrupted, which no tool can do.
     throw js::bind_error("the stored screenshot is not a decodable picture");
   }
-  if (!box_on_screen(img.cols, img.rows, _box.x, _box.y, _box.w, _box.h, &error)) {
+  if (!box_on_screen(img.cols, img.rows, _box.x, _box.y, _box.w, _box.h,
+                     &error)) {
     throw js::bind_error(error);
   }
   *_frame_png = frame->png;
   return img;
 }
 
-/// How a template request names the frame it cuts from, for the approval bubble.
+/// How a template request names the frame it cuts from, for the approval
+/// bubble.
 std::string shot_phrase(const std::optional<int> &_shot) {
   return _shot.has_value() ? "screenshot #" + std::to_string(*_shot)
                            : "the latest screenshot";
@@ -295,14 +309,15 @@ struct pending_cut {
 };
 
 /// Collects the template operands whose missing file fails the script: `tap`,
-/// `tap_offset`, `swipe` (both ends) and `wait_until`. Deliberately not the `if`
-/// and do-while conditions -- a missing template is just a false condition there
+/// `tap_offset`, `swipe` (both ends) and `wait_until`. Deliberately not the
+/// `if` and do-while conditions -- a missing template is just a false condition
+/// there
 /// -- and not `run()`'s target, which is another .ccat resolved at run time.
 ///
 /// ponytail: a statement type carrying a template must be added here; the
 /// language only grows in the parser, so nothing can appear unseen.
 void collect_required_templates(const ccat_lang::Stmt &_s,
-                               std::vector<std::string> *_out) {
+                                std::vector<std::string> *_out) {
   using namespace ccat_lang;
   if (const auto *b = dynamic_cast<const BlockStmt *>(&_s)) {
     for (const auto &child : b->body) {
@@ -380,9 +395,10 @@ namespace tools {
 /// filled in at dispatch time.
 constexpr int k_default_swipe_ms = 300;
 
-[[= js::image_result]]
-[[= js::doc{.text = js::str("Takes a fresh screenshot of the device screen.")}]]
-std::string screenshot() {
+[[= js::image_result]][[= js::doc{
+    .text =
+        js::str("Takes a fresh screenshot of the device screen.")}]] std::string
+    screenshot() {
   adb_client &adb = require_adb();
   cv::Mat bgr;
   std::string diag;
@@ -395,25 +411,30 @@ std::string screenshot() {
   }
   // The approval bubble shows this same image, so keep the raw PNG: base64 is
   // the wire's problem, and the host encodes once on the way out. The size goes
-  // with it, session-scoped rather than turn-scoped: every frame stays addressable
-  // by `shot`, so a later turn may be tapping at coordinates taken from one.
-  g_ctx.screen = screen_state{bgr.cols, bgr.rows, std::string(png.begin(), png.end())};
+  // with it, session-scoped rather than turn-scoped: every frame stays
+  // addressable by `shot`, so a later turn may be tapping at coordinates taken
+  // from one.
+  g_ctx.screen =
+      screen_state{bgr.cols, bgr.rows, std::string(png.begin(), png.end())};
   g_frames[++g_next_shot] = g_ctx.screen;
   g_last_shot = g_next_shot;
   return g_ctx.screen.png;
 }
 CPP_REFLECT_TOOL(screenshot)
 
-[[= js::image_result]]
-[[= js::doc{.text = js::str("Draws a box on the last screenshot and returns the marked image, "
-                            "so the user can see where you think something is. Nothing is "
-                            "tapped and nothing needs approval; the box lives in the picture.")}]]
-[[= js::param_docs(js::str("Short label for what the box marks, e.g. \"the login button\"."),
-                   js::str("Left edge X of the box, in screenshot pixels."),
-                   js::str("Top edge Y of the box, in screenshot pixels."),
-                   js::str("Width of the box in pixels."),
-                   js::str("Height of the box in pixels."))]]
-std::string mark(std::string label, int x, int y, int w, int h) {
+[[= js::image_result]][[= js::doc{
+    .text = js::str(
+        "Draws a box on the last screenshot and returns the marked image, "
+        "so the user can see where you think something is. Nothing is "
+        "tapped and nothing needs approval; the box lives in the picture.")}]][
+    [= js::param_docs(
+        js::str(
+            "Short label for what the box marks, e.g. \"the login button\"."),
+        js::str("Left edge X of the box, in screenshot pixels."),
+        js::str("Top edge Y of the box, in screenshot pixels."),
+        js::str("Width of the box in pixels."),
+        js::str("Height of the box in pixels."))]] std::string
+    mark(std::string label, int x, int y, int w, int h) {
   std::string error;
   if (!box_on_screen(g_ctx.screen.w, g_ctx.screen.h, x, y, w, h, &error)) {
     throw js::bind_error(error);
@@ -436,15 +457,17 @@ std::string mark(std::string label, int x, int y, int w, int h) {
 }
 CPP_REFLECT_TOOL(mark)
 
-[[= js::doc{.text = js::str("Taps the element at this box, in screenshot pixels. While "
-                            "human approval is on, the box is shown to the user and "
-                            "nothing is tapped unless they approve it. The tap lands at "
-                            "the box centre. Nothing else needs a prior call.")}]]
-[[= js::param_docs(js::str("Left edge X of the element box, in screenshot pixels."),
-                   js::str("Top edge Y of the element box, in screenshot pixels."),
-                   js::str("Width of the box in pixels."),
-                   js::str("Height of the box in pixels."))]]
-std::string tap(int x, int y, int w, int h) {
+[[= js::doc{.text = js::str(
+                "Taps the element at this box, in screenshot pixels. While "
+                "human approval is on, the box is shown to the user and "
+                "nothing is tapped unless they approve it. The tap lands at "
+                "the box centre. Nothing else needs a prior call.")}]]
+    [[= js::param_docs(
+        js::str("Left edge X of the element box, in screenshot pixels."),
+        js::str("Top edge Y of the element box, in screenshot pixels."),
+        js::str("Width of the box in pixels."),
+        js::str("Height of the box in pixels."))]] std::string
+        tap(int x, int y, int w, int h) {
   std::string error;
   if (!box_on_screen(g_ctx.screen.w, g_ctx.screen.h, x, y, w, h, &error)) {
     throw js::bind_error(error);
@@ -463,8 +486,8 @@ std::string tap(int x, int y, int w, int h) {
     req.box_editable = true;
     const llm::approval_decision decision = g_ctx.request_approval(req);
     if (!decision.approved) {
-      // Empty guidance and no redrawn box keep this string byte-for-byte the same
-      // as the bare refusal.
+      // Empty guidance and no redrawn box keep this string byte-for-byte the
+      // same as the bare refusal.
       std::string msg = decision.guidance.empty()
                             ? std::string("user rejected the tap")
                             : "user rejected the tap: " + decision.guidance;
@@ -472,8 +495,9 @@ std::string tap(int x, int y, int w, int h) {
       throw js::bind_error(msg);
     }
   }
-  // The tap lands at the box centre: the model marks the element, this picks the
-  // point. It used to send the centre as a separate tap() argument every time.
+  // The tap lands at the box centre: the model marks the element, this picks
+  // the point. It used to send the centre as a separate tap() argument every
+  // time.
   const int cx = x + w / 2;
   const int cy = y + h / 2;
   if (!require_adb().tap(cx, cy)) {
@@ -483,16 +507,19 @@ std::string tap(int x, int y, int w, int h) {
 }
 CPP_REFLECT_TOOL(tap)
 
-[[= js::doc{.text = js::str("Runs a .ccat script on the device and returns what happened. "
-                            "While human approval is on, the script is shown to the user "
-                            "and nothing runs unless they approve it. Call ccat_help "
-                            "for the language. The sandbox starts empty, so a statement that "
-                            "needs a template PNG fails until save_template puts one in the "
-                            "bundle (an `if` on a missing PNG is just false); tap_at and "
-                            "swipe_at need no template, and run(\"<name>/main.ccat\") runs a "
-                            "saved bundle.")}]]
-[[= js::param_docs(js::str("The full .ccat script source to run."))]]
-std::string run_script(std::string source) {
+[[= js::doc{
+    .text = js::str(
+        "Runs a .ccat script on the device and returns what happened. "
+        "While human approval is on, the script is shown to the user "
+        "and nothing runs unless they approve it. Call ccat_help "
+        "for the language. The sandbox starts empty, so a statement that "
+        "needs a template PNG fails until save_template puts one in the "
+        "bundle (an `if` on a missing PNG is just false); tap_at and "
+        "swipe_at need no template, and run(\"<name>/main.ccat\") runs a "
+        "saved bundle.")}]]
+    [[= js::param_docs(
+        js::str("The full .ccat script source to run."))]] std::string
+        run_script(std::string source) {
   // Parse first: a syntax error answers the model directly instead of asking a
   // human to read a script that cannot run.
   const std::unique_ptr<ccat_lang::Program> prog = parse_or_throw(source);
@@ -507,7 +534,8 @@ std::string run_script(std::string source) {
     if (!decision.approved) {
       throw js::bind_error(decision.guidance.empty()
                                ? "user rejected running the script"
-                               : "user rejected running the script: " + decision.guidance);
+                               : "user rejected running the script: " +
+                                     decision.guidance);
     }
   }
   // Checked before adb so a refusal above is the reason reported, and so that
@@ -517,24 +545,32 @@ std::string run_script(std::string source) {
     throw js::bind_error("no shell config for the script tools");
   }
   script_run_guard guard;
-  const auto res = run_ccat_program(&adb, g_ctx.cfg, g_ctx.script_dir, {}, *prog,
-                                    [] { return g_script_stop.load(); });
+  const auto res = run_ccat_program(&adb, g_ctx.cfg, g_ctx.script_dir, {},
+                                    *prog, [] { return g_script_stop.load(); });
   if (!res.ok) {
     throw js::bind_error(res.message.empty() ? std::string("script failed")
                                              : res.message);
   }
-  return "script ran ok (" + std::to_string(prog->stmts.size()) + " statements)";
+  return "script ran ok (" + std::to_string(prog->stmts.size()) +
+         " statements)";
 }
 CPP_REFLECT_TOOL(run_script)
 
-[[= js::doc{.text = js::str("Saves a .ccat script as a reusable bundle under the LLM script root: writes "
-                            "main.ccat next to the template PNGs that script uses. While human approval is "
-                            "on, the name and source are shown to the user and nothing is written unless "
-                            "they approve it. It does not run anything; run it from a script with "
-                            "run(\"<name>/main.ccat\").")}]]
-[[= js::param_docs(js::str("Bundle name: a leaf name describing what the script does, e.g. \"claim_reward\"."),
-                   js::str("The full .ccat script source to save."))]]
-std::string save_script(std::string name, std::string source) {
+[[= js::doc{
+    .text = js::str(
+        "Saves a .ccat script as a reusable bundle under the LLM script root: "
+        "writes "
+        "main.ccat next to the template PNGs that script uses. While human "
+        "approval is "
+        "on, the name and source are shown to the user and nothing is written "
+        "unless "
+        "they approve it. It does not run anything; run it from a script with "
+        "run(\"<name>/main.ccat\").")}]]
+    [[= js::param_docs(
+        js::str("Bundle name: a leaf name describing what the script does, "
+                "e.g. \"claim_reward\"."),
+        js::str("The full .ccat script source to save."))]] std::string
+        save_script(std::string name, std::string source) {
   const std::unique_ptr<ccat_lang::Program> prog =
       check_new_bundle(name, source);
   if (g_ctx.require_approval) {
@@ -545,15 +581,18 @@ std::string save_script(std::string name, std::string source) {
     req.tool = "save_script";
     // The name goes in the summary: it is what the human has to judge, and the
     // sandbox root is already known to whoever is looking at the bubble.
-    req.summary = "Save script bundle \"" + name + "\" as main.ccat:\n\n" + source;
+    req.summary =
+        "Save script bundle \"" + name + "\" as main.ccat:\n\n" + source;
     const llm::approval_decision decision = g_ctx.request_approval(req);
     if (!decision.approved) {
       throw js::bind_error(decision.guidance.empty()
                                ? "user rejected saving the script"
-                               : "user rejected saving the script: " + decision.guidance);
+                               : "user rejected saving the script: " +
+                                     decision.guidance);
     }
   }
-  const std::filesystem::path path = ccat_lang::bundle_main(g_ctx.script_dir, name);
+  const std::filesystem::path path =
+      ccat_lang::bundle_main(g_ctx.script_dir, name);
   std::error_code ec;
   std::filesystem::create_directories(path.parent_path(), ec);
   std::ofstream out(path, std::ios::binary | std::ios::trunc);
@@ -561,36 +600,49 @@ std::string save_script(std::string name, std::string source) {
   out.close();
   if (!out) {
     throw js::bind_error("could not write " + name + "/main.ccat (does " +
-                         g_ctx.script_dir.string() + " exist and allow writes?)");
+                         g_ctx.script_dir.string() +
+                         " exist and allow writes?)");
   }
   return "saved \"" + name + "/main.ccat\" (" +
          std::to_string(prog->stmts.size()) + " statements, " +
          std::to_string(source.size()) +
-         " chars); put its templates in the same bundle with save_template, and "
-         "run it from a script with run(\"" + name + "/main.ccat\")";
+         " chars); put its templates in the same bundle with save_template, "
+         "and "
+         "run it from a script with run(\"" +
+         name + "/main.ccat\")";
 }
 CPP_REFLECT_TOOL(save_script)
 
-[[= js::doc{.text = js::str("Cuts a template PNG, out of one of the screenshots you have taken, into "
-                            "an existing script bundle, so that bundle's script can use it with "
-                            "tap(\"name.png\"). While human approval is on, the box is shown to the user and "
-                            "nothing is cut unless they approve it. It cuts from the picture you "
-                            "looked at, so it can only match as well as that picture does: screenshot right "
-                            "before you cut, and crop tight around the part that stays put.")}]]
-[[= js::param_docs(js::str("Bundle to put the template in; it must already exist (see save_script)."),
-                   js::str("Template name, a leaf name; \".png\" is appended when missing."),
-                   js::str("Which screenshot to cut from: the number its caption showed. Omit for the most "
-                           "recent one."),
-                   js::str("Left edge X of the crop box, in that screenshot's pixels."),
-                   js::str("Top edge Y of the crop box, in that screenshot's pixels."),
-                   js::str("Width of the crop in pixels."),
-                   js::str("Height of the crop in pixels."))]]
-std::string save_template(std::string bundle, std::string name,
-                          std::optional<int> shot, int x, int y, int w, int h) {
+[[= js::doc{
+    .text = js::str(
+        "Cuts a template PNG, out of one of the screenshots you have taken, "
+        "into "
+        "an existing script bundle, so that bundle's script can use it with "
+        "tap(\"name.png\"). While human approval is on, the box is shown to "
+        "the user and "
+        "nothing is cut unless they approve it. It cuts from the picture you "
+        "looked at, so it can only match as well as that picture does: "
+        "screenshot right "
+        "before you cut, and crop tight around the part that stays put.")}]]
+    [[= js::param_docs(
+        js::str("Bundle to put the template in; it must already exist (see "
+                "save_script)."),
+        js::str(
+            "Template name, a leaf name; \".png\" is appended when missing."),
+        js::str("Which screenshot to cut from: the number its caption showed. "
+                "Omit for the most "
+                "recent one."),
+        js::str("Left edge X of the crop box, in that screenshot's pixels."),
+        js::str("Top edge Y of the crop box, in that screenshot's pixels."),
+        js::str("Width of the crop in pixels."),
+        js::str("Height of the crop in pixels."))]] std::string
+        save_template(std::string bundle, std::string name,
+                      std::optional<int> shot, int x, int y, int w, int h) {
   const rect box{x, y, w, h};
   std::string file;
   std::string frame_png;
-  const cv::Mat img = check_template_target(bundle, name, box, shot, &file, &frame_png);
+  const cv::Mat img =
+      check_template_target(bundle, name, box, shot, &file, &frame_png);
   if (g_ctx.require_approval) {
     if (!g_ctx.request_approval) {
       throw js::bind_error("no human available to approve saving the template");
@@ -602,8 +654,8 @@ std::string save_template(std::string bundle, std::string name,
                   std::to_string(y) + ") " + std::to_string(w) + "x" +
                   std::to_string(h);
     req.highlight.push_back(box);
-    // The frame the model named, not the current screen: that is what is being cut,
-    // and seeing it is how the human notices a box aimed at the wrong one.
+    // The frame the model named, not the current screen: that is what is being
+    // cut, and seeing it is how the human notices a box aimed at the wrong one.
     req.screen_png = frame_png;
     req.box_editable = true;
     const llm::approval_decision decision = g_ctx.request_approval(req);
@@ -627,19 +679,22 @@ std::string save_template(std::string bundle, std::string name,
       throw js::bind_error("could not write " + bundle + "/" + file);
     }
   } catch (const cv::Exception &e) {
-    throw js::bind_error("could not write " + bundle + "/" + file + ": " + e.what());
+    throw js::bind_error("could not write " + bundle + "/" + file + ": " +
+                         e.what());
   }
-  return std::string(existed ? "overwrote" : "saved") + " template \"" + bundle +
-         "/" + file + "\" (" + std::to_string(w) + "x" + std::to_string(h) +
-         " at " + std::to_string(x) + "," + std::to_string(y) + "); use it as tap(\"" +
-         file + "\") inside that bundle's script";
+  return std::string(existed ? "overwrote" : "saved") + " template \"" +
+         bundle + "/" + file + "\" (" + std::to_string(w) + "x" +
+         std::to_string(h) + " at " + std::to_string(x) + "," +
+         std::to_string(y) + "); use it as tap(\"" + file +
+         "\") inside that bundle's script";
 }
 CPP_REFLECT_TOOL(save_template)
 
-[[= js::quiet{.text = js::str("Read CCAT.md")}]]
-[[= js::doc{.text = js::str("Returns the full reference for the .ccat scripting language. "
-                            "Call it before writing a script with run_script.")}]]
-std::string ccat_help() {
+[[= js::quiet{.text = js::str("Read CCAT.md")}]][[= js::doc{
+    .text = js::str(
+        "Returns the full reference for the .ccat scripting language. "
+        "Call it before writing a script with run_script.")}]] std::string
+    ccat_help() {
   if (g_ctx.cfg == nullptr) {
     throw js::bind_error("no shell config; cannot locate CCAT.md");
   }
@@ -659,45 +714,54 @@ std::string ccat_help() {
 }
 CPP_REFLECT_TOOL(ccat_help)
 
-[[= js::doc{.text = js::str("Lists the saved .ccat skill bundles, one \"name -- description\" "
-                            "line each. Call this before writing a new skill: if a bundle "
-                            "already does the job, use it with run(\"<name>/main.ccat\") "
-                            "instead of writing it again, and call read_script to see how it "
-                            "works or update_script to change it. The description is the "
-                            "first // comment line of that bundle's main.ccat.")}]]
-std::string list_scripts() {
-  const std::vector<std::string> names = ccat_lang::bundle_names(g_ctx.script_dir);
+[[= js::doc{
+    .text = js::str(
+        "Lists the saved .ccat skill bundles, one \"name -- description\" "
+        "line each. Call this before writing a new skill: if a bundle "
+        "already does the job, use it with run(\"<name>/main.ccat\") "
+        "instead of writing it again, and call read_script to see how it "
+        "works or update_script to change it. The description is the "
+        "first // comment line of that bundle's main.ccat.")}]] std::string
+    list_scripts() {
+  const std::vector<std::string> names =
+      ccat_lang::bundle_names(g_ctx.script_dir);
   if (names.empty()) {
     return "none yet";
   }
   std::string out;
   for (const std::string &name : names) {
-    const std::string description = ccat_lang::bundle_description(g_ctx.script_dir, name);
+    const std::string description =
+        ccat_lang::bundle_description(g_ctx.script_dir, name);
     if (!out.empty()) {
       out += "\n";
     }
-    out += name + " -- " +
-           (description.empty() ? std::string("(no description)") : description);
+    out +=
+        name + " -- " +
+        (description.empty() ? std::string("(no description)") : description);
   }
   return out;
 }
 CPP_REFLECT_TOOL(list_scripts)
 
-[[= js::quiet{.text = js::str("Read script {name}")}]]
-[[= js::doc{.text = js::str("Returns a saved bundle's main.ccat exactly as written, prefixed by a "
-                            "header naming the bundle and listing its template PNGs. The "
-                            "source is what you pass back as update_script's source, so edit "
-                            "it from what this returns rather than from memory.")}]]
-[[= js::param_docs(js::str("Bundle name, as list_scripts showed it."))]]
-std::string read_script(std::string name) {
+[[= js::quiet{.text = js::str("Read script {name}")}]][[= js::doc{
+    .text = js::str(
+        "Returns a saved bundle's main.ccat exactly as written, prefixed by a "
+        "header naming the bundle and listing its template PNGs. The "
+        "source is what you pass back as update_script's source, so edit "
+        "it from what this returns rather than from memory.")}]][
+    [= js::param_docs(
+        js::str("Bundle name, as list_scripts showed it."))]] std::string
+    read_script(std::string name) {
   if (!ccat_lang::safe_leaf_name(name)) {
     throw js::bind_error("name \"" + name + "\" is not a plain file name");
   }
-  const std::filesystem::path path = ccat_lang::bundle_main(g_ctx.script_dir, name);
+  const std::filesystem::path path =
+      ccat_lang::bundle_main(g_ctx.script_dir, name);
   std::error_code ec;
   if (!std::filesystem::is_regular_file(path, ec)) {
-    throw js::bind_error("unknown script bundle \"" + name +
-                         "\"; save_script first (existing: " + existing_bundles() + ")");
+    throw js::bind_error(
+        "unknown script bundle \"" + name +
+        "\"; save_script first (existing: " + existing_bundles() + ")");
   }
   std::ifstream in(path, std::ios::binary);
   if (!in) {
@@ -705,58 +769,70 @@ std::string read_script(std::string name) {
   }
   const std::string source{std::istreambuf_iterator<char>(in),
                            std::istreambuf_iterator<char>()};
-  const std::string description = ccat_lang::bundle_description(g_ctx.script_dir, name);
+  const std::string description =
+      ccat_lang::bundle_description(g_ctx.script_dir, name);
   return "bundle \"" + name + "\": " +
          (description.empty() ? std::string("(no description)") : description) +
-         "\ntemplates: " + joined(ccat_lang::bundle_templates(g_ctx.script_dir, name), "none") + "\n\n" + source;
+         "\ntemplates: " +
+         joined(ccat_lang::bundle_templates(g_ctx.script_dir, name), "none") +
+         "\n\n" + source;
 }
 CPP_REFLECT_TOOL(read_script)
 
 /// A box to cut a template from, in the pixels of frame `shot`. Members are
 /// reflected, so these names are the JSON keys the model writes.
 struct box {
-  [[= js::doc{.text = js::str("Which screenshot to cut from: the number its caption showed.")}]]
-  int shot = 0;
-  [[= js::doc{.text = js::str("Left edge X, in that screenshot's pixels.")}]]
-  int x = 0;
-  [[= js::doc{.text = js::str("Top edge Y, in that screenshot's pixels.")}]]
-  int y = 0;
-  [[= js::doc{.text = js::str("Width of the crop in pixels.")}]]
-  int w = 0;
-  [[= js::doc{.text = js::str("Height of the crop in pixels.")}]]
-  int h = 0;
+  [[= js::doc{
+      .text = js::str(
+          "Which screenshot to cut from: the number its caption showed.")}]] int
+      shot = 0;
+  [[= js::doc{
+      .text = js::str("Left edge X, in that screenshot's pixels.")}]] int x = 0;
+  [[= js::doc{
+      .text = js::str("Top edge Y, in that screenshot's pixels.")}]] int y = 0;
+  [[= js::doc{.text = js::str("Width of the crop in pixels.")}]] int w = 0;
+  [[= js::doc{.text = js::str("Height of the crop in pixels.")}]] int h = 0;
 };
 
-/// One entry of the template set an update declares: a name, and either a box to
-/// cut that name from or nothing to keep the PNG already in the bundle. The
+/// One entry of the template set an update declares: a name, and either a box
+/// to cut that name from or nothing to keep the PNG already in the bundle. The
 /// optional is what makes "keep" expressible -- a single update cannot re-cut
 /// every template, since their screens are not all on one screenshot.
 struct template_cut {
-  [[= js::doc{.text = js::str("Template name, a leaf name; \".png\" is appended when missing.")}]]
-  std::string name;
-  [[= js::doc{.text = js::str("Omit to keep the template already in the bundle; give it to re-cut "
-                              "that template from the named screenshot.")}]]
-  std::optional<box> cut;
+  [[= js::doc{.text = js::str("Template name, a leaf name; \".png\" is "
+                              "appended when missing.")}]] std::string name;
+  [[= js::doc{
+      .text = js::str(
+          "Omit to keep the template already in the bundle; give it to re-cut "
+          "that template from the named screenshot.")}]] std::optional<box>
+      cut;
 };
 
-[[= js::doc{.text = js::str("Replaces an existing bundle's main.ccat and its whole template set in "
-                            "one step, under one approval. Declare every template the updated "
-                            "script should have afterwards: an entry with a cut is re-cut from that "
-                            "screenshot, an entry with just a name keeps the PNG already there, and "
-                            "PNGs you do not declare are deleted. Prefer this over saving a new "
-                            "name when changing a skill you already have; save_script is for a new "
-                            "one, and save_template for adjusting a single template while you work "
-                            "out its box.")}]]
-[[= js::param_docs(js::str("Bundle to update; it must already exist (see list_scripts)."),
-                   js::str("The new main.ccat source, replacing the old one."),
-                   js::str("Every template the bundle should have afterwards."))]]
-std::string update_script(std::string name, std::string source,
-                          std::vector<template_cut> templates) {
+[[= js::doc{
+    .text = js::str(
+        "Replaces an existing bundle's main.ccat and its whole template set in "
+        "one step, under one approval. Declare every template the updated "
+        "script should have afterwards: an entry with a cut is re-cut from "
+        "that "
+        "screenshot, an entry with just a name keeps the PNG already there, "
+        "and "
+        "PNGs you do not declare are deleted. Prefer this over saving a new "
+        "name when changing a skill you already have; save_script is for a new "
+        "one, and save_template for adjusting a single template while you work "
+        "out its box.")}]]
+    [[= js::param_docs(
+        js::str("Bundle to update; it must already exist (see list_scripts)."),
+        js::str("The new main.ccat source, replacing the old one."),
+        js::str(
+            "Every template the bundle should have afterwards."))]] std::string
+        update_script(std::string name, std::string source,
+                      std::vector<template_cut> templates) {
   if (!ccat_lang::safe_leaf_name(name)) {
     throw js::bind_error("name \"" + name + "\" is not a plain file name");
   }
   std::error_code ec;
-  if (!std::filesystem::is_regular_file(ccat_lang::bundle_main(g_ctx.script_dir, name), ec)) {
+  if (!std::filesystem::is_regular_file(
+          ccat_lang::bundle_main(g_ctx.script_dir, name), ec)) {
     throw js::bind_error("unknown script bundle \"" + name +
                          "\"; save_script creates a new one (existing: " +
                          existing_bundles() + ")");
@@ -765,9 +841,9 @@ std::string update_script(std::string name, std::string source,
   // a human to read a script that cannot run.
   const std::unique_ptr<ccat_lang::Program> prog = parse_or_throw(source);
 
-  // The declared names, checked before anything is resolved against the disk, so
-  // a duplicate is reported as a duplicate and not as whatever the first entry
-  // happened to be missing.
+  // The declared names, checked before anything is resolved against the disk,
+  // so a duplicate is reported as a duplicate and not as whatever the first
+  // entry happened to be missing.
   std::vector<std::string> declared;
   for (const template_cut &entry : templates) {
     const std::string file = with_png_ext(entry.name);
@@ -801,10 +877,12 @@ std::string update_script(std::string name, std::string source,
     missing.push_back(file);
   }
   if (!missing.empty()) {
-    throw js::bind_error("the new source needs template(s) this update does not "
-                         "declare: " + joined(missing, "") +
-                         "; add them to templates (with a cut to cut them, or to "
-                         "keep the PNG already in the bundle)");
+    throw js::bind_error(
+        "the new source needs template(s) this update does not "
+        "declare: " +
+        joined(missing, "") +
+        "; add them to templates (with a cut to cut them, or to "
+        "keep the PNG already in the bundle)");
   }
 
   // Now the disk work: cut what is to be cut, and confirm what is to be kept is
@@ -815,10 +893,12 @@ std::string update_script(std::string name, std::string source,
   for (const template_cut &entry : templates) {
     const std::string file = with_png_ext(entry.name);
     if (!entry.cut.has_value()) {
-      if (!std::filesystem::is_regular_file(g_ctx.script_dir / name / file, ec)) {
-        throw js::bind_error("template \"" + file +
-                             "\" has no cut and is not in the bundle, so there is "
-                             "nothing to keep");
+      if (!std::filesystem::is_regular_file(g_ctx.script_dir / name / file,
+                                            ec)) {
+        throw js::bind_error(
+            "template \"" + file +
+            "\" has no cut and is not in the bundle, so there is "
+            "nothing to keep");
       }
       kept.push_back(file);
       continue;
@@ -827,8 +907,8 @@ std::string update_script(std::string name, std::string source,
     pending_cut cut;
     std::string checked;
     const rect box_in{b.x, b.y, b.w, b.h};
-    const cv::Mat frame =
-        check_template_target(name, entry.name, box_in, b.shot, &checked, &cut.frame_png);
+    const cv::Mat frame = check_template_target(
+        name, entry.name, box_in, b.shot, &checked, &cut.frame_png);
     cut.file = checked;
     cut.shot = b.shot;
     cut.box = box_in;
@@ -836,10 +916,11 @@ std::string update_script(std::string name, std::string source,
     cuts.push_back(std::move(cut));
   }
 
-  // Everything left in the bundle that is not declared goes, which is what makes
-  // the declared set the bundle's template set.
+  // Everything left in the bundle that is not declared goes, which is what
+  // makes the declared set the bundle's template set.
   std::vector<std::string> to_delete;
-  for (const std::string &file : ccat_lang::bundle_templates(g_ctx.script_dir, name)) {
+  for (const std::string &file :
+       ccat_lang::bundle_templates(g_ctx.script_dir, name)) {
     if (std::find(declared.begin(), declared.end(), file) == declared.end()) {
       to_delete.push_back(file);
     }
@@ -851,14 +932,15 @@ std::string update_script(std::string name, std::string source,
     }
     llm::approval_request req;
     req.tool = "update_script";
-    req.summary = "Update script \"" + name + "\" (replace main.ccat and its "
+    req.summary = "Update script \"" + name +
+                  "\" (replace main.ccat and its "
                   "templates)\n\n";
     for (const pending_cut &cut : cuts) {
-      req.summary += "cut \"" + cut.file + "\" from screenshot #" +
-                     std::to_string(cut.shot) + " at (" +
-                     std::to_string(cut.box.x) + "," + std::to_string(cut.box.y) +
-                     ") " + std::to_string(cut.box.w) + "x" +
-                     std::to_string(cut.box.h) + "\n";
+      req.summary +=
+          "cut \"" + cut.file + "\" from screenshot #" +
+          std::to_string(cut.shot) + " at (" + std::to_string(cut.box.x) + "," +
+          std::to_string(cut.box.y) + ") " + std::to_string(cut.box.w) + "x" +
+          std::to_string(cut.box.h) + "\n";
     }
     req.summary += "keep: " + joined(kept, "none") + "\n";
     req.summary += "delete: " + joined(to_delete, "none") + "\n\n";
@@ -878,14 +960,16 @@ std::string update_script(std::string name, std::string source,
     if (!decision.approved) {
       throw js::bind_error(decision.guidance.empty()
                                ? "user rejected updating the script"
-                               : "user rejected updating the script: " + decision.guidance);
+                               : "user rejected updating the script: " +
+                                     decision.guidance);
     }
   }
 
-  // Approved: the script first, then the templates it names, then the leftovers.
-  // Nothing above this point touched the disk, so a refusal leaves it byte-for-byte
-  // what it was.
-  const std::filesystem::path main_path = ccat_lang::bundle_main(g_ctx.script_dir, name);
+  // Approved: the script first, then the templates it names, then the
+  // leftovers. Nothing above this point touched the disk, so a refusal leaves
+  // it byte-for-byte what it was.
+  const std::filesystem::path main_path =
+      ccat_lang::bundle_main(g_ctx.script_dir, name);
   {
     std::ofstream out(main_path, std::ios::binary | std::ios::trunc);
     out.write(source.data(), static_cast<std::streamsize>(source.size()));
@@ -901,36 +985,45 @@ std::string update_script(std::string name, std::string source,
         throw js::bind_error("could not write " + name + "/" + cut.file);
       }
     } catch (const cv::Exception &e) {
-      throw js::bind_error("could not write " + name + "/" + cut.file + ": " + e.what());
+      throw js::bind_error("could not write " + name + "/" + cut.file + ": " +
+                           e.what());
     }
   }
   for (const std::string &file : to_delete) {
     std::filesystem::remove(g_ctx.script_dir / name / file, ec);
     if (ec) {
-      throw js::bind_error("could not delete " + name + "/" + file + ": " + ec.message());
+      throw js::bind_error("could not delete " + name + "/" + file + ": " +
+                           ec.message());
     }
   }
   return "updated \"" + name + "/main.ccat\" (" +
          std::to_string(prog->stmts.size()) + " statements, " +
-         std::to_string(source.size()) + " chars); templates: " +
-         std::to_string(cuts.size()) + " cut, " + std::to_string(kept.size()) +
-         " kept, " + std::to_string(to_delete.size()) + " deleted; run it with run(\"" +
+         std::to_string(source.size()) +
+         " chars); templates: " + std::to_string(cuts.size()) + " cut, " +
+         std::to_string(kept.size()) + " kept, " +
+         std::to_string(to_delete.size()) + " deleted; run it with run(\"" +
          name + "/main.ccat\")";
 }
 CPP_REFLECT_TOOL(update_script)
 
-[[= js::doc{.text = js::str("Deletes a saved script bundle: its main.ccat and every template in the "
-                            "folder. It cannot be undone. It is refused while another script reaches it "
-                            "with run(...) -- update or delete that script first (list_scripts shows what "
-                            "exists). While human approval is on, the deletion is shown to the user and "
+[[= js::doc{.text = js::str("Deletes a saved script bundle: its main.ccat and "
+                            "every template in the "
+                            "folder. It cannot be undone. It is refused while "
+                            "another script reaches it "
+                            "with run(...) -- update or delete that script "
+                            "first (list_scripts shows what "
+                            "exists). While human approval is on, the deletion "
+                            "is shown to the user and "
                             "nothing is removed unless they approve it.")}]]
-[[= js::param_docs(js::str("Bundle to delete, as list_scripts showed it."))]]
-std::string delete_script(std::string name) {
+    [[= js::param_docs(
+        js::str("Bundle to delete, as list_scripts showed it."))]] std::string
+        delete_script(std::string name) {
   if (!ccat_lang::safe_leaf_name(name)) {
     throw js::bind_error("name \"" + name + "\" is not a plain file name");
   }
-  // Guard first: a deletion that cannot go through is answered here, rather than
-  // by showing a human an approval for something that was never going to happen.
+  // Guard first: a deletion that cannot go through is answered here, rather
+  // than by showing a human an approval for something that was never going to
+  // happen.
   std::string err;
   const ccat_lang::delete_status checked =
       ccat_lang::check_bundle_deletable(g_ctx.script_dir, name, &err);
@@ -962,25 +1055,36 @@ std::string delete_script(std::string name) {
 }
 CPP_REFLECT_TOOL(delete_script)
 
-[[= js::doc{.text = js::str("Renames a saved script bundle and rewrites every script that runs it, so "
-                            "nothing is left pointing at the old name -- do not edit those scripts "
-                            "yourself afterwards, it is already done here. Refused when a script reaches "
-                            "it through a `defs` name instead of a literal path (there is no text to "
-                            "rewrite; update that script first), and when the new name is taken or is "
-                            "not a plain file name. While human approval is on, the rename and the "
-                            "scripts it will update are shown to the user and nothing happens unless "
-                            "they approve it.")}]]
-[[= js::param_docs(js::str("Bundle to rename, as list_scripts showed it."),
-                   js::str("The new name: a plain file name, not a path."))]]
-std::string rename_script(std::string name, std::string new_name) {
-  if (!ccat_lang::safe_leaf_name(name) || !ccat_lang::safe_leaf_name(new_name)) {
+[[= js::doc{
+    .text = js::str(
+        "Renames a saved script bundle and rewrites every script that runs it, "
+        "so "
+        "nothing is left pointing at the old name -- do not edit those scripts "
+        "yourself afterwards, it is already done here. Refused when a script "
+        "reaches "
+        "it through a `defs` name instead of a literal path (there is no text "
+        "to "
+        "rewrite; update that script first), and when the new name is taken or "
+        "is "
+        "not a plain file name. While human approval is on, the rename and the "
+        "scripts it will update are shown to the user and nothing happens "
+        "unless "
+        "they approve it.")}]]
+    [[= js::param_docs(
+        js::str("Bundle to rename, as list_scripts showed it."),
+        js::str("The new name: a plain file name, not a path."))]] std::string
+        rename_script(std::string name, std::string new_name) {
+  if (!ccat_lang::safe_leaf_name(name) ||
+      !ccat_lang::safe_leaf_name(new_name)) {
     throw js::bind_error("the name must be a plain file name, not a path");
   }
-  // Guard first: a rename that cannot go through is answered here, rather than by
-  // showing a human an approval for something that was never going to happen.
+  // Guard first: a rename that cannot go through is answered here, rather than
+  // by showing a human an approval for something that was never going to
+  // happen.
   std::vector<std::string> referrers;
   std::string err;
-  if (ccat_lang::check_bundle_renamable(g_ctx.script_dir, name, new_name, &referrers,
+  if (ccat_lang::check_bundle_renamable(g_ctx.script_dir, name, new_name,
+                                        &referrers,
                                         &err) != ccat_lang::rename_status::ok) {
     throw js::bind_error(err);
   }
@@ -991,10 +1095,10 @@ std::string rename_script(std::string name, std::string new_name) {
     llm::approval_request req;
     req.tool = "rename_script";
     // The blast radius is part of what the human is approving.
-    req.summary = "rename script bundle \"" + name + "\" to \"" + new_name + "\"" +
-                  (referrers.empty()
-                       ? " (nothing runs it)"
-                       : " (also updates " + join_names(referrers) + ")");
+    req.summary =
+        "rename script bundle \"" + name + "\" to \"" + new_name + "\"" +
+        (referrers.empty() ? " (nothing runs it)"
+                           : " (also updates " + join_names(referrers) + ")");
     const llm::approval_decision decision = g_ctx.request_approval(req);
     if (!decision.approved) {
       throw js::bind_error(decision.guidance.empty()
@@ -1004,8 +1108,8 @@ std::string rename_script(std::string name, std::string new_name) {
     }
   }
   std::vector<std::string> rewritten;
-  if (ccat_lang::rename_bundle(g_ctx.script_dir, name, new_name, &rewritten, &err) !=
-      ccat_lang::rename_status::ok) {
+  if (ccat_lang::rename_bundle(g_ctx.script_dir, name, new_name, &rewritten,
+                               &err) != ccat_lang::rename_status::ok) {
     throw js::bind_error(err);
   }
   return "renamed \"" + name + "\" to \"" + new_name + "\"" +
@@ -1013,14 +1117,17 @@ std::string rename_script(std::string name, std::string new_name) {
 }
 CPP_REFLECT_TOOL(rename_script)
 
-// ponytail: deliberately not registered -- swipe is unverified on a real device.
-// Add `CPP_REFLECT_TOOL(swipe)` back once it has been tried there; until then the
-// model never sees it and `dispatch` answers "unknown tool".
-[[= js::doc{.text = js::str("Swipes between two points, in screenshot pixels.")}]]
-[[= js::param_docs(js::str("Start X coordinate."), js::str("Start Y coordinate."),
-                   js::str("End X coordinate."), js::str("End Y coordinate."),
-                   js::str("Duration in milliseconds; omit for the default."))]]
-std::string swipe(int x1, int y1, int x2, int y2, std::optional<int> duration_ms) {
+// ponytail: deliberately not registered -- swipe is unverified on a real
+// device. Add `CPP_REFLECT_TOOL(swipe)` back once it has been tried there;
+// until then the model never sees it and `dispatch` answers "unknown tool".
+[[= js::doc{
+    .text = js::str("Swipes between two points, in screenshot pixels.")}]]
+    [[= js::param_docs(
+        js::str("Start X coordinate."), js::str("Start Y coordinate."),
+        js::str("End X coordinate."), js::str("End Y coordinate."),
+        js::str(
+            "Duration in milliseconds; omit for the default."))]] std::string
+        swipe(int x1, int y1, int x2, int y2, std::optional<int> duration_ms) {
   const int ms = duration_ms.value_or(k_default_swipe_ms);
   if (ms < 1 || ms > 10000) {
     throw js::bind_error("duration_ms out of range (1..10000)");
@@ -1033,15 +1140,17 @@ std::string swipe(int x1, int y1, int x2, int y2, std::optional<int> duration_ms
     throw js::bind_error("adb swipe failed");
   }
   return "swiped " + std::to_string(x1) + "," + std::to_string(y1) + " -> " +
-         std::to_string(x2) + "," + std::to_string(y2) + " over " + std::to_string(ms) + "ms";
+         std::to_string(x2) + "," + std::to_string(y2) + " over " +
+         std::to_string(ms) + "ms";
 }
 
 } // namespace tools
 
 void set_context(const tool_context &_ctx) {
   g_ctx = _ctx;
-  // Only the picture a call arrived with is the turn's; the screenshot in it and
-  // the approvals are session-scoped (see spec §3), so they are not cleared here.
+  // Only the picture a call arrived with is the turn's; the screenshot in it
+  // and the approvals are session-scoped (see spec §3), so they are not cleared
+  // here.
 }
 
 void current_screen(screen_state *_out) { *_out = g_ctx.screen; }
@@ -1059,11 +1168,12 @@ void forget_frames() {
 
 /// Fills a quiet note's `{param}` names from the call's arguments. Which names
 /// are legal was settled when the tool registered (see `js::quiet`), and the
-/// binder has since either bound the argument or failed the call, so a name that
-/// never arrives here is one the schema rejected. A value that is not text or a
-/// number is left as written: the log is one line, and a whole array in it reads
-/// worse than the placeholder does.
-std::string fill_quiet_note(std::string_view _note, const nlohmann::json &_args) {
+/// binder has since either bound the argument or failed the call, so a name
+/// that never arrives here is one the schema rejected. A value that is not text
+/// or a number is left as written: the log is one line, and a whole array in it
+/// reads worse than the placeholder does.
+std::string fill_quiet_note(std::string_view _note,
+                            const nlohmann::json &_args) {
   std::string out;
   std::size_t at = 0;
   while (at < _note.size()) {
@@ -1076,8 +1186,10 @@ std::string fill_quiet_note(std::string_view _note, const nlohmann::json &_args)
       break; // unclosed: not a placeholder, so print the rest as written
     }
     out.append(_note.substr(at, open - at));
-    const auto it = _args.find(std::string(_note.substr(open + 1, close - open - 1)));
-    if (it != _args.end() && (it->is_string() || it->is_number() || it->is_boolean())) {
+    const auto it =
+        _args.find(std::string(_note.substr(open + 1, close - open - 1)));
+    if (it != _args.end() &&
+        (it->is_string() || it->is_number() || it->is_boolean())) {
       out += it->is_string() ? it->get<std::string>() : it->dump();
     } else {
       out.append(_note.substr(open, close - open + 1));
