@@ -9,8 +9,8 @@
 #include "app/shell_state.h"
 
 #include "app/ui/activity_status.h"
+#include "app/ui/fonts.h"
 #include "app/ui/gl_texture.h"
-#include "app/ui/icons.h"
 #include "app/ui/prompt_input.h"
 #include "app/ui/script_editor_panel.h"
 
@@ -42,6 +42,11 @@
 #include <vector>
 
 namespace {
+
+/// The four UI faces come from one place (`app/ui/fonts.cpp`); the aliases keep
+/// the call sites below to one line.
+using campcat::app::font_role;
+using campcat::app::fonts_get;
 
 /// Oldest turns are dropped past this.
 constexpr int k_turn_cap = 30;
@@ -84,8 +89,7 @@ struct handoff {
 std::vector<llm_turn> g_turns;
 std::string g_input;
 bool g_pin_bottom = true;
-bool g_thinking = false;  ///< sidecar reports the model is reasoning
-ImFont *g_bold = nullptr; ///< set by llm_panel_set_bold_font
+bool g_thinking = false; ///< sidecar reports the model is reasoning
 
 /// True while an automation cycle or the scheduler owns adb. Tools must refuse
 /// then rather than contend for the device.
@@ -97,11 +101,11 @@ void md_format(const ImGui::MarkdownFormatInfo &_info, bool _start) {
     if (_info.type == ImGui::MarkdownFormatType::EMPHASIS) {
         // The default greys out `*italic*` (TextDisabled), which inside a
         // bubble reads as disabled text; level 1 therefore stays untouched.
-        if (_info.level <= 1 || g_bold == nullptr) {
+        if (_info.level <= 1) {
             return;
         }
         if (_start) {
-            ImGui::PushFont(g_bold);
+            ImGui::PushFont(fonts_get(font_role::bold));
         } else {
             ImGui::PopFont();
         }
@@ -110,13 +114,18 @@ void md_format(const ImGui::MarkdownFormatInfo &_info, bool _start) {
     ImGui::defaultMarkdownFormatCallback(_info, _start);
 }
 
-/// Built once; the fonts are filled in by llm_panel_set_bold_font.
+/// Built once on the first reply, which is a frame, so `fonts_init` has run.
 ImGui::MarkdownConfig &md_config() {
     static ImGui::MarkdownConfig cfg = [] {
         ImGui::MarkdownConfig c;
         c.linkCallback = nullptr; // a reply must not open a browser
         c.imageCallback = nullptr;
         c.formatCallback = md_format;
+        // `**strong**` is drawn with the last heading slot rather than with a
+        // bold font of its own, so that slot is what holds the bold face.
+        for (auto &fmt : c.headingFormats) {
+            fmt.font = fonts_get(font_role::bold);
+        }
         return c;
     }();
     return cfg;
@@ -575,16 +584,12 @@ void draw_empty_state() {
     const char *hint = "It looks at the device screen itself, then taps";
     const ImVec2 avail = ImGui::GetContentRegionAvail();
     ImGui::SetCursorPosY(ImGui::GetCursorPosY() + avail.y * 0.4F);
-    if (g_bold != nullptr) {
-        ImGui::PushFont(g_bold);
-    }
+    ImGui::PushFont(fonts_get(font_role::bold));
     ImGui::SetCursorPosX(
         ImGui::GetCursorPosX() +
         std::max(0.0F, (avail.x - ImGui::CalcTextSize(title).x) * 0.5F));
     ImGui::TextUnformatted(title);
-    if (g_bold != nullptr) {
-        ImGui::PopFont();
-    }
+    ImGui::PopFont();
     ImGui::SetCursorPosX(
         ImGui::GetCursorPosX() +
         std::max(0.0F, (avail.x - ImGui::CalcTextSize(hint).x) * 0.5F));
@@ -666,13 +671,9 @@ void draw_turn(llm_turn &_t, int _index) {
     } else if (_t.ok) {
         ImGui::Markdown(_t.reply.c_str(), _t.reply.size(), md_config());
     } else {
-        if (g_bold != nullptr) {
-            ImGui::PushFont(g_bold);
-        }
+        ImGui::PushFont(fonts_get(font_role::bold));
         ImGui::TextColored(k_err_col, "Request failed");
-        if (g_bold != nullptr) {
-            ImGui::PopFont();
-        }
+        ImGui::PopFont();
         ImGui::TextWrapped("%s", _t.error.c_str());
     }
     ImGui::EndChild();
@@ -718,18 +719,30 @@ GLuint g_gear_tex = 0;
 int g_gear_w = 0;
 int g_gear_h = 0;
 
+/// The gear, relative to the working directory the app is started from (the
+/// same base `fonts.cpp` resolves `assets/fonts/` against). White on purpose:
+/// the draw call tints it, so the icon takes the button's text colour instead
+/// of being frozen to one the theme may not use.
+///
+/// A designed replacement drops in here as a 32px white PNG with an alpha
+/// channel; OpenCV hands a 4-channel PNG back as BGRA, which is what the upload
+/// wants. This one was drawn rather than designed: a white disc at radius 0.63
+/// of the half-size, eight teeth out to 0.875, a hub punched back out at 0.22,
+/// all 8x supersampled and INTER_AREA'd down.
+constexpr char k_gear_path[] = "assets/icons/gear.png";
+
 /// Uploaded once, on first draw: the icon never changes, and this is only
-/// reached while frames are being drawn, so the GL context is current.
+/// reached while frames are being drawn, so the GL context is current. A
+/// missing file leaves the button as a bare frame rather than a crash --
+/// `imread` returns an empty Mat for one, it does not throw.
 GLuint gear_icon() {
     if (g_gear_tex != 0) {
         return g_gear_tex;
     }
-    const cv::Mat raw(
-        1, static_cast<int>(campcat::app_icons::gear_png_size), CV_8UC1,
-        const_cast<unsigned char *>(campcat::app_icons::gear_png));
-    const cv::Mat icon = cv::imdecode(raw, cv::IMREAD_UNCHANGED);
+    const cv::Mat icon = cv::imread(k_gear_path, cv::IMREAD_UNCHANGED);
     if (icon.empty()) {
-        campcat::automation_log::emit("[llm] gear icon did not decode");
+        campcat::automation_log::emit(
+            std::string("[llm] gear icon did not load: ") + k_gear_path);
         return 0;
     }
     g_gear_tex = campcat::app::upload_bgra(icon, &g_gear_w, &g_gear_h);
@@ -997,13 +1010,9 @@ void draw_approval_bubble(const campcat::llm_approval &_a) {
                       ImGuiChildFlags_AutoResizeY |
                           ImGuiChildFlags_AlwaysUseWindowPadding,
                       ImGuiWindowFlags_NoScrollbar);
-    if (g_bold != nullptr) {
-        ImGui::PushFont(g_bold);
-    }
+    ImGui::PushFont(fonts_get(font_role::bold));
     ImGui::TextUnformatted("Waiting for your approval");
-    if (g_bold != nullptr) {
-        ImGui::PopFont();
-    }
+    ImGui::PopFont();
     ImGui::TextDisabled("%s", _a.summary.c_str());
     if (g_appr_tex != 0 && g_appr_w > 0) {
         const ImVec2 size = fit_image(g_appr_w, g_appr_h, k_approval_max_w);
@@ -1170,15 +1179,6 @@ bool draw_log(const ImVec2 &_size) {
 }
 
 } // namespace
-
-void llm_panel_set_bold_font(ImFont *_font) {
-    g_bold = _font;
-    // `**strong**` is drawn with the last heading slot rather than with a bold
-    // font of its own, so that slot is what has to hold the bold face.
-    for (auto &fmt : md_config().headingFormats) {
-        fmt.font = _font;
-    }
-}
 
 void llm_panel_shutdown_gl() {
     // Unblock a question nobody can answer any more: without this the worker

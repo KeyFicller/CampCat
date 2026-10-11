@@ -21,3 +21,6 @@ imgui.ini
 
 /.worktrees/
 /config/llm/memory.md
+
+/.venv-fonts
+tools/__pycache__/

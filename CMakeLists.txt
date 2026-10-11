@@ -238,6 +238,7 @@ add_executable(campcat
   src/app/ui/script_editor_panel.cpp
   src/app/ui/template_capture_panel.cpp
   src/app/ui/prompt_input.cpp
+  src/app/ui/fonts.cpp
   src/app/ui/gl_texture.cpp
   src/app/ui/native_file_dialog.cpp
   ${campcat_platform_sources}

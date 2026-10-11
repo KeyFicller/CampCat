@@ -1,6 +1,7 @@
 #include "app/ui/script_editor_panel.h"
 
 #include "app/ui/ccat_highlight.h"
+#include "app/ui/fonts.h"
 #include "app/ui/gl_texture.h"
 #include "core/script/ccat_bundle.h"
 
@@ -35,8 +36,6 @@ constexpr float k_preview_max_side = 360.0F;
 constexpr float k_templates_h = 76.0F;
 
 const ImVec4 k_err_col = ImVec4(0.95F, 0.42F, 0.42F, 1.0F);
-
-ImFont *g_mono = nullptr;
 
 /// One open script: its text, the disk content it was opened from, and the last
 /// thing that happened to it.
@@ -439,13 +438,9 @@ void draw_editor(const std::filesystem::path &_dir, script_editor &_e) {
                         ImGui::GetStyle().SeparatorTextPadding.y * 2.0F +
                         ImGui::GetStyle().ItemSpacing.y + k_templates_h +
                         footer;
-    if (g_mono != nullptr) {
-        ImGui::PushFont(g_mono);
-    }
+    ImGui::PushFont(campcat::app::fonts_get(campcat::app::font_role::mono));
     _e.editor->Render("##ccat", ImVec2(0.0F, -below));
-    if (g_mono != nullptr) {
-        ImGui::PopFont();
-    }
+    ImGui::PopFont();
 
     // Templates, read-only: the point of hovering is to see what the model cut.
     ImGui::SeparatorText("Resources");
@@ -495,8 +490,6 @@ void draw_editor(const std::filesystem::path &_dir, script_editor &_e) {
 }
 
 } // namespace
-
-void script_editor_panel_set_mono_font(ImFont *_font) { g_mono = _font; }
 
 void script_editor_panel_draw(const std::filesystem::path &_script_dir,
                               float _list_w, float _list_h) {

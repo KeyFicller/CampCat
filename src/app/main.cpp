@@ -19,6 +19,7 @@
 #include "app/shell_state.h"
 #include "app/ui/activity_status.h"
 #include "app/ui/console_panel.h"
+#include "app/ui/fonts.h"
 #include "app/ui/llm_panel.h"
 #include "app/ui/macos_ime.h"
 #include "app/ui/script_editor_panel.h"
@@ -31,6 +32,11 @@
 #include "core/llm/llm_tools.h"
 
 namespace {
+
+/// The four UI faces come from one place (`app/ui/fonts.cpp`); the aliases keep
+/// the call sites below to one line.
+using campcat::app::font_role;
+using campcat::app::fonts_get;
 
 constexpr char k_default_config_relative[] = "config/default.json";
 
@@ -243,116 +249,7 @@ int main(int argc, char **argv) {
         c[ImGuiCol_ModalWindowDimBg] = ImVec4(0.0F, 0.0F, 0.0F, 0.55F);
     }
 
-    // Every UI font is one family: Arial for Latin, with the same CJK face
-    // merged in so Chinese never lands on a font that lacks it. Sizes and
-    // weights stay per-use (16 body, 16 bold, 20 titles).
-    static const struct {
-        const char *path;
-        int face;
-    } cjk_fonts[] = {
-        // PingFang is the current macOS Chinese face, but here it is a
-        // downloadable asset: it lives under an AssetsV2 hash rather than the
-        // stable Fonts directory. Stable path first, hash second, and Hiragino
-        // (older, always present) as the fallback. ponytail: an OS update that
-        // rehashes the asset silently falls back to Hiragino -- cosmetic only.
-        {"/System/Library/Fonts/PingFang.ttc", 3}, // PingFang SC / Regular
-        {"/System/Library/AssetsV2/com_apple_MobileAsset_Font7/"
-         "3419f2a427639ad8c8e139149a287865a90fa17e.asset/AssetData/"
-         "PingFang.ttc",
-         3},
-        {"/System/Library/Fonts/Hiragino Sans GB.ttc", 0},
-        {"/System/Library/Fonts/Supplemental/Arial Unicode.ttf", 0},
-    };
-
-    // ImGui's ChineseFull set stops at the CJK blocks, so Unicode's Arrows
-    // block (→, ←, ⇒) is never asked for and draws as nothing, even though both
-    // CJK faces above have the glyph. Appended to ImGui's own list rather than
-    // copied, so it cannot drift from it. `static` because ImGui keeps the
-    // pointer until the atlas is built, not just for the call.
-    static const std::vector<ImWchar> cjk_ranges = [&io] {
-        std::vector<ImWchar> r;
-        for (const ImWchar *p = io.Fonts->GetGlyphRangesChineseFull();
-             p[0] != 0 && p[1] != 0; p += 2) {
-            r.push_back(p[0]);
-            r.push_back(p[1]);
-        }
-        r.push_back(0x2190); // Arrows
-        r.push_back(0x21FF);
-        r.push_back(0); // zero-terminated, as ImGui requires
-        r.push_back(0);
-        return r;
-    }();
-
-    // MergeMode appends to the font added just before it, so each merge is
-    // issued right after its own base font. AddFontFromFileTTF asserts on a
-    // missing file, so the CJK candidate is probed first. The full set (~21k
-    // hanzi) costs a few tens of MB of atlas, but the 2500 common set left
-    // replies drawing "?" for everyday words ("screen" is U+5C4F, outside it).
-    //
-    // `_cjk` is false for the 20px title only: the full set at 20px doubles the
-    // atlas to 4096x16384 (+320 MB RSS, +128 MB VRAM) for strings that are all
-    // ASCII today. A Chinese title would draw "?"; add the merge then if it
-    // becomes worth that.
-    auto load_font = [&io](const char *_path, float _size, bool _cjk,
-                           int _face) -> ImFont * {
-        ImFontConfig base;
-        base.FontNo = _face; // a .ttc holds several faces
-        ImFont *font = io.Fonts->AddFontFromFileTTF(_path, _size, &base);
-        if (font == nullptr || !_cjk) {
-            return font;
-        }
-        for (const auto &cjk : cjk_fonts) {
-            std::error_code ec;
-            if (!std::filesystem::exists(cjk.path, ec)) {
-                continue;
-            }
-            ImFontConfig merge;
-            merge.MergeMode = true;  // add to that font instead of replacing it
-            merge.FontNo = cjk.face; // a .ttc holds several faces
-            io.Fonts->AddFontFromFileTTF(cjk.path, _size, &merge,
-                                         cjk_ranges.data());
-            break;
-        }
-        return font;
-    };
-
-    // Arial for Latin. San Francisco is unusable: it is a variable font and
-    // ImGui's rasterizer ignores variation axes, so every weight -- titles
-    // included -- would draw Regular. (Helvetica Neue has real faces if that
-    // trade is ever worth making.)
-    ImFont *font_body = load_font(
-        "/System/Library/Fonts/Supplemental/Arial.ttf", 16.0F, true, 0);
-    if (font_body == nullptr) {
-        font_body = io.Fonts->AddFontDefault();
-    }
-    ImFont *font_bold = load_font(
-        "/System/Library/Fonts/Supplemental/Arial Bold.ttf", 16.0F, true, 0);
-    if (font_bold == nullptr) {
-        font_bold = font_body;
-    }
-    ImFont *font_title = load_font(
-        "/System/Library/Fonts/Supplemental/Arial Bold.ttf", 20.0F, false, 0);
-    if (font_title == nullptr) {
-        font_title = font_bold;
-    }
-    llm_panel_set_bold_font(font_bold);
-
-    // The script editor is a character grid, so it needs one width for every
-    // glyph: with a proportional face the caret and the selection drift off the
-    // text. CJK is merged in for the same reason as the other faces -- comments
-    // in a script are written in whatever language its author thinks in.
-    // Probed like the CJK faces below: AddFontFromFileTTF asserts on a missing
-    // file, and this one is not guaranteed on every machine. The full merge
-    // doubles the atlas to 4096x16384 (measured); the 2500 common set would
-    // keep it at 4096x8192 but draw "?" for hanzi outside it, which the editor
-    // hits while typing, not only while drawing.
-    ImFont *font_mono = nullptr;
-    const char *mono_path = "/System/Library/Fonts/Menlo.ttc";
-    std::error_code mono_ec;
-    if (std::filesystem::exists(mono_path, mono_ec)) {
-        font_mono = load_font(mono_path, 16.0F, true, 0);
-    }
-    script_editor_panel_set_mono_font(font_mono);
+    campcat::app::fonts_init();
 
     ImGui_ImplGlfw_InitForOpenGL(window, true);
     ImGui_ImplOpenGL3_Init(glsl_version);
@@ -476,7 +373,7 @@ int main(int argc, char **argv) {
                 ImGui::PushStyleColor(ImGuiCol_ButtonActive,
                                       ImVec4(0.20F, 0.22F, 0.25F, 1.0F));
             }
-            ImGui::PushFont(font_bold);
+            ImGui::PushFont(fonts_get(font_role::bold));
             if (ImGui::Button(label, ImVec2(-1.0F, 0.0F))) {
                 page = target;
             }
@@ -505,7 +402,7 @@ int main(int argc, char **argv) {
                               ImGuiChildFlags_Borders |
                                   ImGuiChildFlags_AutoResizeY);
             ImGui::Spacing();
-            ImGui::PushFont(font_title);
+            ImGui::PushFont(fonts_get(font_role::title));
             ImGui::TextUnformatted("CampCat");
             ImGui::PopFont();
             ImGui::Spacing();
@@ -528,7 +425,7 @@ int main(int argc, char **argv) {
                        log_open ? -ImGui::GetStyle().ItemSpacing.y : 0.0F),
                 ImGuiChildFlags_Borders |
                     (log_open ? 0 : ImGuiChildFlags_AutoResizeY));
-            ImGui::PushFont(font_bold);
+            ImGui::PushFont(fonts_get(font_role::bold));
             if (ImGui::Button(log_open ? "[-] Log" : "[+] Log")) {
                 log_open = !log_open;
             }
@@ -577,10 +474,10 @@ int main(int argc, char **argv) {
                     page_title = "Script";
                     break;
                 }
-                ImGui::PushFont(font_title);
+                ImGui::PushFont(fonts_get(font_role::title));
                 ImGui::TextUnformatted(page_title);
                 ImGui::PopFont();
-                ImGui::PushFont(font_bold);
+                ImGui::PushFont(fonts_get(font_role::bold));
                 {
                     const float chips_w =
                         (show_page_chip ? chip_width(page_status) + k_chip_gap
@@ -600,12 +497,11 @@ int main(int argc, char **argv) {
             }
 
             if (page == shell_page::Script) {
-                script_panel_draw(st, cfg_view, ccat_ui, lock_manual_single,
-                                  font_bold);
+                script_panel_draw(st, cfg_view, ccat_ui, lock_manual_single);
             } else if (page == shell_page::Llm) {
                 llm_panel_draw_panel(st, cfg_view, lock_manual_single);
             } else if (page == shell_page::Console) {
-                console_panel_draw(st, cfg_view, ccat_ui, busy_now, font_bold);
+                console_panel_draw(st, cfg_view, ccat_ui, busy_now);
             } else if (page == shell_page::Settings) {
                 settings_panel_draw(st, cfg_view);
             }

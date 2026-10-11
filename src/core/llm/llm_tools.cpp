@@ -397,9 +397,9 @@ adb_client &require_adb() {
     return *g_ctx.adb;
 }
 
-/// The CJK face the UI itself renders Chinese with, reused so a label looks the
-/// same in the screenshot as it does in the chat.
-constexpr char k_cjk_font_path[] = "/System/Library/Fonts/Hiragino Sans GB.ttc";
+/// The same CJK face the UI renders Chinese with, so a label looks the same in
+/// the screenshot as it does in the chat.
+constexpr char k_cjk_font_path[] = "assets/fonts/NotoSansSC-Common.ttf";
 constexpr int k_label_font_h = 28;
 
 /// Draws `_text` with its top-left at (`_x`, `_y`). `cv::putText` knows ASCII

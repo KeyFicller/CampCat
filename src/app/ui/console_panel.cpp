@@ -1,6 +1,7 @@
 #include "app/ui/console_panel.h"
 
 #include "app/shell_state.h"
+#include "app/ui/fonts.h"
 #include "app/ui/prompt_input.h"
 #include "core/script/ccat_parser.h"
 #include "core/script/ccat_repl.h"
@@ -13,7 +14,7 @@
 void console_panel_draw(campcat::shell_state &_st,
                         campcat::app_config &_cfg_view,
                         const campcat::ccat_script_profile &_ccat_ui,
-                        bool _busy_now, ImFont *_font_bold) {
+                        bool _busy_now) {
     // Only this page uses them, so they live here rather than in shell_state.
     static campcat::ccat_lang::CcatRepl console_repl;
     static std::string console_input;
@@ -34,7 +35,7 @@ void console_panel_draw(campcat::shell_state &_st,
         const char *hint = "Send some ccat script code for execution.";
         const ImVec2 avail = ImGui::GetContentRegionAvail();
         ImGui::SetCursorPosY(ImGui::GetCursorPosY() + avail.y * 0.4F);
-        ImGui::PushFont(_font_bold);
+        ImGui::PushFont(campcat::app::fonts_get(campcat::app::font_role::bold));
         ImGui::SetCursorPosX(
             ImGui::GetCursorPosX() +
             std::max(0.0F, (avail.x - ImGui::CalcTextSize(title).x) * 0.5F));

@@ -1,6 +1,7 @@
 #include "app/ui/script_panel.h"
 
 #include "app/shell_state.h"
+#include "app/ui/fonts.h"
 #include "app/ui/native_file_dialog.h"
 #include "app/ui/template_capture_panel.h"
 
@@ -15,9 +16,9 @@
 void script_panel_draw(campcat::shell_state &_st,
                        campcat::app_config &_cfg_view,
                        campcat::ccat_script_profile &_ccat_ui,
-                       bool _lock_manual_single, ImFont *_font_bold) {
+                       bool _lock_manual_single) {
 
-    ImGui::PushFont(_font_bold);
+    ImGui::PushFont(campcat::app::fonts_get(campcat::app::font_role::bold));
 
     ImGui::SeparatorText("Path");
 
@@ -71,7 +72,7 @@ void script_panel_draw(campcat::shell_state &_st,
     if (_lock_manual_single) {
         ImGui::BeginDisabled();
     }
-    ImGui::PushFont(_font_bold);
+    ImGui::PushFont(campcat::app::fonts_get(campcat::app::font_role::bold));
     if (ImGui::Button("Run once")) {
         _st.push_job_snapshot(&_cfg_view, _ccat_ui);
         _st.run_single_job();
@@ -128,7 +129,7 @@ void script_panel_draw(campcat::shell_state &_st,
     ImGui::Spacing();
 
     ImGui::Spacing();
-    ImGui::PushFont(_font_bold);
+    ImGui::PushFont(campcat::app::fonts_get(campcat::app::font_role::bold));
     const bool cap_open =
         ImGui::CollapsingHeader("Screenshot crop (ADB)###script_ccat_cap",
                                 ImGuiTreeNodeFlags_DefaultOpen);

@@ -2,20 +2,9 @@
 
 #include <filesystem>
 
-struct ImFont; // only ever held as a pointer here, so imgui.h stays out
-
 /// Width of the script list column, which sits beside the conversation rather
 /// than taking height off it.
 inline constexpr float k_script_list_w = 180.0F;
-
-/**
- * @brief Hand the editor its monospace face.
- *
- * Call once after the fonts are uploaded. Null falls back to whatever font is
- * current, which a fixed-width text grid does not really support (the caret and
- * the selection drift off the glyphs).
- */
-void script_editor_panel_set_mono_font(ImFont *_font);
 
 /**
  * @brief Draw the script list column, and every script window that is open.

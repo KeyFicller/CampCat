@@ -2,20 +2,10 @@
 
 #include "app/ui/activity_status.h"
 
-struct ImFont; // only ever held as a pointer here, so imgui.h stays out
-
 namespace campcat {
 class shell_state;
 struct app_config;
 } // namespace campcat
-
-/**
- * @brief Hand the panel the bold font, used to render `**strong**` runs.
- *
- * Call once after the fonts are uploaded. Passing null makes bold fall back to
- * the body font instead of crashing.
- */
-void llm_panel_set_bold_font(ImFont *_font);
 
 /**
  * @brief Stop the LLM page's worker and sidecar (call before GL teardown, with
