@@ -59,6 +59,22 @@ int g_last_shot = 0;
 std::atomic<bool> g_script_running{false};
 std::atomic<bool> g_script_stop{false};
 
+/// The same pair for the emulator wait: `start_emulator` blocks on the boot, so
+/// a Stop has to be a flag the wait polls rather than a thread to interrupt.
+std::atomic<bool> g_emulator_running{false};
+std::atomic<bool> g_emulator_stop{false};
+
+/// The one thing the model can do about a device that is not up, appended to
+/// every failure this file reports as a device failure. `run_script`'s errors
+/// come from the interpreter instead, so those are matched on the two phrases
+/// it words a device failure with.
+///
+/// ponytail: a device failure the interpreter words differently gets no hint;
+/// those phrases live in ccat_interpreter, and covering them properly is not
+/// worth a wire field.
+constexpr std::string_view k_device_hint =
+    "; if the device is down, start_emulator boots it";
+
 /// Clears a stale stop on entry and marks the script as running until it
 /// returns. The clear is not decoration: a turn can run a second script, and
 /// the stop the user pressed for the first one would otherwise kill it on
@@ -69,6 +85,16 @@ struct script_run_guard {
     g_script_running.store(true);
   }
   ~script_run_guard() { g_script_running.store(false); }
+};
+
+/// Same shape, same reason: clear whatever Stop the last wait left set, and
+/// publish that a wait is in flight so the UI can offer one.
+struct emulator_run_guard {
+  emulator_run_guard() {
+    g_emulator_stop.store(false);
+    g_emulator_running.store(true);
+  }
+  ~emulator_run_guard() { g_emulator_running.store(false); }
 };
 
 /// Parses `_source` or turns the syntax error into the bind_error the model
@@ -403,7 +429,8 @@ constexpr int k_default_swipe_ms = 300;
   cv::Mat bgr;
   std::string diag;
   if (!adb.screencap_png(&bgr, 45000, &diag)) {
-    throw js::bind_error("screencap failed: " + diag);
+    throw js::bind_error("screencap failed: " + diag +
+                         std::string(k_device_hint));
   }
   std::vector<unsigned char> png;
   if (!cv::imencode(".png", bgr, png)) {
@@ -501,11 +528,51 @@ CPP_REFLECT_TOOL(mark)
   const int cx = x + w / 2;
   const int cy = y + h / 2;
   if (!require_adb().tap(cx, cy)) {
-    throw js::bind_error("adb tap failed");
+    throw js::bind_error(std::string("adb tap failed") +
+                         std::string(k_device_hint));
   }
   return "tapped " + std::to_string(cx) + "," + std::to_string(cy);
 }
 CPP_REFLECT_TOOL(tap)
+
+[[= js::doc{
+    .text = js::str(
+        "Boots the Android emulator (MuMu) this shell is configured for and "
+        "waits until the instance is up. Call it when the device is not "
+        "reachable and the user asks for something on the device. It blocks "
+        "for as long as the boot takes, up to about four minutes, and returns "
+        "either that the emulator is up or why it did not come up. An emulator "
+        "that is already up is reported as such and nothing is started "
+        "again.")}]] std::string start_emulator() {
+  if (!g_ctx.start_emulator) {
+    throw js::bind_error("no emulator control in this session");
+  }
+  const emulator_run_guard guard;
+  const mumu_status st =
+      g_ctx.start_emulator([] { return g_emulator_stop.load(); });
+  if (st.state != mumu_state::running) {
+    throw js::bind_error(st.message.empty()
+                             ? std::string("the emulator did not start")
+                             : st.message);
+  }
+  std::string text = "the emulator is up";
+  if (st.message == "already up") {
+    text += "; nothing was started";
+  } else if (!st.message.empty() && st.message != "running") {
+    text += ": " + st.message;
+  }
+  // The client was built when this turn started, with the emulator still down,
+  // so this is what makes the device reachable to the tools that come next.
+  if (g_ctx.adb != nullptr && g_ctx.cfg != nullptr) {
+    std::string diag;
+    if (!g_ctx.adb->connect_remote(g_ctx.cfg->adb_connect_address, 15000,
+                                   nullptr, &diag)) {
+      text += " (adb connect failed: " + diag + ")";
+    }
+  }
+  return text;
+}
+CPP_REFLECT_TOOL(start_emulator)
 
 [[= js::doc{
     .text = js::str(
@@ -548,8 +615,15 @@ CPP_REFLECT_TOOL(tap)
   const auto res = run_ccat_program(&adb, g_ctx.cfg, g_ctx.script_dir, {},
                                     *prog, [] { return g_script_stop.load(); });
   if (!res.ok) {
-    throw js::bind_error(res.message.empty() ? std::string("script failed")
-                                             : res.message);
+    std::string msg =
+        res.message.empty() ? std::string("script failed") : res.message;
+    // A statement that could not see the device is the one failure here the
+    // model can act on (see k_device_hint).
+    if (msg.find("screencap failed") != std::string::npos ||
+        msg.find("adb tap failed") != std::string::npos) {
+      msg += k_device_hint;
+    }
+    throw js::bind_error(msg);
   }
   return "script ran ok (" + std::to_string(prog->stmts.size()) +
          " statements)";
@@ -1160,6 +1234,10 @@ std::string tools_json() { return js::tools_json(); }
 bool script_running() { return g_script_running.load(); }
 
 void request_script_stop() { g_script_stop.store(true); }
+
+bool emulator_starting() { return g_emulator_running.load(); }
+
+void request_emulator_stop() { g_emulator_stop.store(true); }
 
 void forget_frames() {
   g_frames.clear();

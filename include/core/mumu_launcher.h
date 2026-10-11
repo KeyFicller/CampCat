@@ -1,5 +1,6 @@
 #pragma once
 
+#include <functional>
 #include <optional>
 #include <string>
 
@@ -87,9 +88,14 @@ mumu_status mumu_launch_app(const std::string &_app_path);
  * *instance*, which has not been started yet.
  *
  * @return The first answer with a real state; `failed` on timeout.
+ *
+ * @param[in] _should_stop Polled between attempts; true gives up early and
+ * reports it, which is a stop rather than a failure to come up. Empty never
+ * stops (the Settings button).
  */
 mumu_status mumu_wait_service(const std::string &_mumutool, int _index,
-                              int _deadline_ms);
+                              int _deadline_ms,
+                              const std::function<bool()> &_should_stop = {});
 
 /**
  * @brief Ask MuMuPlayer.app to quit, by bundle path.
@@ -120,10 +126,14 @@ mumu_status mumu_close(const std::string &_mumutool, int _index);
  * @brief Poll until the instance leaves the not-ready states, or time runs out.
  *
  * @param[in] _deadline_ms How long to wait before giving up.
+ * @param[in] _should_stop Polled between attempts; true gives up early and
+ * reports it, which is a stop rather than a failure to come up. Empty never
+ * stops (the Settings button).
  * @return The last observed status; `failed` on timeout or on a mumutool error.
  */
 mumu_status mumu_wait_ready(const std::string &_mumutool, int _index,
-                            int _deadline_ms);
+                            int _deadline_ms,
+                            const std::function<bool()> &_should_stop = {});
 
 /**
  * @brief Watch `_parent_pid` and close the instance when it goes away.

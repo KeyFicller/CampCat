@@ -499,7 +499,7 @@ int main(int argc, char **argv) {
       if (page == shell_page::Script) {
         script_panel_draw(st, cfg_view, ccat_ui, lock_manual_single, font_bold);
       } else if (page == shell_page::Llm) {
-        llm_panel_draw_panel(cfg_view, lock_manual_single);
+        llm_panel_draw_panel(st, cfg_view, lock_manual_single);
       } else if (page == shell_page::Console) {
         console_panel_draw(st, cfg_view, ccat_ui, busy_now, font_bold);
       } else if (page == shell_page::Settings) {

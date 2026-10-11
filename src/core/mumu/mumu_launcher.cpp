@@ -132,13 +132,22 @@ mumu_status mumu_close(const std::string &_mumutool, int _index) {
 }
 
 mumu_status mumu_wait_ready(const std::string &_mumutool, int _index,
-                            int _deadline_ms) {
+                            int _deadline_ms,
+                            const std::function<bool()> &_should_stop) {
   const auto deadline = std::chrono::steady_clock::now() +
                         std::chrono::milliseconds(_deadline_ms);
   mumu_status st = mumu_query_state(_mumutool, _index);
-  while (not_ready(st.state) && std::chrono::steady_clock::now() < deadline) {
+  while (not_ready(st.state) && std::chrono::steady_clock::now() < deadline &&
+         !(_should_stop && _should_stop())) {
     std::this_thread::sleep_for(std::chrono::milliseconds(k_poll_ms));
     st = mumu_query_state(_mumutool, _index);
+  }
+  if (_should_stop && _should_stop()) {
+    // Before the timeout wording below: the caller reads this to tell "the
+    // human gave up" from "it never came up".
+    st.message = "stopped by the user";
+    st.state = mumu_state::failed;
+    return st;
   }
   if (st.state == mumu_state::running) {
     return st;
@@ -191,7 +200,8 @@ mumu_status mumu_launch_app(const std::string &_app_path) {
 }
 
 mumu_status mumu_wait_service(const std::string &_mumutool, int _index,
-                              int _deadline_ms) {
+                              int _deadline_ms,
+                              const std::function<bool()> &_should_stop) {
   const auto deadline = std::chrono::steady_clock::now() +
                         std::chrono::milliseconds(_deadline_ms);
   // Retry on *any* failure, not just `service_down`. While the app comes up
@@ -204,9 +214,17 @@ mumu_status mumu_wait_service(const std::string &_mumutool, int _index,
            _st.state == mumu_state::failed;
   };
   mumu_status st = mumu_query_state(_mumutool, _index);
-  while (not_listening(st) && std::chrono::steady_clock::now() < deadline) {
+  while (not_listening(st) && std::chrono::steady_clock::now() < deadline &&
+         !(_should_stop && _should_stop())) {
     std::this_thread::sleep_for(std::chrono::milliseconds(k_poll_ms));
     st = mumu_query_state(_mumutool, _index);
+  }
+  if (_should_stop && _should_stop()) {
+    // Before the timeout wording below: the caller reads this to tell "the
+    // human gave up" from "it never came up".
+    st.message = "stopped by the user";
+    st.state = mumu_state::failed;
+    return st;
   }
   if (not_listening(st)) {
     st.message = "no MuMu service after " +
@@ -264,12 +282,14 @@ mumu_status unavailable() {
 mumu_status mumu_query_state(const std::string &, int) { return unavailable(); }
 mumu_status mumu_open(const std::string &, int) { return unavailable(); }
 mumu_status mumu_close(const std::string &, int) { return unavailable(); }
-mumu_status mumu_wait_ready(const std::string &, int, int) {
+mumu_status mumu_wait_ready(const std::string &, int, int,
+                            const std::function<bool()> &) {
   return unavailable();
 }
 std::string mumu_app_path(const std::string &) { return {}; }
 mumu_status mumu_launch_app(const std::string &) { return unavailable(); }
-mumu_status mumu_wait_service(const std::string &, int, int) {
+mumu_status mumu_wait_service(const std::string &, int, int,
+                              const std::function<bool()> &) {
   return unavailable();
 }
 bool mumu_quit_app(const std::string &) { return false; }

@@ -3,6 +3,7 @@
 struct ImFont; // only ever held as a pointer here, so imgui.h stays out
 
 namespace campcat {
+class shell_state;
 struct app_config;
 }
 
@@ -35,11 +36,14 @@ void llm_panel_shutdown_finish();
 /**
  * @brief Draw the LLM page: type an instruction, watch the agent work.
  *
+ * @param[in,out] _st Shell state, which owns the emulator launch the tools may
+ * ask for.
  * @param[in,out] _cfg Shell snapshot (adb paths + llm settings).
  * @param[in] _adb_busy True while automation owns ADB, which makes the device
  * tools refuse instead of contending with it.
  */
-void llm_panel_draw_panel(campcat::app_config &_cfg, bool _adb_busy);
+void llm_panel_draw_panel(campcat::shell_state &_st, campcat::app_config &_cfg,
+                          bool _adb_busy);
 
 /**
  * @brief Draw the box-annotation window for a pending approval, if one is open.

@@ -9,6 +9,7 @@
 #include <atomic>
 #include <deque>
 #include <filesystem>
+#include <functional>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -64,6 +65,19 @@ public:
   void run_console_source_job(std::string _source);
   /** @brief Launch the MuMu instance and arm its watchdog. */
   void start_mumu_job();
+  /**
+   * @brief Launch the instance and wait until it is up, on the calling thread.
+   *
+   * Same sequence, watchdog, ownership record and Settings status line as
+   * `start_mumu_job`; that job's thread body is this call. Blocking: up to 60s
+   * for the app plus 180s for the instance. Refuses when another launch, or an
+   * automation cycle, already owns the flags.
+   *
+   * @param[in] _should_stop Polled by the waits; true gives up early and comes
+   * back as a failed status that says so. Empty never stops.
+   */
+  campcat::mumu_status start_mumu_blocking(
+      const std::function<bool()> &_should_stop = {});
   /** @brief Reconfigure and arm the scheduler. */
   void refresh_scheduler_locked(bool _immediate_first_tick = false);
 
@@ -99,6 +113,17 @@ public:
   std::string last_script_seen;
 
 private:
+  /**
+   * @brief The launch sequence itself, on the calling thread.
+   *
+   * Enquire, launch the app when it is down, `open`, wait for ready, arm the
+   * watchdog, record what we started, and publish `mumu_report` on every exit
+   * path. The caller owns `mumu_launching` and `cycle_running`; nothing here
+   * touches `worker_thread` or ImGui.
+   */
+  campcat::mumu_status mumu_launch_sequence(
+      const campcat::app_config &_shell,
+      const std::function<bool()> &_should_stop);
   void run_automation_thread_body(campcat::app_config _snap_shell,
                                   const ccat_script_profile &_snap_ccat);
   std::tuple<campcat::app_config, ccat_script_profile> capture_bundle_snapshot();

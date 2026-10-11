@@ -7,6 +7,8 @@
 #include <string_view>
 #include <vector>
 
+#include "core/mumu_launcher.h"
+
 namespace campcat {
 class adb_client;
 struct app_config;
@@ -84,6 +86,15 @@ struct tool_context {
   /// Root a model-authored script's relative paths (template PNGs, `run`) resolve
   /// against. It has no file of its own, so this stands in for its directory.
   std::filesystem::path script_dir;
+  /// Starts the emulator this shell is configured for and waits until it is up.
+  /// Supplied by the shell: the launch, its watchdog and the shutdown
+  /// bookkeeping all live there. Runs on the tool thread and blocks for as long
+  /// as the boot takes. `_should_stop` is polled by the wait: true means give
+  /// up early and report it rather than that something broke. An empty function
+  /// means nobody can start one, and `start_emulator` then refuses -- silence
+  /// would look like success.
+  std::function<campcat::mumu_status(const std::function<bool()> &_should_stop)>
+      start_emulator;
 };
 
 /// Outcome of one tool call. `image_png` is set only by image-returning tools
@@ -130,6 +141,14 @@ bool script_running();
 /// Asks the script that is running to stop before its next statement. Safe to
 /// call when nothing is running.
 void request_script_stop();
+
+/// True while `start_emulator` is waiting for the emulator. The UI polls it to
+/// decide whether its Stop control is worth showing.
+bool emulator_starting();
+
+/// Asks the emulator wait to give up before its next poll. Safe to call when
+/// nothing is waiting.
+void request_emulator_stop();
 
 /// Drops every numbered screenshot this session kept, so `shot` numbering starts
 /// over. Called when the session ends, in step with clearing the current screen:

@@ -6,6 +6,8 @@
 #include "core/llm/llm_host.h"
 #include "core/llm/llm_memory.h"
 
+#include "app/shell_state.h"
+
 #include "app/ui/gl_texture.h"
 #include "app/ui/prompt_input.h"
 #include "app/ui/script_editor_panel.h"
@@ -356,15 +358,20 @@ void pump_stream() {
 }
 
 /// Run one turn on the worker.
-void start_turn(const campcat::app_config &_cfg, std::string _prompt) {
+void start_turn(campcat::shell_state &_st, const campcat::app_config &_cfg,
+                std::string _prompt) {
   if (g_thread.joinable()) {
     g_thread.join();
   }
   g_running.store(true);
   // The whole snapshot, by value: the script tools need the interpreter's config
   // (`tool_context::cfg`), and `_cfg` is a per-frame copy in the caller's frame,
-  // so a pointer to it would dangle the moment the frame ends.
-  g_thread = std::thread([cfg_snapshot = _cfg, prompt = std::move(_prompt)]() {
+  // so a pointer to it would dangle the moment the frame ends. `_st` outlives
+  // the thread instead (it is a `main` local, and this thread is joined by
+  // `llm_panel_shutdown_gl`), so the shell is held by pointer: it is where the
+  // emulator launch the model may ask for lives.
+  g_thread = std::thread([st = &_st, cfg_snapshot = _cfg,
+                          prompt = std::move(_prompt)]() {
     // A per-turn client, built the way the automation cycle builds one. Every
     // tool runs on this thread, so nothing here races the UI.
     campcat::adb_client adb(cfg_snapshot.adb_path, cfg_snapshot.adb_serial);
@@ -375,6 +382,9 @@ void start_turn(const campcat::app_config &_cfg, std::string _prompt) {
     ctx.require_approval = cfg_snapshot.require_tool_approval;
     ctx.cfg = &cfg_snapshot;
     ctx.script_dir = cfg_snapshot.config_home / "scripts/llm";
+    ctx.start_emulator = [st](const std::function<bool()> &_should_stop) {
+      return st->start_mumu_blocking(_should_stop);
+    };
     g_host.set_tool_context(ctx);
     campcat::llm_result res =
         g_host.run_turn(cfg_snapshot.config_home, prompt);
@@ -482,7 +492,7 @@ void consume_handoff() {
 }
 
 /// Send whatever is staged: clear the input and hand the prompt to the worker.
-void send_current(campcat::app_config &_cfg) {
+void send_current(campcat::shell_state &_st, campcat::app_config &_cfg) {
   const std::string prompt = g_input;
   if (is_blank(g_input)) {
     return;
@@ -496,7 +506,7 @@ void send_current(campcat::app_config &_cfg) {
   // minute starting the interpreter, and until then the new bubble would show
   // the previous request's leftovers.
   g_host.clear_stream();
-  start_turn(_cfg, prompt);
+  start_turn(_st, _cfg, prompt);
 }
 
 /// "Thinking" (when the sidecar says so) plus 1..3 dots on the frame clock, so
@@ -931,6 +941,35 @@ void draw_script_bubble() {
   ImGui::PopStyleColor();
 }
 
+/// "Starting the emulator... 12s" plus a Stop, mirroring `draw_script_bubble`.
+/// The emulator wait can run for minutes and nothing else in the app can cut it
+/// short. The clock is this panel's own, started on the first frame the tool's
+/// flag is seen, so the number is the wait as the human watched it.
+void draw_emulator_bubble() {
+  static double shown_at = 0.0;
+  if (!campcat::llm::emulator_starting()) {
+    shown_at = 0.0; // the next wait starts its own clock
+    return;
+  }
+  if (shown_at == 0.0) {
+    shown_at = ImGui::GetTime();
+  }
+  ImGui::PushStyleColor(ImGuiCol_ChildBg, k_bot_bg);
+  ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, k_bubble_rounding);
+  ImGui::BeginChild("emulator_start", ImVec2(0.0F, 0.0F),
+                    ImGuiChildFlags_AutoResizeY |
+                        ImGuiChildFlags_AlwaysUseWindowPadding,
+                    ImGuiWindowFlags_NoScrollbar);
+  ImGui::Text("Starting the emulator... %ds",
+              static_cast<int>(ImGui::GetTime() - shown_at));
+  if (ImGui::Button("Stop")) {
+    campcat::llm::request_emulator_stop();
+  }
+  ImGui::EndChild();
+  ImGui::PopStyleVar();
+  ImGui::PopStyleColor();
+}
+
 /// Draws the conversation. Returns true when the user asked to clear it via the
 /// context menu, so the caller can start the reset on the worker.
 bool draw_log(const ImVec2 &_size) {
@@ -980,6 +1019,12 @@ bool draw_log(const ImVec2 &_size) {
     draw_script_bubble();
   }
 
+  // The same place, for the same reason: a wait nothing else can cut short.
+  if (campcat::llm::emulator_starting()) {
+    ImGui::Spacing();
+    draw_emulator_bubble();
+  }
+
   // Follow new content only while the user is already at the bottom.
   if (g_pin_bottom) {
     ImGui::SetScrollHereY(1.0F);
@@ -1008,6 +1053,9 @@ void llm_panel_shutdown_gl() {
   // A long script keeps the worker inside run_script, where cancel_approval means
   // nothing; without this the join below waits for the script to finish on its own.
   campcat::llm::request_script_stop();
+  // Same for a boot in flight: the wait polls this, so the join does not sit
+  // through the rest of a VM coming up.
+  campcat::llm::request_emulator_stop();
   if (g_thread.joinable()) {
     g_thread.join();
   }
@@ -1040,7 +1088,8 @@ void llm_panel_shutdown_finish() {
   g_host.stop();
 }
 
-void llm_panel_draw_panel(campcat::app_config &_cfg, bool _adb_busy) {
+void llm_panel_draw_panel(campcat::shell_state &_st, campcat::app_config &_cfg,
+                          bool _adb_busy) {
   // Finished work is folded in on the UI thread, which owns g_turns.
   consume_handoff();
 
@@ -1137,7 +1186,7 @@ void llm_panel_draw_panel(campcat::app_config &_cfg, bool _adb_busy) {
       clear_staged();
       g_input[0] = '\0'; // consumed as the answer, not as a prompt
     } else {
-      send_current(_cfg);
+      send_current(_st, _cfg);
     }
   }
 

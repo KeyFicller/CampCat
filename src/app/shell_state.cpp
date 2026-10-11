@@ -306,83 +306,108 @@ void shell_state::start_mumu_job() {
   const campcat::app_config shell = snapshot_cfg();
   mumu_launching.store(true);
   try {
-    worker_thread = std::thread([this, shell]() {
-      const std::string tool = shell.mumutool_path;
-      const std::string app = campcat::mumu_app_path(tool);
-      const int index = shell.mumu_device_index;
-      // The app this run launched, if any; feeds the watchdog and is what
-      // the shutdown path quits. Empty keeps somebody else's app alive.
-      std::string app_owned;
-      auto finish = [&](const campcat::mumu_status &_st) {
-        {
-          std::lock_guard<std::mutex> lk(mumu_mu);
-          mumu_report = _st;
-        }
-        mumu_launching.store(false);
-        release_cycle(cycle_running);
-      };
-
-      campcat::mumu_status st = campcat::mumu_query_state(tool, index);
-      if (st.state == campcat::mumu_state::service_down) {
-        // mumutool is only a client of MuMuPlayer's service: with the app down
-        // it cannot answer `info` at all, so the app has to come first.
-        st = campcat::mumu_launch_app(app);
-        if (st.state != campcat::mumu_state::failed) {
-          app_owned = app;
-          {
-            std::lock_guard<std::mutex> lk(mumu_mu);
-            mumu_app_started = app;
-          }
-          st =
-              campcat::mumu_wait_service(tool, index, k_mumu_service_timeout_ms);
-        }
-      }
-      if (st.state == campcat::mumu_state::failed) {
-        finish(st);
-        return;
-      }
-      if (st.state != campcat::mumu_state::stopped) {
-        // Somebody already had it up. Leave it alone and arm no watchdog:
-        // that would close an instance we did not start. An app we just
-        // launched is still ours to quit; `mumu_app_started` holds that.
-        st.message = "already up";
-        finish(st);
-        return;
-      }
-
-      st = campcat::mumu_open(tool, index);
-      if (st.state == campcat::mumu_state::failed) {
-        finish(st);
-        return;
-      }
-      st = campcat::mumu_wait_ready(tool, index, k_mumu_ready_timeout_ms);
-      if (st.state == campcat::mumu_state::failed) {
-        finish(st);
-        return;
-      }
-
-      // Spawn first: the watchdog then covers the gap before anything is
-      // recorded. Record either way, so an instance we started is still closed
-      // on a clean exit when no watchdog could be armed.
-      auto wd = campcat::mumu_spawn_watchdog(
-          tool, index, static_cast<long>(::getpid()), app_owned);
-      const bool armed = wd.has_value();
-      {
-        std::lock_guard<std::mutex> lk(mumu_mu);
-        mumu_launched_path = tool;
-        mumu_launched_index = index;
-        mumu_watchdog = std::move(wd);
-      }
-      if (!armed) {
-        st.message = "started, but no watchdog could be armed";
-      }
-      finish(st);
+    worker_thread = std::thread([this, shell] {
+      mumu_launch_sequence(shell, {});
+      mumu_launching.store(false);
+      release_cycle(cycle_running);
     });
   } catch (const std::exception &ex) {
     mumu_launching.store(false);
     release_cycle(cycle_running);
     append_log(std::string("[mumu] failed to start worker: ") + ex.what());
   }
+}
+
+campcat::mumu_status shell_state::start_mumu_blocking(
+    const std::function<bool()> &_should_stop) {
+  if (mumu_launching.exchange(true)) {
+    return {campcat::mumu_state::failed, "another launch is already in flight"};
+  }
+  if (!acquire_cycle(cycle_running)) {
+    mumu_launching.store(false);
+    return {campcat::mumu_state::failed, "an automation cycle is running"};
+  }
+  campcat::mumu_status st = mumu_launch_sequence(snapshot_cfg(), _should_stop);
+  mumu_launching.store(false);
+  release_cycle(cycle_running);
+  return st;
+}
+
+campcat::mumu_status shell_state::mumu_launch_sequence(
+    const campcat::app_config &shell,
+    const std::function<bool()> &_should_stop) {
+  const std::string tool = shell.mumutool_path;
+  const std::string app = campcat::mumu_app_path(tool);
+  const int index = shell.mumu_device_index;
+  // The app this run launched, if any; feeds the watchdog and is what
+  // the shutdown path quits. Empty keeps somebody else's app alive.
+  std::string app_owned;
+  auto publish = [this](const campcat::mumu_status &_st) {
+    std::lock_guard<std::mutex> lk(mumu_mu);
+    mumu_report = _st;
+  };
+
+  campcat::mumu_status st = campcat::mumu_query_state(tool, index);
+  if (st.state == campcat::mumu_state::service_down) {
+    // mumutool is only a client of MuMuPlayer's service: with the app down
+    // it cannot answer `info` at all, so the app has to come first.
+    st = campcat::mumu_launch_app(app);
+    if (st.state != campcat::mumu_state::failed) {
+      app_owned = app;
+      {
+        std::lock_guard<std::mutex> lk(mumu_mu);
+        mumu_app_started = app;
+      }
+      st =
+          campcat::mumu_wait_service(tool, index, k_mumu_service_timeout_ms,
+                                     _should_stop);
+    }
+  }
+  if (st.state == campcat::mumu_state::failed) {
+    publish(st);
+    return st;
+  }
+  if (st.state != campcat::mumu_state::stopped) {
+    // Somebody already had it up. Leave it alone and arm no watchdog:
+    // that would close an instance we did not start. An app we just
+    // launched is still ours to quit; `mumu_app_started` holds that.
+    st.message = "already up";
+    publish(st);
+    return st;
+  }
+
+  st = campcat::mumu_open(tool, index);
+  if (st.state == campcat::mumu_state::failed) {
+    publish(st);
+    return st;
+  }
+  st = campcat::mumu_wait_ready(tool, index, k_mumu_ready_timeout_ms,
+                                _should_stop);
+  // A cancelled wait still leaves an instance we opened booting, so it stays
+  // ours to close on exit. A plain failure arms nothing.
+  const bool cancelled = _should_stop && _should_stop();
+  if (st.state == campcat::mumu_state::failed && !cancelled) {
+    publish(st);
+    return st;
+  }
+
+  // Spawn first: the watchdog then covers the gap before anything is
+  // recorded. Record either way, so an instance we started is still closed
+  // on a clean exit when no watchdog could be armed.
+  auto wd = campcat::mumu_spawn_watchdog(
+      tool, index, static_cast<long>(::getpid()), app_owned);
+  const bool armed = wd.has_value();
+  {
+    std::lock_guard<std::mutex> lk(mumu_mu);
+    mumu_launched_path = tool;
+    mumu_launched_index = index;
+    mumu_watchdog = std::move(wd);
+  }
+  if (!cancelled && !armed) {
+    st.message = "started, but no watchdog could be armed";
+  }
+  publish(st);
+  return st;
 }
 
 void shell_state::refresh_scheduler_locked(bool _immediate_first_tick) {
