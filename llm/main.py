@@ -19,6 +19,7 @@ from typing import Iterator
 
 import graph
 import models
+import observability
 import protocol
 import transport
 
@@ -39,6 +40,8 @@ def handle_request(req: dict) -> Iterator[dict]:
         return
     if rtype == "reset":
         graph.reset_history()
+        # A reset ends one conversation; the next turns get a fresh session id.
+        observability.new_session()
         yield protocol.build_result(rid, True, turns=0)
         return
     if rtype == "memorize":
@@ -108,6 +111,8 @@ def main(argv: list[str]) -> int:
     applied = models.load_env_file(pathlib.Path(__file__).resolve().parent / ".env")
     if applied:
         print(f"[sidecar] loaded {applied} var(s) from llm/.env", file=sys.stderr)
+    # After the env file, or Langfuse builds its client without credentials.
+    observability.start()
 
     if not once:
         emit(protocol.build_ready())
@@ -126,6 +131,7 @@ def main(argv: list[str]) -> int:
         if once:
             break
 
+    observability.flush()
     return 0
 
 

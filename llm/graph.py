@@ -28,6 +28,7 @@ from langgraph.graph import END, StateGraph
 from langgraph.runtime import Runtime
 
 import models
+import observability
 import tools
 
 # Tools hand back PNG only, so the mime type is fixed here. Add a protocol field
@@ -141,14 +142,15 @@ def memorize(memory: str) -> str | None:
         instructions = models.MEMORY_INSTRUCTIONS.format(
             max_chars=models.memory_max_chars()
         )
-        reply = model.invoke([
-            SystemMessage(content=instructions),
-            HumanMessage(content=(
-                "## Notes so far\n" + (memory.strip() or "(none)") +
-                "\n\n## Session transcript\n" +
-                _transcript(_MESSAGES[_MEMORIZED_UPTO:])
-            )),
-        ])
+        with observability.turn("rewrite-memory") as callbacks:
+            reply = model.invoke([
+                SystemMessage(content=instructions),
+                HumanMessage(content=(
+                    "## Notes so far\n" + (memory.strip() or "(none)") +
+                    "\n\n## Session transcript\n" +
+                    _transcript(_MESSAGES[_MEMORIZED_UPTO:])
+                )),
+            ], config={"callbacks": callbacks})
     except Exception as exc:  # noqa: BLE001 - a missed update, never fatal
         print(f"[sidecar] memory not updated: {exc}", file=sys.stderr)
         return None
@@ -503,25 +505,30 @@ def stream_turn(state: TurnState,
     last_step: object = None
     gap_pending = False
     emitted = False
-    for mode, payload in _GRAPH.stream(state, stream_mode=["messages", "values"]):
-        if mode == "values":
-            out_state.update(payload)
-            continue
-        chunk, meta = payload
-        # Both the input echo (build_messages) and the summarizer (compact)
-        # stream chunks too; only invoke is the answer.
-        if meta.get("langgraph_node") != "invoke":
-            continue
-        step = meta.get("langgraph_step")
-        if step != last_step:
-            last_step = step
-            gap_pending = emitted
-        text = _content_to_text(getattr(chunk, "content", ""))
-        if not text:
-            yield (False, "")
-            continue
-        if gap_pending:
-            gap_pending = False
-            yield (True, "\n\n")
-        emitted = True
-        yield (True, text)
+    with observability.turn("handle-turn", state.get("text", "")) as callbacks:
+        for mode, payload in _GRAPH.stream(
+            state,
+            stream_mode=["messages", "values"],
+            config={"callbacks": callbacks},
+        ):
+            if mode == "values":
+                out_state.update(payload)
+                continue
+            chunk, meta = payload
+            # Both the input echo (build_messages) and the summarizer (compact)
+            # stream chunks too; only invoke is the answer.
+            if meta.get("langgraph_node") != "invoke":
+                continue
+            step = meta.get("langgraph_step")
+            if step != last_step:
+                last_step = step
+                gap_pending = emitted
+            text = _content_to_text(getattr(chunk, "content", ""))
+            if not text:
+                yield (False, "")
+                continue
+            if gap_pending:
+                gap_pending = False
+                yield (True, "\n\n")
+            emitted = True
+            yield (True, text)
