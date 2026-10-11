@@ -1,5 +1,7 @@
 #include "app/ui/template_capture_panel.h"
 
+#include "app/ui/activity_status.h"
+#include "app/ui/fonts.h"
 #include "ccat_driver/ccat_script_profile.h"
 #include "core/adb_client.h"
 #include "core/app_config.h"
@@ -159,6 +161,26 @@ void clear_capture() {
     release_tex();
 }
 
+/// The toolkit ships no help marker; this is the one from its own demo. A
+/// dimmed question mark whose answer appears on hover, wrapped, because these
+/// answers are a sentence rather than a word.
+void help_marker(const char *_text) {
+    ImGui::TextDisabled("(?)");
+    if (ImGui::BeginItemTooltip()) {
+        ImGui::PushTextWrapPos(ImGui::GetFontSize() * 35.0F);
+        ImGui::TextUnformatted(_text);
+        ImGui::PopTextWrapPos();
+        ImGui::EndTooltip();
+    }
+}
+
+/// What the panel used to print above and below the image, merged: both are
+/// reference rather than instruction, so neither needs the line it cost.
+constexpr char k_help_text[] =
+    "Drag on image after Capture to select ROI. Preview is 1:1 device pixels; "
+    "scroll when larger than viewport. PNG files are saved next to the .ccat "
+    "script.";
+
 } // namespace
 
 void template_capture_panel_shutdown_gl() { clear_capture(); }
@@ -167,35 +189,59 @@ void template_capture_panel_draw(campcat::app_config &_cfg,
                                  campcat::ccat_script_profile *_ccat_ui,
                                  bool _disable_capture) {
     if (!_ccat_ui) {
-        ImGui::TextDisabled("(CampCat bundle missing)");
+        ImGui::TextColored(
+            campcat::activity_color(campcat::activity_level::waiting),
+            "(CampCat bundle missing)");
         return;
     }
 
     // No title and no separator here: the caller draws this inside the
     // "Screenshot crop (ADB)" collapsing header, which already names it.
-    ImGui::TextDisabled(
-        "Drag on image after Capture to select ROI. Preview is 1:1 device "
-        "pixels; scroll when larger than viewport.");
-
     if (_disable_capture) {
         ImGui::BeginDisabled();
     }
-    if (ImGui::Button("Capture##adb_tpl")) {
-        capture_clicked(_cfg);
-    }
+    WITH_FONT(bold, {
+        if (ImGui::Button("Capture##adb_tpl")) {
+            capture_clicked(_cfg);
+        }
+    })
     if (_disable_capture) {
         ImGui::EndDisabled();
     }
 
+    // Read after Capture, so a click that drops the old selection also drops
+    // the Save enabled by it.
+    const bool can_save = g_has_sel && !g_bgr.empty();
     ImGui::SameLine();
-    if (ImGui::Button("Clear##adb_tpl")) {
-        clear_capture();
+    if (!can_save) {
+        ImGui::BeginDisabled();
+    }
+    bool save_crop = false;
+    WITH_FONT(bold, { save_crop = ImGui::Button("Save##adb_tpl"); })
+    if (!can_save) {
+        ImGui::EndDisabled();
     }
 
-    ImGui::InputText("png filename##adb_tpl", &g_filename);
+    ImGui::SameLine();
+    WITH_FONT(bold, {
+        if (ImGui::Button("Clear##adb_tpl")) {
+            clear_capture();
+        }
+    })
+
+    ImGui::SameLine();
+    help_marker(k_help_text);
+
+    // The field's own name, moved out of the row so the name stops competing
+    // with the value for it.
+    ImGui::InputText("##adb_tpl_name", &g_filename);
+    ImGui::SameLine();
+    help_marker("Template File Name");
 
     if (g_tex == 0 || g_bgr.empty()) {
-        ImGui::TextDisabled("(no screenshot)");
+        ImGui::TextColored(
+            campcat::activity_color(campcat::activity_level::waiting),
+            "(no screenshot)");
         return;
     }
 
@@ -258,11 +304,10 @@ void template_capture_panel_draw(campcat::app_config &_cfg,
 
     ImGui::TextDisabled("size: %dx%d px", g_tex_w, g_tex_h);
 
-    if (ImGui::Button("Save crop##adb_tpl")) {
-        if (!g_has_sel) {
-            campcat::automation_log::emit(
-                "[capture] drag on image and release to finalize selection");
-        } else if (!safe_leaf_name(g_filename)) {
+    // A click cannot arrive with no selection or no frame: Save is disabled
+    // without both.
+    if (save_crop) {
+        if (!safe_leaf_name(g_filename)) {
             campcat::automation_log::emit(
                 "[capture] invalid filename (no path separators)");
         } else if (!_ccat_ui->has_script_source()) {
@@ -300,6 +345,4 @@ void template_capture_panel_draw(campcat::app_config &_cfg,
             }
         }
     }
-
-    ImGui::TextDisabled("PNG files are saved next to the .ccat script.");
 }

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <filesystem>
+#include <string_view>
 
 /// Width of the script list column, which sits beside the conversation rather
 /// than taking height off it.
@@ -22,6 +23,29 @@ inline constexpr float k_script_list_w = 180.0F;
  */
 void script_editor_panel_draw(const std::filesystem::path &_script_dir,
                               float _list_w, float _list_h);
+
+/**
+ * @brief Open one bundle's editor window, the same window a double-click in the
+ * list opens.
+ *
+ * For callers that know which bundle they want without showing the list, such
+ * as the Script page's path box. A bundle already open keeps its unsaved text.
+ *
+ * @param[in] _script_dir The bundle root, as in script_editor_panel_draw.
+ * @param[in] _name       A bundle directory name under `_script_dir`.
+ */
+void script_editor_open(const std::filesystem::path &_script_dir,
+                        std::string_view _name);
+
+/**
+ * @brief Draw every open script window, and drop the ones closed since the last
+ * call.
+ *
+ * Split out of script_editor_panel_draw so a page that has no list -- the
+ * Script page -- can still show the windows it opens. Each editor carries the
+ * bundle root it was opened from, so this needs no directory of its own.
+ */
+void script_editor_draw_windows();
 
 /// @brief Release the preview textures and close the editors. Must run before
 /// the GL context goes away.

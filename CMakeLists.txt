@@ -232,6 +232,7 @@ add_executable(campcat
   src/app/main.cpp
   src/app/shell_state.cpp
   src/app/ui/llm_panel.cpp
+  src/app/ui/log_panel.cpp
   src/app/ui/console_panel.cpp
   src/app/ui/script_panel.cpp
   src/app/ui/settings_panel.cpp
@@ -240,6 +241,7 @@ add_executable(campcat
   src/app/ui/prompt_input.cpp
   src/app/ui/fonts.cpp
   src/app/ui/gl_texture.cpp
+  src/app/ui/icon_texture.cpp
   src/app/ui/native_file_dialog.cpp
   ${campcat_platform_sources}
 )

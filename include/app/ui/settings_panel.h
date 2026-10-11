@@ -6,8 +6,8 @@ struct app_config;
 } // namespace campcat
 
 /**
- * @brief Draw the Settings page: timing and matching, ADB, the emulator
- * launcher, and the scheduler parameters.
+ * @brief Draw the Settings page: timing and matching, ADB, and the emulator
+ * launcher.
  *
  * @param[in,out] _st Shell state: the adb/mumu buffers and the launch job.
  * @param[in,out] _cfg_view This frame's config view.

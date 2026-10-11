@@ -42,6 +42,10 @@ const ImVec4 k_err_col = ImVec4(0.95F, 0.42F, 0.42F, 1.0F);
 struct script_editor {
     std::string name;
     std::filesystem::path main_path;
+    /// The bundle root this script lives under. Held here rather than passed to
+    /// draw time because the Script page opens windows too, and it has no way
+    /// to know which root any given open window belongs to.
+    std::filesystem::path dir;
     std::string loaded; ///< what the file held when opened or last saved
     std::string status; ///< last save/reload outcome, shown on the button row
     bool status_error = false;
@@ -167,9 +171,11 @@ ImVec2 preview_size(int _w, int _h) {
                   static_cast<float>(_h) * scale);
 }
 
-script_editor *find_editor(const std::string &_name) {
+/// Keyed by the file, not the name: two roots can each hold a bundle of the
+/// same name, and those are not the same script.
+script_editor *find_editor(const std::filesystem::path &_main_path) {
     for (const std::unique_ptr<script_editor> &entry : g_editors) {
-        if (entry->name == _name) {
+        if (entry->main_path == _main_path) {
             return entry.get();
         }
     }
@@ -177,7 +183,9 @@ script_editor *find_editor(const std::string &_name) {
 }
 
 void open_editor(const std::filesystem::path &_dir, const std::string &_name) {
-    if (script_editor *found = find_editor(_name)) {
+    const std::filesystem::path main_path =
+        campcat::ccat_lang::bundle_main(_dir, _name);
+    if (script_editor *found = find_editor(main_path)) {
         found->open = true;
         found->focus = true;
         return;
@@ -185,7 +193,8 @@ void open_editor(const std::filesystem::path &_dir, const std::string &_name) {
 
     auto entry = std::make_unique<script_editor>();
     entry->name = _name;
-    entry->main_path = campcat::ccat_lang::bundle_main(_dir, _name);
+    entry->dir = _dir;
+    entry->main_path = main_path;
     if (!read_text_file(entry->main_path, &entry->loaded)) {
         entry->status = "could not read " + entry->main_path.string();
         entry->status_error = true;
@@ -337,7 +346,8 @@ void draw_rename_modal(const std::filesystem::path &_dir) {
                                               &rewritten, &g_rename_error) ==
             campcat::ccat_lang::rename_status::ok) {
             // The window follows its script; its file is the same one, renamed.
-            if (script_editor *open = find_editor(g_rename_name)) {
+            if (script_editor *open = find_editor(
+                    campcat::ccat_lang::bundle_main(_dir, g_rename_name))) {
                 open->name = typed;
                 open->main_path = campcat::ccat_lang::bundle_main(_dir, typed);
             }
@@ -392,7 +402,8 @@ void draw_delete_modal(const std::filesystem::path &_dir) {
         if (campcat::ccat_lang::delete_bundle(_dir, g_delete_name, &err) ==
             campcat::ccat_lang::delete_status::ok) {
             // Its file is gone, so a Save in that window could only fail.
-            if (script_editor *open = find_editor(g_delete_name)) {
+            if (script_editor *open = find_editor(
+                    campcat::ccat_lang::bundle_main(_dir, g_delete_name))) {
                 open->open = false;
             }
             g_next_scan = 0.0; // drop the row now instead of within a second
@@ -410,14 +421,17 @@ void draw_delete_modal(const std::filesystem::path &_dir) {
     ImGui::EndPopup();
 }
 
-void draw_editor(const std::filesystem::path &_dir, script_editor &_e) {
+void draw_editor(script_editor &_e) {
     if (!_e.open) {
         return;
     }
     const std::filesystem::path bundle_dir = _e.main_path.parent_path();
     const bool dirty = _e.editor->GetText() != _e.loaded;
+    // The file, not the name, in the id: two roots can hold same-named bundles,
+    // and equal ids make ImGui treat two windows as one. (A path containing "#"
+    // would split the id here; no such path is expected.)
     const std::string title = "script: " + _e.name + (dirty ? " *" : "") +
-                              "###script_editor_" + _e.name;
+                              "###script_editor_" + _e.main_path.string();
 
     if (_e.focus) {
         ImGui::SetNextWindowFocus();
@@ -438,14 +452,12 @@ void draw_editor(const std::filesystem::path &_dir, script_editor &_e) {
                         ImGui::GetStyle().SeparatorTextPadding.y * 2.0F +
                         ImGui::GetStyle().ItemSpacing.y + k_templates_h +
                         footer;
-    ImGui::PushFont(campcat::app::fonts_get(campcat::app::font_role::mono));
-    _e.editor->Render("##ccat", ImVec2(0.0F, -below));
-    ImGui::PopFont();
+    WITH_FONT(mono, { _e.editor->Render("##ccat", ImVec2(0.0F, -below)); });
 
     // Templates, read-only: the point of hovering is to see what the model cut.
     ImGui::SeparatorText("Resources");
     const std::vector<std::string> templates =
-        campcat::ccat_lang::bundle_templates(_dir, _e.name);
+        campcat::ccat_lang::bundle_templates(_e.dir, _e.name);
     ImGui::BeginChild("templates", ImVec2(0.0F, k_templates_h),
                       ImGuiChildFlags_Borders);
     if (templates.empty()) {
@@ -460,7 +472,7 @@ void draw_editor(const std::filesystem::path &_dir, script_editor &_e) {
     ImGui::EndChild();
 
     if (ImGui::Button("Save")) {
-        save_editor(_dir, _e);
+        save_editor(_e.dir, _e);
     }
     if (ImGui::IsItemHovered()) {
         ImGui::SetTooltip("Write main.ccat (Cmd+S)");
@@ -484,12 +496,29 @@ void draw_editor(const std::filesystem::path &_dir, script_editor &_e) {
     // Cmd on macOS, Ctrl elsewhere; ImGui maps the platform modifier onto Ctrl.
     if (ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows) &&
         ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiKey_S)) {
-        save_editor(_dir, _e);
+        save_editor(_e.dir, _e);
     }
     ImGui::End();
 }
 
 } // namespace
+
+void script_editor_open(const std::filesystem::path &_script_dir,
+                        std::string_view _name) {
+    open_editor(_script_dir, std::string(_name));
+}
+
+void script_editor_draw_windows() {
+    for (const std::unique_ptr<script_editor> &entry : g_editors) {
+        draw_editor(*entry);
+    }
+    // Windows the user closed go away with their editor, along with its undo.
+    g_editors.erase(
+        std::remove_if(
+            g_editors.begin(), g_editors.end(),
+            [](const std::unique_ptr<script_editor> &_e) { return !_e->open; }),
+        g_editors.end());
+}
 
 void script_editor_panel_draw(const std::filesystem::path &_script_dir,
                               float _list_w, float _list_h) {
@@ -521,15 +550,7 @@ void script_editor_panel_draw(const std::filesystem::path &_script_dir,
     }
     draw_delete_modal(_script_dir);
     draw_rename_modal(_script_dir);
-    for (const std::unique_ptr<script_editor> &entry : g_editors) {
-        draw_editor(_script_dir, *entry);
-    }
-    // Windows the user closed go away with their editor, along with its undo.
-    g_editors.erase(
-        std::remove_if(
-            g_editors.begin(), g_editors.end(),
-            [](const std::unique_ptr<script_editor> &_e) { return !_e->open; }),
-        g_editors.end());
+    script_editor_draw_windows();
 }
 
 void script_editor_panel_shutdown_gl() {

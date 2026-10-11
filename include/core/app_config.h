@@ -8,13 +8,14 @@
 namespace campcat {
 
 /**
- * @brief Controls the optional GUI-driven periodic automation worker.
+ * @brief Cadence of the GUI-driven periodic automation worker.
+ *
+ * No on/off here: arming is a runtime action (the Script page's Start
+ * schedule), not saved state, and the worker never starts by itself.
  */
 struct scheduler_config {
-    bool enabled = false;
     int interval_seconds = 3600;
     int jitter_seconds = 90;
-    bool skip_if_busy = true;
 };
 
 /// Locating and talking to the device bridge.

@@ -27,6 +27,17 @@ void console_panel_draw(campcat::shell_state &_st,
     ImGui::BeginChild("console_history",
                       ImVec2(0.0F, -ImGui::GetFrameHeightWithSpacing() * 2.5F),
                       ImGuiChildFlags_Borders);
+    // The same affordance as the log and the LLM panes: right-click the output
+    // rather than a button beside the prompt. Clearing brings back the empty
+    // state below, so it is only offered when there is output to drop.
+    if (ImGui::BeginPopupContextWindow("console_history_ctx",
+                                       ImGuiPopupFlags_MouseButtonRight)) {
+        if (ImGui::MenuItem("Clear output", nullptr, false,
+                            !console_repl.history.empty())) {
+            console_repl.history.clear();
+        }
+        ImGui::EndPopup();
+    }
     // An empty bordered box reads as a drawing glitch rather than as "no
     // output yet". Offset and centred the way the LLM log places its own
     // empty state, so the two panes read the same at rest.
@@ -35,12 +46,13 @@ void console_panel_draw(campcat::shell_state &_st,
         const char *hint = "Send some ccat script code for execution.";
         const ImVec2 avail = ImGui::GetContentRegionAvail();
         ImGui::SetCursorPosY(ImGui::GetCursorPosY() + avail.y * 0.4F);
-        ImGui::PushFont(campcat::app::fonts_get(campcat::app::font_role::bold));
-        ImGui::SetCursorPosX(
-            ImGui::GetCursorPosX() +
-            std::max(0.0F, (avail.x - ImGui::CalcTextSize(title).x) * 0.5F));
-        ImGui::TextUnformatted(title);
-        ImGui::PopFont();
+        WITH_FONT(bold, {
+            ImGui::SetCursorPosX(
+                ImGui::GetCursorPosX() +
+                std::max(0.0F,
+                         (avail.x - ImGui::CalcTextSize(title).x) * 0.5F));
+            ImGui::TextUnformatted(title);
+        });
         ImGui::SetCursorPosX(
             ImGui::GetCursorPosX() +
             std::max(0.0F, (avail.x - ImGui::CalcTextSize(hint).x) * 0.5F));
@@ -62,19 +74,18 @@ void console_panel_draw(campcat::shell_state &_st,
 
     ImGui::TextUnformatted(console_repl.prompt());
     ImGui::SameLine();
-    ImGui::SetNextItemWidth(-80.0F);
+    // The whole width now: the Clear button that used to sit here is the
+    // context menu on the output above.
+    ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
     const bool submit =
         prompt_input_text("##console_in", nullptr, &console_input);
     // Must run immediately after InputText; later widgets would steal -1.
     if (submit && !_busy_now) {
         ImGui::SetKeyboardFocusHere(-1);
     }
-    ImGui::SameLine();
-    if (ImGui::Button("Clear")) {
-        console_repl.clear();
-        console_repl.history.push_back("(cleared)");
-    }
 
+    // Drops the half-typed multiline buffer, not the output: `clear()` is named
+    // for that buffer alone. The menu item above is what clears the output.
     if (ImGui::IsKeyPressed(ImGuiKey_Escape)) {
         console_repl.clear();
     }

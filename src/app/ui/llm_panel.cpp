@@ -11,6 +11,7 @@
 #include "app/ui/activity_status.h"
 #include "app/ui/fonts.h"
 #include "app/ui/gl_texture.h"
+#include "app/ui/icon_texture.h"
 #include "app/ui/prompt_input.h"
 #include "app/ui/script_editor_panel.h"
 
@@ -55,6 +56,10 @@ constexpr int k_turn_cap = 30;
 /// the button frame so the icon does not touch the edges; the source is 32px,
 /// so this also halves it, which is what the 8 teeth need to stay separate.
 constexpr float k_gear_side = 20.0F;
+
+/// How far the status line under the prompt box is inset, so it reads as a
+/// footnote on the conversation rather than another control.
+constexpr float k_stat_indent = 12.0F;
 
 /// One exchange in the conversation: what was sent and what came back.
 struct llm_turn {
@@ -134,7 +139,8 @@ ImGui::MarkdownConfig &md_config() {
 // Worker state.
 std::atomic<bool> g_running{false};
 /// True while the worker is consolidating memory rather than answering a turn.
-/// Only changes the Send button's label; the disable itself is `g_running`.
+/// Only changes what the Send button's tooltip says; the disable itself is
+/// `g_running`.
 /// Set and cleared inside the worker that does the consolidating, so there is
 /// no path that can leave it stuck on.
 std::atomic<bool> g_memorizing{false};
@@ -159,6 +165,17 @@ std::filesystem::path g_config_home;
 bool g_mem_open = false;
 std::string g_mem_buf;
 
+/// The sidecar's own count of the turns it still holds verbatim, taken from
+/// each successful reply. Deliberately not `g_turns.size()`: that counts
+/// bubbles and stops at `k_turn_cap`, while the sidecar drops turns on a token
+/// budget and folds them into a summary.
+int g_sidecar_turns = 0;
+/// Characters in the memory file, for the status line. The window that shows
+/// the notes is opened on demand, so this is kept even while it is closed.
+int g_memory_chars = 0;
+/// When `g_memory_chars` was last read, so the file is not re-read per frame.
+double g_memory_read_at = 0.0;
+
 /// (Re)read the memory file into the window's buffer.
 void reload_memory() {
     std::string text;
@@ -168,6 +185,21 @@ void reload_memory() {
         text = "(no memory yet)";
     }
     g_mem_buf = std::move(text);
+}
+
+/// Refresh the memory size, at most once a second: it changes on an idle pass,
+/// not on a frame. A read that fails keeps the last known number rather than
+/// claiming an empty memory.
+void refresh_memory_chars() {
+    const double now = ImGui::GetTime();
+    if (now - g_memory_read_at < 1.0) {
+        return;
+    }
+    g_memory_read_at = now;
+    std::string text;
+    if (campcat::llm::read_memory(g_config_home, &text)) {
+        g_memory_chars = static_cast<int>(text.size());
+    }
 }
 
 /// Read-only view of the notes, with the one destructive action behind a
@@ -529,6 +561,10 @@ void consume_handoff() {
     g_last_llm = ImGui::GetTime();
 
     if (h.is_memory) {
+        if (h.res.ok) {
+            // Exactly the notes `memorize` wrote back, so no re-read.
+            g_memory_chars = static_cast<int>(h.res.text.size());
+        }
         campcat::automation_log::emit(
             h.res.ok ? "[llm] long-term memory updated"
                      : "[llm] memory not saved: " + h.res.error);
@@ -538,6 +574,9 @@ void consume_handoff() {
     if (!h.is_reset) {
         fill_reply(h.res);
         if (h.res.ok) {
+            // Reported by the sidecar on a successful turn only: a result
+            // without the field parses as 0, so a failure must not zero this.
+            g_sidecar_turns = h.res.turns;
             campcat::automation_log::emit("[llm] ok");
         } else {
             campcat::automation_log::emit("[llm] failed: " + h.res.error);
@@ -549,6 +588,7 @@ void consume_handoff() {
         return;
     }
     drop_all_turns();
+    g_sidecar_turns = 0;
     g_pin_bottom = true;
     campcat::automation_log::emit("[llm] conversation cleared");
 }
@@ -584,12 +624,12 @@ void draw_empty_state() {
     const char *hint = "It looks at the device screen itself, then taps";
     const ImVec2 avail = ImGui::GetContentRegionAvail();
     ImGui::SetCursorPosY(ImGui::GetCursorPosY() + avail.y * 0.4F);
-    ImGui::PushFont(fonts_get(font_role::bold));
-    ImGui::SetCursorPosX(
-        ImGui::GetCursorPosX() +
-        std::max(0.0F, (avail.x - ImGui::CalcTextSize(title).x) * 0.5F));
-    ImGui::TextUnformatted(title);
-    ImGui::PopFont();
+    WITH_FONT(bold, {
+        ImGui::SetCursorPosX(
+            ImGui::GetCursorPosX() +
+            std::max(0.0F, (avail.x - ImGui::CalcTextSize(title).x) * 0.5F));
+        ImGui::TextUnformatted(title);
+    });
     ImGui::SetCursorPosX(
         ImGui::GetCursorPosX() +
         std::max(0.0F, (avail.x - ImGui::CalcTextSize(hint).x) * 0.5F));
@@ -671,9 +711,7 @@ void draw_turn(llm_turn &_t, int _index) {
     } else if (_t.ok) {
         ImGui::Markdown(_t.reply.c_str(), _t.reply.size(), md_config());
     } else {
-        ImGui::PushFont(fonts_get(font_role::bold));
-        ImGui::TextColored(k_err_col, "Request failed");
-        ImGui::PopFont();
+        WITH_FONT(bold, { ImGui::TextColored(k_err_col, "Request failed"); });
         ImGui::TextWrapped("%s", _t.error.c_str());
     }
     ImGui::EndChild();
@@ -715,39 +753,28 @@ bool sync_approval_texture(const campcat::llm_approval &_a) {
 }
 
 /// The gear next to Send, and the approval gates behind it.
-GLuint g_gear_tex = 0;
-int g_gear_w = 0;
-int g_gear_h = 0;
-
-/// The gear, relative to the working directory the app is started from (the
-/// same base `fonts.cpp` resolves `assets/fonts/` against). White on purpose:
-/// the draw call tints it, so the icon takes the button's text colour instead
-/// of being frozen to one the theme may not use.
 ///
-/// A designed replacement drops in here as a 32px white PNG with an alpha
-/// channel; OpenCV hands a 4-channel PNG back as BGRA, which is what the upload
-/// wants. This one was drawn rather than designed: a white disc at radius 0.63
-/// of the half-size, eight teeth out to 0.875, a hub punched back out at 0.22,
-/// all 8x supersampled and INTER_AREA'd down.
+/// The gear, relative to the working directory the app is started from (the
+/// same base `fonts.cpp` resolves `assets/fonts/` against). Drawn rather than
+/// designed: a white disc at radius 0.63 of the half-size, eight teeth out to
+/// 0.875, a hub punched back out at 0.22, all 8x supersampled and INTER_AREA'd
+/// down. White on an alpha channel is the shape `load_icon` uploads.
 constexpr char k_gear_path[] = "assets/icons/gear.png";
 
-/// Uploaded once, on first draw: the icon never changes, and this is only
-/// reached while frames are being drawn, so the GL context is current. A
-/// missing file leaves the button as a bare frame rather than a crash --
-/// `imread` returns an empty Mat for one, it does not throw.
-GLuint gear_icon() {
-    if (g_gear_tex != 0) {
-        return g_gear_tex;
-    }
-    const cv::Mat icon = cv::imread(k_gear_path, cv::IMREAD_UNCHANGED);
-    if (icon.empty()) {
-        campcat::automation_log::emit(
-            std::string("[llm] gear icon did not load: ") + k_gear_path);
-        return 0;
-    }
-    g_gear_tex = campcat::app::upload_bgra(icon, &g_gear_w, &g_gear_h);
-    return g_gear_tex;
-}
+/// The paper plane on Send. White on purpose, like the gear: `load_icon` hands
+/// back a glyph the draw call tints, so an enabled button shows it in the text
+/// colour and a disabled one in that colour faded -- `BeginDisabled` scales the
+/// alpha that `GetColorU32` hands back, so the icon fades with the button
+/// instead of staying lit.
+///
+/// Drawn rather than designed, like the gear: two triangles sharing an apex at
+/// (29,16), the wings swept back to (4,4) and (4,28), notched at (12,16), all
+/// 8x supersampled and INTER_AREA'd down.
+constexpr char k_send_path[] = "assets/icons/send.png";
+
+/// How wide the plane is drawn inside its square button, in pixels. The same
+/// box the gear uses, so the two square buttons carry equally sized icons.
+constexpr float k_send_icon_side = 20.0F;
 
 /// Which tools ask the human before acting. The master switch keeps its old
 /// meaning -- off means nothing asks -- and the seven under it only matter
@@ -762,7 +789,7 @@ void draw_approval_settings(campcat::app_config &_c) {
     }
     // Drawn after the button, into the same window list, so the icon lands on
     // top of the frame. Tinted with the text colour so it follows the theme.
-    const GLuint tex = gear_icon();
+    const GLuint tex = campcat::app::load_icon(k_gear_path);
     if (tex != 0) {
         const ImVec2 mn = ImGui::GetItemRectMin();
         const float pad = (side - k_gear_side) * 0.5F;
@@ -1010,9 +1037,7 @@ void draw_approval_bubble(const campcat::llm_approval &_a) {
                       ImGuiChildFlags_AutoResizeY |
                           ImGuiChildFlags_AlwaysUseWindowPadding,
                       ImGuiWindowFlags_NoScrollbar);
-    ImGui::PushFont(fonts_get(font_role::bold));
-    ImGui::TextUnformatted("Waiting for your approval");
-    ImGui::PopFont();
+    WITH_FONT(bold, { ImGui::TextUnformatted("Waiting for your approval"); });
     ImGui::TextDisabled("%s", _a.summary.c_str());
     if (g_appr_tex != 0 && g_appr_w > 0) {
         const ImVec2 size = fit_image(g_appr_w, g_appr_h, k_approval_max_w);
@@ -1114,8 +1139,7 @@ void draw_emulator_bubble() {
 /// context menu, so the caller can start the reset on the worker.
 bool draw_log(const ImVec2 &_size) {
     bool clear_requested = false;
-    ImGui::BeginChild("llm_log", _size, ImGuiChildFlags_Borders,
-                      ImGuiWindowFlags_HorizontalScrollbar);
+    ImGui::BeginChild("llm_log", _size, ImGuiChildFlags_Borders);
     if (ImGui::BeginPopupContextWindow("llm_log_ctx",
                                        ImGuiPopupFlags_MouseButtonRight)) {
         // Greyed out while a turn is in flight, because clearing would have to
@@ -1133,6 +1157,13 @@ bool draw_log(const ImVec2 &_size) {
         }
         ImGui::EndPopup();
     }
+    // Placed after the context menu so right-clicking the log does not pop a
+    // bigger menu, and popped below so nothing outside the conversation
+    // inherits it. The empty state and the trailing bubbles are conversation
+    // too. A real face, not `SetWindowFontScale`: the scale would leave
+    // `io.FontGlobalScale` at 1.0, and `imgui_markdown` wraps replies to that,
+    // clipping the tail of every line.
+    ImGui::PushFont(fonts_get(font_role::chat));
     if (g_turns.empty()) {
         draw_empty_state();
     }
@@ -1166,6 +1197,7 @@ bool draw_log(const ImVec2 &_size) {
         ImGui::Spacing();
         draw_emulator_bubble();
     }
+    ImGui::PopFont();
 
     // Follow new content only while the user is already at the bottom.
     if (g_pin_bottom) {
@@ -1210,7 +1242,10 @@ void llm_panel_shutdown_gl() {
     }
 
     campcat::app::delete_tex(&g_appr_tex, &g_appr_w, &g_appr_h);
-    campcat::app::delete_tex(&g_gear_tex, &g_gear_w, &g_gear_h);
+    // The gear, Send and the log's chevrons go with them. Nothing here owns
+    // them -- `load_icon` does -- but the context is still current at this
+    // point and this is where the panel's own textures are already released.
+    campcat::app::release_icons();
     g_appr_id = -1;
     drop_all_turns();
     g_thinking = false;
@@ -1316,13 +1351,12 @@ void llm_panel_draw_panel(campcat::shell_state &_st, campcat::app_config &_cfg,
         start_memorize(g_config_home);
     }
 
-    // The reservation has to track the widest label the button can carry (at
-    // 132px "Summarizing..." is the widest) plus the gear next to it. Derived
-    // rather than hard-coded: the old flat -116 pushed "Summarizing..." 26px
-    // past the content region.
+    // The button is square like the gear: the icon carries the meaning, so no
+    // label has to fit, and the 104px the text reserved goes back to the prompt
+    // box. The width still reserves exactly what follows the input.
     const bool memorizing = g_memorizing.load();
-    const float send_w = memorizing ? 132.0F : 104.0F;
     const float gap = ImGui::GetStyle().ItemSpacing.x;
+    const float send_w = ImGui::GetFrameHeight();
     const float gear_w = ImGui::GetFrameHeight() + gap;
     ImGui::SetNextItemWidth(-(send_w + gear_w + gap * 2.0F + 2.0F));
     const bool submitted =
@@ -1336,20 +1370,78 @@ void llm_panel_draw_panel(campcat::shell_state &_st, campcat::app_config &_cfg,
     if (!can_send) {
         ImGui::BeginDisabled();
     }
-    // A disabled Send with no explanation reads as a hung app, so an idle
-    // consolidation says what it is doing instead. Wider, because the label no
-    // longer fits the "Send" button's own width.
     ImGui::PushStyleColor(ImGuiCol_Button, k_primary);
     ImGui::PushStyleColor(ImGuiCol_ButtonHovered, k_primary_hi);
     ImGui::PushStyleColor(ImGuiCol_ButtonActive, k_primary_lo);
-    const bool clicked = ImGui::Button(memorizing ? "Summarizing..." : "Send",
-                                       ImVec2(send_w, 0.0F));
+    const bool clicked = ImGui::Button("##llm_send", ImVec2(send_w, 0.0F));
     ImGui::PopStyleColor(3);
+    // Read while disabled is still in effect: the icon wants the faded colour,
+    // the tooltip must not get it, so the tint is taken here and the tooltip
+    // goes out after EndDisabled.
+    const ImU32 send_tint = ImGui::GetColorU32(ImGuiCol_Text);
+    const bool send_hovered =
+        ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled);
+    const GLuint send_tex = campcat::app::load_icon(k_send_path);
+    if (send_tex != 0) {
+        const ImVec2 mn = ImGui::GetItemRectMin();
+        const float pad = (send_w - k_send_icon_side) * 0.5F;
+        ImGui::GetWindowDrawList()->AddImage(
+            static_cast<ImTextureID>(static_cast<uintptr_t>(send_tex)),
+            ImVec2(mn.x + pad, mn.y + pad),
+            ImVec2(mn.x + send_w - pad, mn.y + send_w - pad),
+            ImVec2(0.0F, 0.0F), ImVec2(1.0F, 1.0F), send_tint);
+    }
     if (!can_send) {
         ImGui::EndDisabled();
     }
+    // The label used to say why a disabled Send was disabled; an icon cannot,
+    // so that moved here. A disabled item never reports as hovered without the
+    // flag. An empty prompt needs no explanation, and a turn in flight already
+    // shows as its own header chip, so only the memory pass speaks up.
+    if (send_hovered) {
+        if (memorizing) {
+            ImGui::SetTooltip("Summarizing...");
+        } else if (can_send) {
+            ImGui::SetTooltip("Send");
+        }
+    }
     ImGui::SameLine();
     draw_approval_settings(_cfg);
+
+    // What the conversation currently holds, as a three-column grid so the
+    // numbers line up instead of running together. Two turn counts, because
+    // they answer different questions and drift apart: `turns` is what the
+    // model still holds verbatim, `shown` is what this panel has kept, capped
+    // at `k_turn_cap`.
+    refresh_memory_chars();
+    ImGui::Indent(k_stat_indent);
+    WITH_FONT(small, {
+        // Zero vertical cell padding: a row's height is its content plus
+        // `CellPadding.y * 2` (imgui_tables.cpp:1886), and this line is
+        // context, so the padding is the only slack worth removing. The
+        // horizontal half stays, so the columns keep their inset.
+        const float pad_x = ImGui::GetStyle().CellPadding.x;
+        ImGui::PushStyleVar(ImGuiStyleVar_CellPadding, ImVec2(pad_x, 0.0F));
+        if (ImGui::BeginTable("##llm_stats", 3,
+                              ImGuiTableFlags_SizingStretchSame)) {
+            ImGui::TableNextColumn();
+            ImGui::TextDisabled("Turns");
+            ImGui::SameLine();
+            ImGui::Text("%d", g_sidecar_turns);
+            ImGui::TableNextColumn();
+            ImGui::TextDisabled("Shown");
+            ImGui::SameLine();
+            ImGui::Text("%d/%d", static_cast<int>(g_turns.size()), k_turn_cap);
+            ImGui::TableNextColumn();
+            ImGui::TextDisabled("Memory (chars)");
+            ImGui::SameLine();
+            ImGui::Text("%d/%d", g_memory_chars,
+                        static_cast<int>(campcat::llm::k_memory_max_chars));
+            ImGui::EndTable();
+        }
+        ImGui::PopStyleVar();
+    });
+    ImGui::Unindent(k_stat_indent);
 
     if ((clicked || submitted) && can_send) {
         if (awaiting) {

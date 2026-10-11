@@ -16,8 +16,21 @@ constexpr char k_latin_regular[] = "assets/fonts/Arimo-Regular.ttf";
 constexpr char k_latin_bold[] = "assets/fonts/Arimo-Bold.ttf";
 constexpr char k_mono_regular[] = "assets/fonts/JetBrainsMono-Regular.ttf";
 
+/// How much larger the merged CJK face is rasterized than the Latin one it
+/// joins.
+///
+/// ImGui scales each face by its own hhea box, which lands Noto's hanzi within
+/// 3% of Arimo's capitals -- nominally the same height. On screen they are not:
+/// measured off a screenshot, a capital's solid ink runs 16px against a hanzi's
+/// 15px, and past a high alpha threshold the capital is still 14px tall while
+/// the hanzi has all but vanished. The strokes are simply lighter, and
+/// antialiasing eats more of their edge, so a hanzi reads smaller next to a
+/// capital. Scaling it up makes the two match where it matters, and the 3%
+/// overshoot is what closes the rest of the gap.
+constexpr float k_cjk_scale = 1.20F;
+
 /// Indexed by `font_role`. Written once by `fonts_init`, read-only after.
-ImFont *s_font[4] = {};
+ImFont *s_font[6] = {};
 
 ImFont *&slot(font_role _role) { return s_font[static_cast<int>(_role)]; }
 
@@ -28,7 +41,7 @@ void fonts_init() {
 
     // Every UI font is one family: a Latin face with the same CJK face merged
     // in so Chinese never lands on a font that lacks it. Sizes and weights stay
-    // per-use (16 body, 16 bold, 20 titles).
+    // per-use (14 small, 16 body, 16 bold, 18 chat, 20 titles).
     //
     // The bundled subset is tried first because it is the only candidate that
     // is actually guaranteed to be there -- the system paths below are the ones
@@ -98,7 +111,7 @@ void fonts_init() {
             ImFontConfig merge;
             merge.MergeMode = true;  // add to that font instead of replacing it
             merge.FontNo = cjk.face; // a .ttc holds several faces
-            io.Fonts->AddFontFromFileTTF(cjk.path, _size, &merge,
+            io.Fonts->AddFontFromFileTTF(cjk.path, _size * k_cjk_scale, &merge,
                                          cjk_ranges.data());
             break;
         }
@@ -132,6 +145,25 @@ void fonts_init() {
     // subset costs ~2 MB of atlas, which is why it is a subset at all.
     ImFont *font_mono = load_font(k_mono_regular, 16.0F, true, 0);
 
+    // The status line under the prompt box, which is context, not conversation.
+    // Latin-only like `title`: a CJK merge at every size is what makes the
+    // atlas expensive, and the line is ASCII.
+    ImFont *font_small = load_font(k_latin_regular, 14.0F, false, 0);
+    if (font_small == nullptr) {
+        font_small = font_body;
+    }
+
+    // The conversation, one size up from the chrome around it. A real face
+    // rather than a window font scale: `imgui_markdown` takes its wrap width
+    // from `io.FontGlobalScale`, which `SetWindowFontScale` leaves at 1.0, so a
+    // scaled window wraps each reply to its unscaled width and clips the last
+    // 15% of every line. It would also stretch the 16px glyphs instead of
+    // rasterizing them. Measured: the merges still fit one 4096x4096 sheet.
+    ImFont *font_chat = load_font(k_latin_regular, 18.0F, true, 0);
+    if (font_chat == nullptr) {
+        font_chat = font_body;
+    }
+
     slot(font_role::body) = font_body;
     slot(font_role::bold) = font_bold;
     slot(font_role::title) = font_title;
@@ -139,6 +171,8 @@ void fonts_init() {
     // used to draw in whatever was current, which is `body` -- the default
     // ImGui picks is the first face added, and `body` is it.
     slot(font_role::mono) = font_mono != nullptr ? font_mono : font_body;
+    slot(font_role::small) = font_small;
+    slot(font_role::chat) = font_chat;
 }
 
 ImFont *fonts_get(font_role _role) {

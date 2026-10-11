@@ -12,10 +12,11 @@ struct ccat_script_profile;
  *
  * @param[in,out] _st Shell state: jobs and the adb/mumu buffers.
  * @param[in,out] _cfg_view This frame's config view, holding the picked script
- * and the scheduler flag the page can toggle.
+ * and the scheduler cadence the page edits.
  * @param[in,out] _ccat_ui This frame's .ccat view, holding `source_rel`.
- * @param[in] _lock_manual_single A cycle or the scheduler owns ADB, so the
- * manual actions are disabled.
+ * @param[in] _lock_manual_single A cycle or the scheduler owns ADB: the actions
+ * that start work are disabled and Stop is the only one left live. When false
+ * Stop is moot, so it greys out instead.
  */
 void script_panel_draw(campcat::shell_state &_st,
                        campcat::app_config &_cfg_view,

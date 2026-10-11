@@ -9,6 +9,7 @@
 #include <atomic>
 #include <deque>
 #include <filesystem>
+#include <fstream>
 #include <functional>
 #include <mutex>
 #include <optional>
@@ -56,8 +57,6 @@ public:
     void merge_buffers_into(app_config *_dst, const app_config &_ui);
     /** @brief Fold the UI buffers in and commit them as the live config. */
     void push_job_snapshot(app_config *_view, const ccat_script_profile &_ui);
-    /** @brief Write the live config to disk. */
-    bool persist(std::string *_error_out);
     /** @brief Fold the UI buffers in, write to disk, commit only on success. */
     void save_config(const app_config &_view, const ccat_script_profile &_ui);
 
@@ -65,16 +64,14 @@ public:
     void run_single_job();
     /** @brief Run a .ccat source snippet from the console. */
     void run_console_source_job(std::string _source);
-    /** @brief Launch the MuMu instance and arm its watchdog. */
-    void start_mumu_job();
     /**
      * @brief Launch the instance and wait until it is up, on the calling
      * thread.
      *
-     * Same sequence, watchdog, ownership record and Settings status line as
-     * `start_mumu_job`; that job's thread body is this call. Blocking: up to
-     * 60s for the app plus 180s for the instance. Refuses when another launch,
-     * or an automation cycle, already owns the flags.
+     * Enquire, launch the app when it is down, `open`, wait for ready, then arm
+     * the watchdog and record what we started. Blocking: up to 60s for the app
+     * plus 180s for the instance. Refuses when another launch, or an automation
+     * cycle, already owns the flags.
      *
      * @param[in] _should_stop Polled by the waits; true gives up early and
      * comes back as a failed status that says so. Empty never stops.
@@ -115,8 +112,9 @@ public:
     std::atomic<bool> device_online{false};
 
     std::atomic<bool> mumu_launching{false};
+    /// Guards the launched-instance record below: the launch runs on the
+    /// worker, or on the LLM's thread, while the close path runs on the UI's.
     std::mutex mumu_mu;
-    campcat::mumu_status mumu_report;
     std::optional<campcat::process::child> mumu_watchdog;
     std::string mumu_launched_path;
     int mumu_launched_index = -1;
@@ -136,9 +134,8 @@ private:
      * @brief The launch sequence itself, on the calling thread.
      *
      * Enquire, launch the app when it is down, `open`, wait for ready, arm the
-     * watchdog, record what we started, and publish `mumu_report` on every exit
-     * path. The caller owns `mumu_launching` and `cycle_running`; nothing here
-     * touches `worker_thread` or ImGui.
+     * watchdog, and record what we started. The caller owns `mumu_launching`
+     * and `cycle_running`; nothing here touches `worker_thread` or ImGui.
      */
     campcat::mumu_status
     mumu_launch_sequence(const campcat::app_config &_shell,
@@ -151,6 +148,18 @@ private:
     std::mutex m_cfg_mu;
     app_config m_cfg;
     ccat_script_profile m_ccat_live;
+
+    /// This run's log file. A failed open or a failed write sets
+    /// `m_log_file_dead`, which stops `write_log_line` rather than letting the
+    /// sink retry a disk that will not take it.
+    std::ofstream m_log_file;
+    std::mutex m_log_file_mu;
+    bool m_log_file_dead = false;
+
+    /// Create the log directory and open this run's file in it.
+    void open_log_file();
+    /// Append one already-stamped line, under `m_log_file_mu`.
+    void write_log_line(const std::string &_line);
 
     std::atomic<bool> device_poll_stop{false};
     std::thread device_poll_thread;

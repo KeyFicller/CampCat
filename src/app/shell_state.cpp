@@ -31,6 +31,25 @@ constexpr int k_mumu_ready_timeout_ms = 180000;
 /// app is launched. Shorter than a VM boot: this is just an app coming up.
 constexpr int k_mumu_service_timeout_ms = 60000;
 
+/// Where the log file goes, relative to the working directory the app was
+/// started from (the same base `assets/` is resolved against). One file per
+/// run, named for the moment it opened.
+constexpr char k_log_dir_rel[] = "logs";
+
+/// The local wall clock, filled the platform's thread-safe way. The log sink
+/// runs on worker threads, so `std::localtime` is not an option here.
+std::tm local_now() {
+    const auto now = std::chrono::system_clock::now();
+    const auto tt = std::chrono::system_clock::to_time_t(now);
+    std::tm tm{};
+#if defined(_WIN32)
+    localtime_s(&tm, &tt);
+#else
+    localtime_r(&tt, &tm);
+#endif
+    return tm;
+}
+
 inline bool acquire_cycle(std::atomic<bool> &_cycle_running) {
     bool expected = false;
     return _cycle_running.compare_exchange_strong(expected, true);
@@ -83,6 +102,34 @@ bool persist_bundle_to_disk(const campcat::app_config &_shell_written,
 
 namespace campcat {
 
+void shell_state::open_log_file() {
+    const std::tm tm = local_now();
+    char stamp[32]{};
+    std::strftime(stamp, sizeof(stamp), "%Y%m%d-%H%M%S", &tm);
+
+    std::error_code ec;
+    std::filesystem::create_directories(k_log_dir_rel, ec);
+    m_log_file.open(std::filesystem::path(k_log_dir_rel) /
+                        (std::string(stamp) + ".log"),
+                    std::ios::app);
+    m_log_file_dead = !m_log_file;
+}
+
+void shell_state::write_log_line(const std::string &_line) {
+    if (m_log_file_dead) {
+        return;
+    }
+    std::lock_guard<std::mutex> lk(m_log_file_mu);
+    m_log_file << _line << '\n';
+    m_log_file.flush();
+    if (!m_log_file) {
+        // Full disk or a directory that turned read-only mid-run: stop trying
+        // rather than paying for a failed write per line. Reported once, by the
+        // constructor; the sink cannot report it without recursing.
+        m_log_file_dead = true;
+    }
+}
+
 shell_state::shell_state(std::filesystem::path _cfg_path)
     : cfg_path(std::move(_cfg_path)),
       m_cfg(campcat::app_config::load_from_file(cfg_path)) {
@@ -97,19 +144,25 @@ shell_state::shell_state(std::filesystem::path _cfg_path)
     mumutool_buf = m_cfg.mumu.tool_path;
     mumu_index_buf = m_cfg.mumu.device_index;
 
+    open_log_file();
     campcat::automation_log::set_sink([this](const std::string &_s) {
-        const auto now = std::chrono::system_clock::now();
-        const auto tt = std::chrono::system_clock::to_time_t(now);
-        std::tm tm{};
-#if defined(_WIN32)
-        localtime_s(&tm, &tt);
-#else
-        localtime_r(&tt, &tm);
-#endif
+        const std::tm tm = local_now();
         char buf[64]{};
         std::strftime(buf, sizeof(buf), "%H:%M:%S", &tm);
         log_lines.push(std::string("[") + buf + "] " + _s);
+
+        // The file carries the date too: it outlives this session, and a bare
+        // time cannot place a line on a day.
+        char file_buf[64]{};
+        std::strftime(file_buf, sizeof(file_buf), "%Y-%m-%d %H:%M:%S", &tm);
+        write_log_line(std::string(file_buf) + " " + _s);
     });
+    if (m_log_file_dead) {
+        // Through the sink on purpose: it skips the file while dead, so this
+        // cannot recurse.
+        append_log(std::string("[log] cannot write under ") + k_log_dir_rel +
+                   "/; logging to the UI only");
+    }
 }
 
 app_config shell_state::snapshot_cfg() {
@@ -148,11 +201,6 @@ void shell_state::push_job_snapshot(app_config *_view,
     m_ccat_live = _ui;
 }
 
-bool shell_state::persist(std::string *_error_out) {
-    return persist_bundle_to_disk(snapshot_cfg(), snapshot_ccat_live(),
-                                  cfg_path, _error_out);
-}
-
 void shell_state::save_config(const app_config &_view,
                               const ccat_script_profile &_ui) {
     std::string err;
@@ -172,10 +220,6 @@ void shell_state::save_config(const app_config &_view,
             "[ui] saved to ccat bundle: " +
             (std::filesystem::path(to_write.config_home) / k_ccat_bundle_rel)
                 .string());
-        if (!snapshot_cfg().scheduler.enabled) {
-            sched.stop();
-            append_log("[sched] stopped (scheduler.disabled in saved config)");
-        }
     } else {
         append_log(std::string("[ui] save failed: ") + err);
     }
@@ -295,30 +339,6 @@ void shell_state::run_console_source_job(std::string _source) {
     }
 }
 
-void shell_state::start_mumu_job() {
-    if (!acquire_cycle(cycle_running)) {
-        append_log("[mumu] busy");
-        return;
-    }
-    stop_requested.store(false);
-    if (worker_thread.joinable()) {
-        worker_thread.join();
-    }
-    const campcat::app_config shell = snapshot_cfg();
-    mumu_launching.store(true);
-    try {
-        worker_thread = std::thread([this, shell] {
-            mumu_launch_sequence(shell, {});
-            mumu_launching.store(false);
-            release_cycle(cycle_running);
-        });
-    } catch (const std::exception &ex) {
-        mumu_launching.store(false);
-        release_cycle(cycle_running);
-        append_log(std::string("[mumu] failed to start worker: ") + ex.what());
-    }
-}
-
 campcat::mumu_status
 shell_state::start_mumu_blocking(const std::function<bool()> &_should_stop) {
     if (mumu_launching.exchange(true)) {
@@ -345,10 +365,6 @@ shell_state::mumu_launch_sequence(const campcat::app_config &shell,
     // The app this run launched, if any; feeds the watchdog and is what
     // the shutdown path quits. Empty keeps somebody else's app alive.
     std::string app_owned;
-    auto publish = [this](const campcat::mumu_status &_st) {
-        std::lock_guard<std::mutex> lk(mumu_mu);
-        mumu_report = _st;
-    };
 
     campcat::mumu_status st = campcat::mumu_query_state(tool, index);
     if (st.state == campcat::mumu_state::service_down) {
@@ -366,7 +382,6 @@ shell_state::mumu_launch_sequence(const campcat::app_config &shell,
         }
     }
     if (st.state == campcat::mumu_state::failed) {
-        publish(st);
         return st;
     }
     if (st.state != campcat::mumu_state::stopped) {
@@ -374,13 +389,11 @@ shell_state::mumu_launch_sequence(const campcat::app_config &shell,
         // that would close an instance we did not start. An app we just
         // launched is still ours to quit; `mumu_app_started` holds that.
         st.message = "already up";
-        publish(st);
         return st;
     }
 
     st = campcat::mumu_open(tool, index);
     if (st.state == campcat::mumu_state::failed) {
-        publish(st);
         return st;
     }
     st = campcat::mumu_wait_ready(tool, index, k_mumu_ready_timeout_ms,
@@ -389,7 +402,6 @@ shell_state::mumu_launch_sequence(const campcat::app_config &shell,
     // ours to close on exit. A plain failure arms nothing.
     const bool cancelled = _should_stop && _should_stop();
     if (st.state == campcat::mumu_state::failed && !cancelled) {
-        publish(st);
         return st;
     }
 
@@ -408,26 +420,23 @@ shell_state::mumu_launch_sequence(const campcat::app_config &shell,
     if (!cancelled && !armed) {
         st.message = "started, but no watchdog could be armed";
     }
-    publish(st);
     return st;
 }
 
 void shell_state::refresh_scheduler_locked(bool _immediate_first_tick) {
     sched.stop();
     const auto snap = snapshot_cfg();
-    if (!snap.scheduler.enabled) {
-        append_log("[sched] disabled");
-        return;
-    }
 
     sched.configure(std::chrono::seconds(snap.scheduler.interval_seconds),
                     std::chrono::seconds(snap.scheduler.jitter_seconds));
 
     sched.start(
         [this]() {
-            const auto shell = snapshot_cfg();
-            if (shell.scheduler.skip_if_busy && cycle_running.load()) {
-                append_log("[sched] skip tick (busy)");
+            // run_single_job() would catch this too, but its "[job] busy" reads
+            // as a UI murmur; a missed tick is worth an error.
+            if (cycle_running.load()) {
+                append_log("[sched] ERROR: previous cycle still running; tick "
+                           "skipped, waiting for the next interval");
                 return;
             }
             run_single_job();
@@ -436,10 +445,10 @@ void shell_state::refresh_scheduler_locked(bool _immediate_first_tick) {
 
     if (_immediate_first_tick) {
         append_log("[sched] armed - immediate tick once, then "
-                   "sleep(interval+jitter) and repeat until exit/disable");
+                   "sleep(interval+jitter) and repeat until Stop or exit");
     } else {
         append_log("[sched] armed - sleep(interval+jitter) then tick, repeat "
-                   "until exit/disable");
+                   "until Stop or exit");
     }
 }
 

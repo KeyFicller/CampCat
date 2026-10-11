@@ -21,6 +21,7 @@
 #include "app/ui/console_panel.h"
 #include "app/ui/fonts.h"
 #include "app/ui/llm_panel.h"
+#include "app/ui/log_panel.h"
 #include "app/ui/macos_ime.h"
 #include "app/ui/script_editor_panel.h"
 #include "app/ui/script_panel.h"
@@ -47,26 +48,6 @@ constexpr float k_chip_dot_gap = 6.0F;
 /// Between the page chip and the device chip, wide enough that they read as two
 /// answers instead of one long one.
 constexpr float k_chip_gap = 16.0F;
-
-/// The two colours the chrome did not have: amber (waiting on something) and
-/// red (failed). The rest are the style's own values -- ink_dim, accent_hi, and
-/// the green the idle label used to show for a busy shell -- written out here
-/// as literals, because the palette lives inside the style function.
-ImVec4 activity_color(campcat::activity_level _level) {
-    switch (_level) {
-    case campcat::activity_level::ok:
-        return ImVec4(0.450F, 0.850F, 0.550F, 1.0F);
-    case campcat::activity_level::busy:
-        return ImVec4(0.302F, 0.478F, 0.616F, 1.0F);
-    case campcat::activity_level::waiting:
-        return ImVec4(0.850F, 0.680F, 0.300F, 1.0F);
-    case campcat::activity_level::failed:
-        return ImVec4(0.850F, 0.420F, 0.420F, 1.0F);
-    case campcat::activity_level::idle:
-        break;
-    }
-    return ImVec4(0.478F, 0.510F, 0.549F, 1.0F);
-}
 
 /// One chip's width: the dot, its gap, then the word.
 float chip_width(const campcat::activity_status &_status) {
@@ -290,23 +271,14 @@ int main(int argc, char **argv) {
                 }
                 if (!can_save) {
                     ImGui::EndDisabled();
-                    ImGui::TextDisabled(
+                    ImGui::TextColored(
+                        campcat::activity_color(
+                            campcat::activity_level::waiting),
                         "Set a .ccat script path before saving.");
                 }
                 ImGui::EndMenu();
             }
             ImGui::EndMenuBar();
-        }
-
-        {
-            std::vector<std::string> drained;
-            st.log_lines.drain(&drained);
-            for (auto &l : drained) {
-                st.log_scroll.push_back(std::move(l));
-            }
-            while (st.log_scroll.size() > 2000) {
-                st.log_scroll.pop_front();
-            }
         }
 
         const bool busy_now = st.cycle_running.load();
@@ -373,16 +345,15 @@ int main(int argc, char **argv) {
                 ImGui::PushStyleColor(ImGuiCol_ButtonActive,
                                       ImVec4(0.20F, 0.22F, 0.25F, 1.0F));
             }
-            ImGui::PushFont(fonts_get(font_role::bold));
-            if (ImGui::Button(label, ImVec2(-1.0F, 0.0F))) {
-                page = target;
-            }
-            ImGui::PopFont();
+            WITH_FONT(bold, {
+                if (ImGui::Button(label, ImVec2(-1.0F, 0.0F))) {
+                    page = target;
+                }
+            });
             ImGui::PopStyleColor(3);
         };
 
         constexpr float k_left_w = 320.0F;
-        static bool log_open = true;
         const float body_h = ImGui::GetContentRegionAvail().y;
 
         if (ImGui::BeginTable("shell_layout", 2,
@@ -398,13 +369,23 @@ int main(int argc, char **argv) {
             ImGui::TableNextRow(ImGuiTableRowFlags_None, body_h);
             ImGui::TableSetColumnIndex(0);
 
-            ImGui::BeginChild("shell_nav", ImVec2(0.0F, 0.0F),
-                              ImGuiChildFlags_Borders |
-                                  ImGuiChildFlags_AutoResizeY);
+            // Collapsed, the log shrinks to its header, so the nav block above
+            // takes the rest of the column instead of leaving it empty. It
+            // cannot simply fill: the log is submitted after it, so by then the
+            // nav's height is fixed and the header would be pushed off the
+            // bottom. The nav therefore stops short of the header, whose height
+            // `log_panel` owns and derives from the style.
+            const bool log_open = log_panel_open();
+            const bool nav_fills = !log_open;
+            ImGui::BeginChild(
+                "shell_nav",
+                ImVec2(0.0F, nav_fills ? -(log_panel_collapsed_height() +
+                                           ImGui::GetStyle().ItemSpacing.y)
+                                       : 0.0F),
+                ImGuiChildFlags_Borders |
+                    (nav_fills ? 0 : ImGuiChildFlags_AutoResizeY));
             ImGui::Spacing();
-            ImGui::PushFont(fonts_get(font_role::title));
-            ImGui::TextUnformatted("CampCat");
-            ImGui::PopFont();
+            WITH_FONT(title, { ImGui::TextUnformatted("CampCat"); });
             ImGui::Spacing();
             ImGui::Separator();
             ImGui::Spacing();
@@ -417,41 +398,8 @@ int main(int argc, char **argv) {
             nav_item("Settings", shell_page::Settings);
             ImGui::EndChild();
 
-            // Negative height consumes whatever the nav block left in the
-            // column; collapsed, the box shrinks to its header instead.
-            ImGui::BeginChild(
-                "shell_log",
-                ImVec2(0.0F,
-                       log_open ? -ImGui::GetStyle().ItemSpacing.y : 0.0F),
-                ImGuiChildFlags_Borders |
-                    (log_open ? 0 : ImGuiChildFlags_AutoResizeY));
-            ImGui::PushFont(fonts_get(font_role::bold));
-            if (ImGui::Button(log_open ? "[-] Log" : "[+] Log")) {
-                log_open = !log_open;
-            }
-            ImGui::PopFont();
-            ImGui::Separator();
-            if (log_open) {
-                ImGui::BeginChild("logpane", ImVec2(0.0F, 0.0F),
-                                  ImGuiChildFlags_None);
-                for (const auto &line : st.log_scroll) {
-                    ImGui::TextWrapped("%s", line.c_str());
-                }
-                if (!st.log_scroll.empty() &&
-                    ImGui::GetScrollY() >= ImGui::GetScrollMaxY() - 20.0F) {
-                    ImGui::SetScrollHereY(1.0F);
-                }
-                if (ImGui::BeginPopupContextWindow(
-                        "logpane_ctx", ImGuiPopupFlags_MouseButtonRight)) {
-                    if (ImGui::MenuItem("Clear log")) {
-                        st.log_lines.clear();
-                        st.log_scroll.clear();
-                    }
-                    ImGui::EndPopup();
-                }
-                ImGui::EndChild();
-            }
-            ImGui::EndChild();
+            // The other half of the pair above: one fills, the other fits.
+            log_panel_draw(st);
 
             ImGui::TableSetColumnIndex(1);
             ImGui::BeginChild("shell_content", ImVec2(0.0F, 0.0F),
@@ -474,24 +422,20 @@ int main(int argc, char **argv) {
                     page_title = "Script";
                     break;
                 }
-                ImGui::PushFont(fonts_get(font_role::title));
-                ImGui::TextUnformatted(page_title);
-                ImGui::PopFont();
-                ImGui::PushFont(fonts_get(font_role::bold));
-                {
+                WITH_FONT(title, { ImGui::TextUnformatted(page_title); });
+                WITH_FONT(bold, {
                     const float chips_w =
                         (show_page_chip ? chip_width(page_status) + k_chip_gap
                                         : 0.0F) +
                         chip_width(device_status);
                     ImGui::SameLine(ImGui::GetWindowContentRegionMax().x -
                                     chips_w);
-                }
-                if (show_page_chip) {
-                    draw_chip(page_status);
-                    ImGui::SameLine(0.0F, k_chip_gap);
-                }
-                draw_chip(device_status);
-                ImGui::PopFont();
+                    if (show_page_chip) {
+                        draw_chip(page_status);
+                        ImGui::SameLine(0.0F, k_chip_gap);
+                    }
+                    draw_chip(device_status);
+                });
                 ImGui::Separator();
                 ImGui::Spacing();
             }

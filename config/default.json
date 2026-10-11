@@ -32,9 +32,7 @@
     "tool_path": "/Applications/MuMuPlayer.app/Contents/MacOS/mumutool"
   },
   "scheduler": {
-    "enabled": true,
     "interval_seconds": 300,
-    "jitter_seconds": 7,
-    "skip_if_busy": false
+    "jitter_seconds": 7
   }
 }
