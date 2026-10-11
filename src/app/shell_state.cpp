@@ -70,6 +70,70 @@ constexpr int k_poll_slice_ms = 100;
 /// `adb` would otherwise freeze the quit for its full 8s default.
 constexpr int k_poll_adb_timeout_ms = 1500;
 
+/**
+ * @brief Wait until the device itself is usable, not merely booted.
+ *
+ * mumutool reports the instance `running` seconds after `open`; that is the
+ * VM, not Android. Callers poll the screen the moment this returns, so
+ * reporting early is exactly what makes them screenshot a black screen.
+ *
+ * @param[in,out] _adb Client to poll with.
+ * @param[in] _deadline_ms Budget left, shared with the VM-ready wait.
+ * @param[in] _should_stop Polled between attempts; true gives up early.
+ * @param[out] _why Last observation, for the failure message.
+ * @return True once `sys.boot_completed=1` and `init.svc.bootanim=stopped`.
+ */
+bool wait_device_ready(campcat::adb_client &_adb, int _deadline_ms,
+                       const std::function<bool()> &_should_stop,
+                       std::string *_why) {
+    const auto deadline = std::chrono::steady_clock::now() +
+                          std::chrono::milliseconds(_deadline_ms);
+    std::string boot;
+    std::string anim;
+    std::string io_err;
+    const auto prop = [&](const char *_key, std::string *_out) {
+        std::string out;
+        std::string err;
+        if (!_adb.run({"shell", "getprop", _key}, &out, &err, 5000)) {
+            _out->clear();
+            io_err = err.empty() ? out : err;
+            return false;
+        }
+        // getprop answers with a trailing newline, and CRLF on some images. An
+        // unset key is an empty line -- that is "absent", not an error.
+        const auto first = out.find_first_not_of(" \t\r\n");
+        const auto last = out.find_last_not_of(" \t\r\n");
+        *_out = first == std::string::npos ? std::string{}
+                                           : out.substr(first, last - first + 1);
+        return !_out->empty();
+    };
+    while (true) {
+        if (_should_stop && _should_stop()) {
+            *_why = "stopped by the user";
+            return false;
+        }
+        const bool booted = prop("sys.boot_completed", &boot) && boot == "1";
+        // `init.svc.bootanim` does not exist on images that boot with the
+        // animation disabled (MuMu sets `debug.sf.nobootanimation`), so it is
+        // only consulted when it is there at all.
+        const bool anim_done =
+            !prop("init.svc.bootanim", &anim) || anim == "stopped";
+        if (booted && anim_done) {
+            return true;
+        }
+        if (std::chrono::steady_clock::now() >= deadline) {
+            *_why = "device not ready (boot_completed=" +
+                    (boot.empty() ? std::string("?") : boot) + ", bootanim=" +
+                    (anim.empty() ? std::string("?") : anim) + ")" +
+                    (io_err.empty() ? std::string{}
+                                    : ", adb said: " + io_err);
+            return false;
+        }
+        std::this_thread::sleep_for(
+            std::chrono::milliseconds(k_poll_interval_ms));
+    }
+}
+
 bool persist_bundle_to_disk(const campcat::app_config &_shell_written,
                             const campcat::ccat_script_profile &_ccat_snap,
                             const std::filesystem::path &_shell_path,
@@ -140,7 +204,6 @@ shell_state::shell_state(std::filesystem::path _cfg_path)
     // Seed the Settings fields once here instead of on the first frame.
     adb_path_buf = m_cfg.adb.path;
     serial_buf = m_cfg.adb.serial;
-    adb_connect_buf = m_cfg.adb.connect_address;
     mumutool_buf = m_cfg.mumu.tool_path;
     mumu_index_buf = m_cfg.mumu.device_index;
 
@@ -188,7 +251,6 @@ void shell_state::merge_buffers_into(app_config *_dst, const app_config &_ui) {
     *_dst = _ui;
     _dst->adb.path = adb_path_buf;
     _dst->adb.serial = serial_buf;
-    _dst->adb.connect_address = adb_connect_buf;
     _dst->mumu.tool_path = mumutool_buf;
     _dst->mumu.device_index = mumu_index_buf;
 }
@@ -238,13 +300,15 @@ void shell_state::run_automation_thread_body(
         }
     };
     try {
-        campcat::adb_client adb(_snap_shell.adb.path, _snap_shell.adb.serial);
+        const std::string addr = campcat::mumu_adb_address(
+            _snap_shell.mumu.tool_path, _snap_shell.mumu.device_index);
+        campcat::adb_client adb(_snap_shell.adb.path,
+                                addr.empty() ? _snap_shell.adb.serial : addr);
         std::string co, ce;
-        const bool ok_c = adb.connect_remote(_snap_shell.adb.connect_address,
-                                             15000, &co, &ce);
+        const bool ok_c = adb.connect_remote(addr, 15000, &co, &ce);
         split_log("[adb connect] ", co);
         split_log("[adb connect err] ", ce);
-        if (!_snap_shell.adb.connect_address.empty() && !ok_c) {
+        if (!addr.empty() && !ok_c) {
             append_log("[adb connect] failed or timeout");
         }
         auto automator =
@@ -307,9 +371,12 @@ void shell_state::run_console_source_job(std::string _source) {
                                      ccat_bundle = std::move(
                                          std::get<1>(snap))]() mutable {
             try {
-                campcat::adb_client adb(shell.adb.path, shell.adb.serial);
+                const std::string addr = campcat::mumu_adb_address(
+                    shell.mumu.tool_path, shell.mumu.device_index);
+                campcat::adb_client adb(shell.adb.path,
+                                        addr.empty() ? shell.adb.serial : addr);
                 std::string co, ce;
-                adb.connect_remote(shell.adb.connect_address, 15000, &co, &ce);
+                adb.connect_remote(addr, 15000, &co, &ce);
                 auto prog = campcat::ccat_lang::parse_program(source);
                 const auto images = ccat_bundle.images_base(shell.config_home);
                 std::filesystem::path script_abs =
@@ -365,6 +432,9 @@ shell_state::mumu_launch_sequence(const campcat::app_config &shell,
     // The app this run launched, if any; feeds the watchdog and is what
     // the shutdown path quits. Empty keeps somebody else's app alive.
     std::string app_owned;
+    // `k_mumu_ready_timeout_ms` is one budget for the whole launch, so the
+    // device-ready wait that follows the VM wait gets what is left of it.
+    const auto launch_start = std::chrono::steady_clock::now();
 
     campcat::mumu_status st = campcat::mumu_query_state(tool, index);
     if (st.state == campcat::mumu_state::service_down) {
@@ -403,6 +473,34 @@ shell_state::mumu_launch_sequence(const campcat::app_config &shell,
     const bool cancelled = _should_stop && _should_stop();
     if (st.state == campcat::mumu_state::failed && !cancelled) {
         return st;
+    }
+
+    // The emulator picks its adb port, not us, so read it off mumutool and use
+    // it from here on. 0 means this mumutool did not say; adb's default device
+    // is then the best guess.
+    if (!cancelled) {
+        // The VM being `running` says nothing about Android, and callers poll
+        // the screen the moment this returns.
+        const int spent_ms = static_cast<int>(
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - launch_start)
+                .count());
+        // Asked of mumutool rather than remembered: the port changes with every
+        // launch, so the answer is only good for as long as it is used.
+        const std::string addr =
+            campcat::mumu_adb_address(tool, index);
+        campcat::adb_client conn(shell.adb.path,
+                                 addr.empty() ? shell.adb.serial : addr);
+        std::string co;
+        std::string ce;
+        conn.connect_remote(addr, 15000, &co, &ce);
+        std::string why;
+        if (!wait_device_ready(conn, k_mumu_ready_timeout_ms - spent_ms,
+                               _should_stop, &why)) {
+            st.state = campcat::mumu_state::failed;
+            st.message = why;
+            return st;
+        }
     }
 
     // Spawn first: the watchdog then covers the gap before anything is

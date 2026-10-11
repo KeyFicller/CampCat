@@ -2,6 +2,7 @@
 
 #include "core/adb_client.h"
 #include "core/app_config.h"
+#include "core/mumu_launcher.h"
 
 #include <chrono>
 
@@ -39,11 +40,16 @@ detect_template_on_screen(adb_client &_adb,
         return r;
     }
 
-    (void)_adb.connect_remote(_shell_timing_only.adb.connect_address,
-                              _opts.adb_connect_timeout_ms);
+    // The client arrives from the caller, so aim it at the port mumutool
+    // reports now: without `-s` the screencap below dies on a stale `offline`
+    // entry in `adb devices`.
+    const std::string addr = campcat::mumu_adb_address(
+        _shell_timing_only.mumu.tool_path, _shell_timing_only.mumu.device_index);
+    _adb.set_serial(addr.empty() ? _shell_timing_only.adb.serial : addr);
+    (void)_adb.connect_remote(addr, _opts.adb_connect_timeout_ms);
 
     cv::Mat scr;
-    if (!_adb.screencap_png(&scr, _opts.screencap_timeout_ms,
+    if (!_adb.screencap_bgr(&scr, _opts.screencap_timeout_ms,
                             &r.screencap_diagnostic)) {
         r.error = screen_template_error::screencap_failed;
         return r;

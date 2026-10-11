@@ -89,6 +89,7 @@ mumu_status mumu_query_state(const std::string &_mumutool, int _index) {
     const std::string raw = j.contains("return")
                                 ? j["return"].value("state", std::string{})
                                 : std::string{};
+    st.adb_port = j.contains("return") ? j["return"].value("adb_port", 0) : 0;
     // The raw string rides along whatever the mapping says, so a state this
     // file has never seen is visible in the UI instead of being silently
     // misread.
@@ -103,6 +104,14 @@ mumu_status mumu_query_state(const std::string &_mumutool, int _index) {
         st.state = mumu_state::running;
     }
     return st;
+}
+
+std::string mumu_adb_address(const std::string &_mumutool, int _index) {
+    const mumu_status st = mumu_query_state(_mumutool, _index);
+    if (st.adb_port <= 0) {
+        return {};
+    }
+    return "127.0.0.1:" + std::to_string(st.adb_port);
 }
 
 mumu_status mumu_open(const std::string &_mumutool, int _index) {
@@ -287,6 +296,7 @@ mumu_status unavailable() {
 } // namespace
 
 mumu_status mumu_query_state(const std::string &, int) { return unavailable(); }
+std::string mumu_adb_address(const std::string &, int) { return {}; }
 mumu_status mumu_open(const std::string &, int) { return unavailable(); }
 mumu_status mumu_close(const std::string &, int) { return unavailable(); }
 mumu_status mumu_wait_ready(const std::string &, int, int,

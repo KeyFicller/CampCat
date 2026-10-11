@@ -5,6 +5,7 @@
 #include "ccat_driver/ccat_script_profile.h"
 #include "core/adb_client.h"
 #include "core/app_config.h"
+#include "core/mumu_launcher.h"
 #include "core/automation_log.h"
 
 #include <imgui.h>
@@ -129,13 +130,16 @@ ImVec2 screen_from_img_px(int _ix, int _iy, const ImVec2 &_img_min,
 }
 
 void capture_clicked(campcat::app_config &_cfg) {
-    campcat::adb_client adb(_cfg.adb.path, _cfg.adb.serial);
-    const bool connected = adb.connect_remote(_cfg.adb.connect_address);
+    const std::string addr = campcat::mumu_adb_address(_cfg.mumu.tool_path,
+                                                      _cfg.mumu.device_index);
+    campcat::adb_client adb(_cfg.adb.path,
+                            addr.empty() ? _cfg.adb.serial : addr);
+    const bool connected = adb.connect_remote(addr);
     cv::Mat cap;
     std::string diag;
-    if (!adb.screencap_png(&cap, 45000, &diag)) {
+    if (!adb.screencap_bgr(&cap, 45000, &diag)) {
         if (!connected) {
-            diag += " (adb connect " + _cfg.adb.connect_address + " failed)";
+            diag += " (adb connect " + addr + " failed)";
         }
         campcat::automation_log::emit("[capture] screencap failed " + diag);
         return;

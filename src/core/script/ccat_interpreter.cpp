@@ -99,7 +99,7 @@ bool CcatInterpreter::capture_screen(
     if (_should_stop()) {
         return false;
     }
-    if (!m_adb->screencap_png(_out)) {
+    if (!m_adb->screencap_bgr(_out)) {
         automation_log::emit("[ccat] screencap failed");
         return false;
     }

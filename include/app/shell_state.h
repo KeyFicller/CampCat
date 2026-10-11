@@ -125,7 +125,6 @@ public:
     /// per-frame config snapshot the page draws from.
     std::string adb_path_buf;
     std::string serial_buf;
-    std::string adb_connect_buf;
     std::string mumutool_buf;
     int mumu_index_buf = 0;
 

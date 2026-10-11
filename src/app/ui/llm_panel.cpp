@@ -2,6 +2,7 @@
 
 #include "core/adb_client.h"
 #include "core/app_config.h"
+#include "core/mumu_launcher.h"
 #include "core/automation_log.h"
 #include "core/llm/llm_host.h"
 #include "core/llm/llm_memory.h"
@@ -431,8 +432,11 @@ void start_turn(campcat::shell_state &_st, const campcat::app_config &_cfg,
                             prompt = std::move(_prompt)]() {
         // A per-turn client, built the way the automation cycle builds one.
         // Every tool runs on this thread, so nothing here races the UI.
-        campcat::adb_client adb(cfg_snapshot.adb.path, cfg_snapshot.adb.serial);
-        adb.connect_remote(cfg_snapshot.adb.connect_address);
+        const std::string addr = campcat::mumu_adb_address(
+            cfg_snapshot.mumu.tool_path, cfg_snapshot.mumu.device_index);
+        campcat::adb_client adb(cfg_snapshot.adb.path,
+                                addr.empty() ? cfg_snapshot.adb.serial : addr);
+        adb.connect_remote(addr);
         campcat::llm::tool_context ctx;
         ctx.adb = &adb;
         ctx.adb_busy = [] { return g_adb_busy.load(); };

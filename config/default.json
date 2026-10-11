@@ -1,6 +1,5 @@
 {
   "adb": {
-    "connect_address": "127.0.0.1:5555",
     "path": "/Applications/MuMuPlayer.app/Contents/MacOS/MuMuEmulator.app/Contents/MacOS/tools/adb",
     "serial": ""
   },

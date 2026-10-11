@@ -67,8 +67,9 @@ public:
     /**
      * @brief When `_address` is non-empty, run `adb connect <address>` (TCP
      * device).
-     * @return True if skipped (empty address) or subprocess exited 0; same
-     * contract as `run`.
+     * @return False when the connection did not come up. `adb connect` exits 0
+     * even on a refused connection, so the output is what decides; an empty
+     * `_address` skips the call and returns true.
      */
     bool connect_remote(std::string_view _address, int _timeout_ms = 15000,
                         std::string *_stdout_out = nullptr,
@@ -108,13 +109,19 @@ public:
     bool home_and_kill_all(int _gap_ms);
 
     /**
-     * @brief Pipe `adb exec-out screencap -p` into an OpenCV BGR decode.
+     * @brief Capture the device screen as an OpenCV BGR image.
+     *
+     * Prefers the raw framebuffer (`adb exec-out screencap`) and repacks it on
+     * the host; falls back to the PNG paths when the raw payload is not one we
+     * can decode. All three paths yield a pixel-identical frame.
+     *
      * @param[out] _bgr_out Output buffer written on success.
      * @param[in] _timeout_ms adb wait budget.
-     * @param[out] _diagnostic_out Optional adb stderr/snippet collector.
-     * @return True when the png payload decodes cleanly.
+     * @param[out] _diagnostic_out Optional adb stderr/snippet collector; a
+     * failed raw attempt leaves no noise here, the PNG paths do.
+     * @return True when a frame was produced.
      */
-    bool screencap_png(cv::Mat *_bgr_out, int _timeout_ms = 45000,
+    bool screencap_bgr(cv::Mat *_bgr_out, int _timeout_ms = 45000,
                        std::string *_diagnostic_out = nullptr);
 
     /**

@@ -23,7 +23,6 @@ struct adb_config {
     std::string path = "/Applications/MuMuPlayer.app/Contents/MacOS/"
                        "MuMuEmulator.app/Contents/MacOS/tools/adb";
     std::string serial{};
-    std::string connect_address{};
 };
 
 /// The MuMu `mumutool` binary: it can start and stop the emulator instance,

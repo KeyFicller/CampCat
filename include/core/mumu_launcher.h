@@ -34,6 +34,10 @@ struct mumu_status {
     mumu_state state = mumu_state::unknown;
     /// The raw `state` string from mumutool, or why the call failed.
     std::string message;
+    /// `mumutool info`'s `return.adb_port`; 0 when the field is absent (an
+    /// older mumutool). The emulator picks this port, not us, so it has to be
+    /// read rather than assumed.
+    int adb_port = 0;
 };
 
 /**
@@ -49,6 +53,22 @@ struct mumu_status {
  * `service_down` when it ran but found no MuMuPlayer to talk to.
  */
 mumu_status mumu_query_state(const std::string &_mumutool, int _index);
+
+/**
+ * @brief Ask mumutool for the adb address of a running instance, every time.
+ *
+ * Nothing is cached: the emulator picks its own port and a different one on the
+ * next launch, so a remembered address would point at a dead port as soon as
+ * the instance restarts. One `mumutool info` costs ~20ms, against the ~1s a
+ * screenshot takes. The result doubles as the `-s` serial, which is also what
+ * keeps a stale `offline` entry in `adb devices` from breaking later calls.
+ *
+ * @param[in] _mumutool Path to the `mumutool` executable.
+ * @param[in] _index MuMu instance index.
+ * @return `host:port`, or empty when the instance is not up (mumutool reports
+ * no port then) -- an empty address means "use adb's default device".
+ */
+std::string mumu_adb_address(const std::string &_mumutool, int _index);
 
 /**
  * @brief Derive the MuMuPlayer bundle from a `mumutool` path.

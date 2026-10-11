@@ -50,7 +50,6 @@ void settings_panel_draw(campcat::shell_state &_st,
     if (adb_open) {
         ImGui::InputText("ADB path", &_st.adb_path_buf);
         ImGui::InputText("Device serial", &_st.serial_buf);
-        ImGui::InputText("Connect address", &_st.adb_connect_buf);
         ImGui::InputText("MuMu tool", &_st.mumutool_buf);
         ImGui::InputInt("Instance index", &_st.mumu_index_buf);
     }

@@ -438,7 +438,7 @@ constexpr int k_default_swipe_ms = 300;
     adb_client &adb = require_adb();
     cv::Mat bgr;
     std::string diag;
-    if (!adb.screencap_png(&bgr, 45000, &diag)) {
+    if (!adb.screencap_bgr(&bgr, 45000, &diag)) {
         throw js::bind_error("screencap failed: " + diag +
                              std::string(k_device_hint));
     }
@@ -579,9 +579,14 @@ CPP_REFLECT_TOOL(tap)
     // down, so this is what makes the device reachable to the tools that come
     // next.
     if (g_ctx.adb != nullptr && g_ctx.cfg != nullptr) {
+        // This client was built when the turn started, with the emulator still
+        // down, so it carries no address: ask mumutool for the port the launch
+        // just produced and point the client at it.
+        const std::string addr = campcat::mumu_adb_address(
+            g_ctx.cfg->mumu.tool_path, g_ctx.cfg->mumu.device_index);
+        g_ctx.adb->set_serial(addr.empty() ? g_ctx.cfg->adb.serial : addr);
         std::string diag;
-        if (!g_ctx.adb->connect_remote(g_ctx.cfg->adb.connect_address, 15000,
-                                       nullptr, &diag)) {
+        if (!g_ctx.adb->connect_remote(addr, 15000, nullptr, &diag)) {
             text += " (adb connect failed: " + diag + ")";
         }
     }

@@ -71,6 +71,51 @@ RULES = {
         "  * Tap the button at (540, 1200)\n"
         "  * Tap it. **Then wait.**\n"
     ),
+    "script_workflow": (
+        "Writing or changing a script is this sequence, and you do not skip a step:\n"
+        "\n"
+        "1. `list_scripts` first. If a bundle already does the job, run it with "
+        "`run(\"<name>/main.ccat\")`; if one is close, `read_script` it and build on it. "
+        "Write a new script only when neither holds.\n"
+        "2. `screenshot`, so you can see the screen you are scripting.\n"
+        "3. Decide each step's anchor: the image that only appears when that step worked, "
+        "taken from a fixed UI control -- a button, a tab, a label -- never from free-form "
+        "text, which drifts between runs and makes the check meaningless.\n"
+        "4. `save_script` to create the bundle. It writes main.ccat and runs nothing; a name "
+        "that already exists is refused.\n"
+        "5. `save_template`, once for every PNG the script names. Screenshot right before "
+        "each cut -- it can only match as well as the picture it came from -- and crop tight "
+        "around the part that stays put.\n"
+        "6. Run the bundle: `run_script` with the source `run(\"<name>/main.ccat\")`. Pass "
+        "that `run(...)` call and not the script's own text -- a bare `run_script` resolves "
+        "template names against the script root, so the PNGs you just saved into the bundle "
+        "are invisible to it.\n"
+        "7. Change what you have with `update_script(name, source, templates)`: the source "
+        "and the whole template set in one step, under one approval. `save_script` refuses an "
+        "existing name, and the answer is never a second bundle under a new name."
+    ),
+    "script_rules": (
+        "  * A failing statement stops the script. That error is what you get back -- not a "
+        "screen that looks wrong.\n"
+        "  * Anchor every action. After a tap, swipe or `run(...)`, assert the screen it "
+        "should have produced with `wait_until(\"expected.png\", ms)`. A step that did not "
+        "land then fails there, naming the file, instead of the next statement acting on a "
+        "stale screen. Save the anchor's template with the script.\n"
+        "  * Ground every `log(...)` in an anchor: never print \"task complete\" on its own. "
+        "A `log(...)` that declares a state sits right after the `wait_until` or `if` on a "
+        "template that confirms that state.\n"
+        "  * Size that `ms` from the screenshots, not from a guess. Each caption says when it "
+        "was taken and, within a turn, how long passed since the one before; a change that "
+        "took +3.2s gets about twice that. `wait_until` stops as soon as the anchor appears, "
+        "so a generous number costs nothing. Both waits are capped, not rejected -- "
+        "`wait(ms)` at 5000 ms and `wait_until(\"a.png\", ms)` at 20000 ms -- so a larger "
+        "number silently becomes the cap and you get less time than you asked for; "
+        "`wait_until(\"a.png\", 0)` is a parse error. A timeout is an error that stops the "
+        "script.\n"
+        "  * Reuse before you write, and `update_script` before you duplicate: `save_script` "
+        "refuses a name that already exists, and the answer is never a second bundle under a "
+        "new name."
+    ),
 }
 
 # Each rule becomes a `##` heading plus its body; PERSONA stays one plain block.
@@ -129,8 +174,8 @@ def _setting(name: str, default: str) -> str:
 
 
 _CCAT_CHEATSHEET = (
-    "Write a .ccat script and run it with `run_script`. Call `ccat_help` "
-    "for the full reference. The parts that are easy to get wrong:\n"
+    "The .ccat language. Call `ccat_help` for the full reference; the parts "
+    "that are easy to get wrong:\n"
     "  * Comments are `//`; semicolons are optional. There are no expressions and no "
     "runtime variables: `defs` values are substituted while parsing.\n"
     "  * `tap_at(x, y)` / `swipe_at(...)` take coordinates normalized to [0,1] against "
@@ -144,24 +189,6 @@ _CCAT_CHEATSHEET = (
     "  * A failing statement stops the script and comes back to you as an error. "
     "Statements that need a PNG (`tap`, `tap_offset`, `swipe`, `wait_until`) or a `.ccat` "
     "(`run`) fail when the file is missing; an `if` with a missing template is just false.\n"
-    "  * Anchor each step: after an action that changes the screen (tap, swipe, "
-    "run(\"...\")), follow it with wait_until(\"expected.png\", ms), the image that step "
-    "should produce. A step that did not land then fails there, with a timeout error "
-    "naming the file, instead of the next statement acting on a stale screen. It polls; "
-    "`if` checks once instead. Save the anchor's template with the script.\n"
-    "  * Ground every `log(...)` in an anchor: never print \"task complete\" on its own. "
-    "A `log(...)` that declares a state must sit right after a `wait_until` or `if` on a "
-    "template that confirms that state. Choose that anchor from a fixed UI control -- a "
-    "button, a tab, a label -- not from free-form screen content, which drifts between "
-    "runs and makes the check meaningless.\n"
-    "  * Size that ms from the screenshots, not from a guess: each caption says when it "
-    "was taken and, within a turn, how long passed since the one before. For a change "
-    "that took +3.2s, allow about twice it. wait_until stops as soon as the anchor "
-    "appears, so a generous number costs nothing when the screen is quick; a fixed "
-    "wait(ms) can only overshoot or undershoot.\n"
-    "  * `save_script` / `save_template` save a script and its templates as a bundle; run it with `run(\"<name>/main.ccat\")`."
-    " Change a skill you already have with `update_script` (new source plus its template set in one step), "
-    "not by saving another name."
 )
 
 
