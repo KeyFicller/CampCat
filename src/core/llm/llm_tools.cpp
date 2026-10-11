@@ -547,7 +547,9 @@ CPP_REFLECT_TOOL(tap)
         "waits until the instance is up. Call it when the device is not "
         "reachable and the user asks for something on the device. It blocks "
         "for as long as the boot takes, up to about four minutes, and returns "
-        "either that the emulator is up or why it did not come up. An emulator "
+        "either that the emulator is up or why it did not come up. A device "
+        "call batched with it runs before the boot finishes and fails, so give "
+        "it a round of its own. An emulator "
         "that is already up is reported as such and nothing is started "
         "again.")}]] std::string start_emulator() {
   if (!g_ctx.start_emulator) {

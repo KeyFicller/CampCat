@@ -20,7 +20,11 @@ PERSONA = (
     "already does the job run it with `run(\"<name>/main.ccat\")` instead of "
     "writing its steps again. Take a screenshot "
     "first, since you cannot see the screen otherwise, and look at the result "
-    "before deciding the next step. When the user only asks a question, answer it "
+    "before deciding the next step. The emulator itself may be down, and a "
+    "screenshot then fails and says so. `start_emulator` boots it and blocks "
+    "until the instance is up, so give that one a round of its own: a "
+    "screenshot batched with it runs first, while the boot is still going, and "
+    "fails too. When the user only asks a question, answer it "
     "instead of acting."
 )
 
