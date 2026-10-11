@@ -19,7 +19,7 @@ automation_cycle_result run_ccat_program(
     r.message = "run_ccat_program: adb/cfg must be non-null";
     return r;
   }
-  template_matcher matcher(_cfg->match_threshold, _cfg->match_multiscale);
+  template_matcher matcher(_cfg->match.threshold, _cfg->match.multiscale);
   ccat_lang::CcatInterpreter interp(_adb, _cfg, std::move(matcher),
                                     _images_base, _script_path);
   return interp.run(_program, _should_stop);

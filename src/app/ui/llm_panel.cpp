@@ -381,16 +381,16 @@ void start_turn(campcat::shell_state &_st, const campcat::app_config &_cfg,
                           prompt = std::move(_prompt)]() {
     // A per-turn client, built the way the automation cycle builds one. Every
     // tool runs on this thread, so nothing here races the UI.
-    campcat::adb_client adb(cfg_snapshot.adb_path, cfg_snapshot.adb_serial);
-    adb.connect_remote(cfg_snapshot.adb_connect_address);
+    campcat::adb_client adb(cfg_snapshot.adb.path, cfg_snapshot.adb.serial);
+    adb.connect_remote(cfg_snapshot.adb.connect_address);
     campcat::llm::tool_context ctx;
     ctx.adb = &adb;
     ctx.adb_busy = [] { return g_adb_busy.load(); };
     // Folded here, in one place: the master switch and the tool's own gate. The
     // names are the ones the tools report in their approval requests, so a tool
     // asks about itself and there is no second table to keep in step.
-    const bool master = cfg_snapshot.require_tool_approval;
-    const campcat::app_config::approval_gates gates = cfg_snapshot.gates;
+    const bool master = cfg_snapshot.approval.require;
+    const campcat::approval_gates gates = cfg_snapshot.approval.gates;
     ctx.needs_approval = [master, gates](std::string_view _tool) {
       if (!master) {
         return false;
@@ -421,7 +421,8 @@ void start_turn(campcat::shell_state &_st, const campcat::app_config &_cfg,
       return true;
     };
     ctx.cfg = &cfg_snapshot;
-    ctx.script_dir = cfg_snapshot.config_home / "scripts/llm";
+    ctx.script_dir =
+        std::filesystem::path(cfg_snapshot.config_home) / "scripts/llm";
     ctx.start_emulator = [st](const std::function<bool()> &_should_stop) {
       return st->start_mumu_blocking(_should_stop);
     };
@@ -748,19 +749,19 @@ void draw_approval_settings(campcat::app_config &_c) {
   if (!ImGui::BeginPopup("llm_approval_settings")) {
     return;
   }
-  ImGui::Checkbox("Require approval", &_c.require_tool_approval);
+  ImGui::Checkbox("Require approval", &_c.approval.require);
   ImGui::Separator();
-  const bool master_off = !_c.require_tool_approval;
+  const bool master_off = !_c.approval.require;
   if (master_off) {
     ImGui::BeginDisabled();
   }
-  ImGui::Checkbox("Device tap", &_c.gates.tap);
-  ImGui::Checkbox("Run script", &_c.gates.run_script);
-  ImGui::Checkbox("Save script", &_c.gates.save_script);
-  ImGui::Checkbox("Save template", &_c.gates.save_template);
-  ImGui::Checkbox("Update script", &_c.gates.update_script);
-  ImGui::Checkbox("Delete script", &_c.gates.delete_script);
-  ImGui::Checkbox("Rename script", &_c.gates.rename_script);
+  ImGui::Checkbox("Device tap", &_c.approval.gates.tap);
+  ImGui::Checkbox("Run script", &_c.approval.gates.run_script);
+  ImGui::Checkbox("Save script", &_c.approval.gates.save_script);
+  ImGui::Checkbox("Save template", &_c.approval.gates.save_template);
+  ImGui::Checkbox("Update script", &_c.approval.gates.update_script);
+  ImGui::Checkbox("Delete script", &_c.approval.gates.delete_script);
+  ImGui::Checkbox("Rename script", &_c.approval.gates.rename_script);
   if (master_off) {
     ImGui::EndDisabled();
   }
@@ -1245,7 +1246,8 @@ void llm_panel_draw_panel(campcat::shell_state &_st, campcat::app_config &_cfg,
   // Saved skills in a fixed column on the left, conversation on the right, the
   // prompt box below both. Side by side because the list is an index, not a
   // second conversation: stacked, it took height off every reply.
-  script_editor_panel_draw(_cfg.config_home / "scripts/llm", k_script_list_w, -g_footer_h);
+  script_editor_panel_draw(std::filesystem::path(_cfg.config_home) / "scripts/llm",
+                           k_script_list_w, -g_footer_h);
   ImGui::SameLine();
   // Measured, not another negative width: a negative size is resolved against
   // the window's content region, not against what is left past the cursor, so

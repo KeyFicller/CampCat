@@ -19,7 +19,8 @@ namespace {
 std::string load_ccat_source(const app_config &_cfg,
                              const ccat_script_profile &_prof) {
   std::error_code ec;
-  const std::filesystem::path script_path = _cfg.config_home / _prof.source_rel;
+  const std::filesystem::path script_path =
+      std::filesystem::path(_cfg.config_home) / _prof.source_rel;
   const std::filesystem::path canon =
       std::filesystem::weakly_canonical(script_path, ec);
   const std::filesystem::path resolved =
@@ -53,7 +54,8 @@ automation_cycle_result ccat_script_automation::run_cycle(
   if (source.empty()) {
     std::ostringstream oss;
     oss << "cannot read script file under config_home: "
-        << (m_cfg->config_home / m_profile->source_rel).string();
+        << (std::filesystem::path(m_cfg->config_home) / m_profile->source_rel)
+               .string();
     r.ok = false;
     r.message = oss.str();
     automation_log::emit(std::string("[ccat] ") + r.message);
@@ -75,7 +77,7 @@ automation_cycle_result ccat_script_automation::run_cycle(
 
   std::error_code ec;
   const std::filesystem::path script_path =
-      m_cfg->config_home / m_profile->source_rel;
+      std::filesystem::path(m_cfg->config_home) / m_profile->source_rel;
   const std::filesystem::path canon =
       std::filesystem::weakly_canonical(script_path, ec);
   const std::filesystem::path script_abs =

@@ -126,13 +126,13 @@ ImVec2 screen_from_img_px(int _ix, int _iy, const ImVec2 &_img_min,
 }
 
 void capture_clicked(campcat::app_config &_cfg) {
-  campcat::adb_client adb(_cfg.adb_path, _cfg.adb_serial);
-  const bool connected = adb.connect_remote(_cfg.adb_connect_address);
+  campcat::adb_client adb(_cfg.adb.path, _cfg.adb.serial);
+  const bool connected = adb.connect_remote(_cfg.adb.connect_address);
   cv::Mat cap;
   std::string diag;
   if (!adb.screencap_png(&cap, 45000, &diag)) {
     if (!connected) {
-      diag += " (adb connect " + _cfg.adb_connect_address + " failed)";
+      diag += " (adb connect " + _cfg.adb.connect_address + " failed)";
     }
     campcat::automation_log::emit("[capture] screencap failed " + diag);
     return;

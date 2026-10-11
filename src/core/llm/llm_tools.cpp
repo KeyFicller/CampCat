@@ -573,7 +573,7 @@ CPP_REFLECT_TOOL(tap)
   // so this is what makes the device reachable to the tools that come next.
   if (g_ctx.adb != nullptr && g_ctx.cfg != nullptr) {
     std::string diag;
-    if (!g_ctx.adb->connect_remote(g_ctx.cfg->adb_connect_address, 15000,
+    if (!g_ctx.adb->connect_remote(g_ctx.cfg->adb.connect_address, 15000,
                                    nullptr, &diag)) {
       text += " (adb connect failed: " + diag + ")";
     }
@@ -781,7 +781,7 @@ CPP_REFLECT_TOOL(save_template)
     throw js::bind_error("no shell config; cannot locate CCAT.md");
   }
   const std::filesystem::path path =
-      g_ctx.cfg->config_home.parent_path() / "CCAT.md";
+      std::filesystem::path(g_ctx.cfg->config_home).parent_path() / "CCAT.md";
   // Read per call, no cache: a function-local static would freeze whichever
   // g_ctx the first call happened to see, and this tool is called rarely enough
   // that the read costs nothing.

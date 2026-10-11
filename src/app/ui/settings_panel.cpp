@@ -40,13 +40,14 @@ void settings_panel_draw(campcat::shell_state &_st,
 
   if (ImGui::CollapsingHeader("Timing & match###cfg_timing",
                               ImGuiTreeNodeFlags_DefaultOpen)) {
-    ImGui::SliderInt("Tap delay (ms)", &_cfg_view.tap_delay_ms, 40, 800);
-    ImGui::SliderInt("Action gap (ms)", &_cfg_view.action_gap_ms, 1000, 5000);
-    ImGui::SliderInt("Swipe duration (ms)", &_cfg_view.swipe_duration_ms, 50,
-                     2000);
+    ImGui::SliderInt("Tap delay (ms)", &_cfg_view.input.tap_delay_ms, 40, 800);
+    ImGui::SliderInt("Action gap (ms)", &_cfg_view.input.action_gap_ms, 1000,
+                     5000);
+    ImGui::SliderInt("Swipe duration (ms)", &_cfg_view.input.swipe_duration_ms,
+                     50, 2000);
     ImGui::SliderScalar("Match threshold", ImGuiDataType_Double,
-                        &_cfg_view.match_threshold, &min_th, &max_th, "%.3f");
-    ImGui::Checkbox("Multi-scale match", &_cfg_view.match_multiscale);
+                        &_cfg_view.match.threshold, &min_th, &max_th, "%.3f");
+    ImGui::Checkbox("Multi-scale match", &_cfg_view.match.multiscale);
   }
 
   ImGui::Spacing();

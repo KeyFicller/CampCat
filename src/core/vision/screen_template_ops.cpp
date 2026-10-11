@@ -38,7 +38,7 @@ screen_template_detect_result detect_template_on_screen(
     return r;
   }
 
-  (void)_adb.connect_remote(_shell_timing_only.adb_connect_address,
+  (void)_adb.connect_remote(_shell_timing_only.adb.connect_address,
                             _opts.adb_connect_timeout_ms);
 
   cv::Mat scr;
@@ -48,11 +48,11 @@ screen_template_detect_result detect_template_on_screen(
     return r;
   }
 
-  template_matcher matcher(_shell_timing_only.match_threshold,
-                           _shell_timing_only.match_multiscale);
+  template_matcher matcher(_shell_timing_only.match.threshold,
+                           _shell_timing_only.match.multiscale);
   const auto mr =
       matcher.match_file(scr, r.template_path.string(),
-                         _shell_timing_only.match_threshold, _opts.roi_px);
+                         _shell_timing_only.match.threshold, _opts.roi_px);
   if (!mr) {
     r.error = screen_template_error::template_unreadable;
     return r;
@@ -109,7 +109,7 @@ screen_template_tap_result tap_template_on_screen(
   }
 
   (void)_adb.delay_after_action(
-      std::chrono::milliseconds(_shell_timing_only.tap_delay_ms));
+      std::chrono::milliseconds(_shell_timing_only.input.tap_delay_ms));
   out.error = screen_template_error::ok;
   out.tapped = true;
   return out;

@@ -41,7 +41,7 @@ public:
  * @param[in] adb Live adb facade (must outlive automation instance usage).
  * @param[in] cfg Loaded shell persistence snapshot.
  * @param[in] script_bundle Concrete profile type decided by active script id; nullable.
- * @return Unique owning pointer honoring `cfg->active_script_id`.
+ * @return Unique owning pointer honoring `cfg->script.active_id`.
  */
 std::unique_ptr<game_automation>
 make_game_automation(adb_client *adb, const app_config *cfg,

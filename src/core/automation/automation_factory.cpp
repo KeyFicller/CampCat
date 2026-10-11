@@ -65,7 +65,7 @@ make_game_automation(adb_client *adb, const app_config *cfg,
         "adb_client or app_config missing");
   }
 
-  const std::string &sid = cfg->active_script_id;
+  const std::string &sid = cfg->script.active_id;
   if (sid.empty() || sid == shell_script_id::k_none) {
     return std::make_unique<unknown_automation_game>(
         "no script selected (active_script='" + sid + "')");

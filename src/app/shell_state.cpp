@@ -100,14 +100,16 @@ shell_state::shell_state(std::filesystem::path _cfg_path)
 
   // The Settings fields are character buffers, not strings; seed them once
   // here instead of on the first frame.
-  std::snprintf(adb_path_buf, sizeof(adb_path_buf), "%s", m_cfg.adb_path.c_str());
-  std::snprintf(serial_buf, sizeof(serial_buf), "%s", m_cfg.adb_serial.c_str());
+  std::snprintf(adb_path_buf, sizeof(adb_path_buf), "%s",
+                m_cfg.adb.path.c_str());
+  std::snprintf(serial_buf, sizeof(serial_buf), "%s",
+                m_cfg.adb.serial.c_str());
   std::snprintf(adb_connect_buf, sizeof(adb_connect_buf), "%s",
-                m_cfg.adb_connect_address.c_str());
+                m_cfg.adb.connect_address.c_str());
   std::snprintf(mumutool_buf, sizeof(mumutool_buf), "%s",
-                m_cfg.mumutool_path.c_str());
-  mumu_index_buf = m_cfg.mumu_device_index;
-  last_script_seen = m_cfg.active_script_id;
+                m_cfg.mumu.tool_path.c_str());
+  mumu_index_buf = m_cfg.mumu.device_index;
+  last_script_seen = m_cfg.script.active_id;
 
   campcat::automation_log::set_sink([this](const std::string &_s) {
     const auto now = std::chrono::system_clock::now();
@@ -145,11 +147,11 @@ void shell_state::append_log(const std::string &_s) {
 
 void shell_state::merge_buffers_into(app_config *_dst, const app_config &_ui) {
   *_dst = _ui;
-  _dst->adb_path = adb_path_buf;
-  _dst->adb_serial = serial_buf;
-  _dst->adb_connect_address = adb_connect_buf;
-  _dst->mumutool_path = mumutool_buf;
-  _dst->mumu_device_index = mumu_index_buf;
+  _dst->adb.path = adb_path_buf;
+  _dst->adb.serial = serial_buf;
+  _dst->adb.connect_address = adb_connect_buf;
+  _dst->mumu.tool_path = mumutool_buf;
+  _dst->mumu.device_index = mumu_index_buf;
 }
 
 void shell_state::push_job_snapshot(app_config *_view,
@@ -207,17 +209,17 @@ void shell_state::run_automation_thread_body(
     }
   };
   try {
-    campcat::adb_client adb(_snap_shell.adb_path, _snap_shell.adb_serial);
+    campcat::adb_client adb(_snap_shell.adb.path, _snap_shell.adb.serial);
     std::string co, ce;
     const bool ok_c =
-        adb.connect_remote(_snap_shell.adb_connect_address, 15000, &co, &ce);
+        adb.connect_remote(_snap_shell.adb.connect_address, 15000, &co, &ce);
     split_log("[adb connect] ", co);
     split_log("[adb connect err] ", ce);
-    if (!_snap_shell.adb_connect_address.empty() && !ok_c) {
+    if (!_snap_shell.adb.connect_address.empty() && !ok_c) {
       append_log("[adb connect] failed or timeout");
     }
     const campcat::automation_profile *bundle = nullptr;
-    if (_snap_shell.active_script_id == shell_sid::k_ccat_script) {
+    if (_snap_shell.script.active_id == shell_sid::k_ccat_script) {
       bundle = &_snap_ccat;
     }
     auto automator = campcat::make_game_automation(&adb, &_snap_shell, bundle);
@@ -278,14 +280,15 @@ void shell_state::run_console_source_job(std::string _source) {
          shell = std::move(std::get<0>(snap)),
          ccat_bundle = std::move(std::get<1>(snap))]() mutable {
           try {
-            campcat::adb_client adb(shell.adb_path, shell.adb_serial);
+            campcat::adb_client adb(shell.adb.path, shell.adb.serial);
             std::string co, ce;
-            adb.connect_remote(shell.adb_connect_address, 15000, &co, &ce);
+            adb.connect_remote(shell.adb.connect_address, 15000, &co, &ce);
             auto prog = campcat::ccat_lang::parse_program(source);
             const auto images = ccat_bundle.images_base(shell.config_home);
             std::filesystem::path script_abs = ccat_bundle.script_path_absolute;
             if (script_abs.empty()) {
-              script_abs = shell.config_home / ccat_bundle.source_rel;
+              script_abs = std::filesystem::path(shell.config_home) /
+                           ccat_bundle.source_rel;
             }
             const auto should_stop = [this]() { return stop_requested.load(); };
             const auto res = campcat::run_ccat_program(
@@ -347,9 +350,9 @@ campcat::mumu_status shell_state::start_mumu_blocking(
 campcat::mumu_status shell_state::mumu_launch_sequence(
     const campcat::app_config &shell,
     const std::function<bool()> &_should_stop) {
-  const std::string tool = shell.mumutool_path;
+  const std::string tool = shell.mumu.tool_path;
   const std::string app = campcat::mumu_app_path(tool);
-  const int index = shell.mumu_device_index;
+  const int index = shell.mumu.device_index;
   // The app this run launched, if any; feeds the watchdog and is what
   // the shutdown path quits. Empty keeps somebody else's app alive.
   std::string app_owned;
@@ -476,8 +479,8 @@ void shell_state::start_device_poll() {
         // The UI pushes this snapshot every frame, so it already carries what
         // the Settings fields say.
         std::lock_guard<std::mutex> lk(m_cfg_mu);
-        adb_path = m_cfg.adb_path;
-        serial = m_cfg.adb_serial;
+        adb_path = m_cfg.adb.path;
+        serial = m_cfg.adb.serial;
       }
       bool online = false;
       if (!adb_path.empty()) {

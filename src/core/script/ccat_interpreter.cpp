@@ -41,7 +41,7 @@ std::string read_text_file(const std::filesystem::path &_path) {
 
 std::chrono::milliseconds pause_after_tap(const app_config &_cfg) {
   return std::chrono::milliseconds(
-      std::max(_cfg.tap_delay_ms, _cfg.action_gap_ms));
+      std::max(_cfg.input.tap_delay_ms, _cfg.input.action_gap_ms));
 }
 
 bool coord_normalized_ok(double _v) { return _v >= 0.0 && _v <= 1.0; }
@@ -80,7 +80,7 @@ CcatInterpreter::CcatInterpreter(adb_client *_adb, const app_config *_cfg,
     : m_adb(_adb), m_cfg(_cfg), m_matcher(std::move(_matcher)),
       m_images_base(std::move(_images_base)),
       m_script_path(std::move(_script_path)),
-      m_match_debug_enabled(_cfg && _cfg->match_debug) {
+      m_match_debug_enabled(_cfg && _cfg->match.debug) {
   if (!m_adb || !m_cfg) {
     throw std::invalid_argument("CcatInterpreter requires adb and cfg");
   }
@@ -124,7 +124,7 @@ bool CcatInterpreter::image_matches(const std::string &_rel_path,
     return false;
   }
   const auto opt =
-      m_matcher.match_file(screen, abs_path.string(), m_cfg->match_threshold);
+      m_matcher.match_file(screen, abs_path.string(), m_cfg->match.threshold);
   if (!opt.has_value()) {
     automation_log::emit("[ccat] template unreadable or missing: " +
                          abs_path.string());
@@ -151,7 +151,7 @@ void CcatInterpreter::dump_match_debug(const char *_op,
   if (!m_cfg || !m_match_debug_enabled || _screen.empty()) {
     return;
   }
-  std::filesystem::path dir = m_cfg->match_debug_dir;
+  std::filesystem::path dir = m_cfg->match.debug_dir;
   if (dir.empty()) {
     dir = "match_debug";
   }
@@ -201,7 +201,7 @@ CcatInterpreter::tap_image(const std::string &_rel_path,
     return std::string("screencap failed before tap");
   }
   const auto opt =
-      m_matcher.match_file(screen, abs_path.string(), m_cfg->match_threshold);
+      m_matcher.match_file(screen, abs_path.string(), m_cfg->match.threshold);
   if (!opt.has_value()) {
     std::ostringstream oss;
     oss << "tap: unreadable template " << abs_path.string();
@@ -212,7 +212,7 @@ CcatInterpreter::tap_image(const std::string &_rel_path,
     std::ostringstream oss;
     oss << "tap: image not found " << abs_path.string()
         << " (best=" << opt->confidence
-        << " threshold=" << m_cfg->match_threshold << ")";
+        << " threshold=" << m_cfg->match.threshold << ")";
     return oss.str();
   }
 
@@ -250,9 +250,9 @@ std::optional<std::string> CcatInterpreter::swipe_templates_impl(
     return std::string("swipe: screencap failed");
   }
   const auto m_from =
-      m_matcher.match_file(screen, abs_from.string(), m_cfg->match_threshold);
+      m_matcher.match_file(screen, abs_from.string(), m_cfg->match.threshold);
   const auto m_to =
-      m_matcher.match_file(screen, abs_to.string(), m_cfg->match_threshold);
+      m_matcher.match_file(screen, abs_to.string(), m_cfg->match.threshold);
   if (!m_from.has_value() || !m_to.has_value()) {
     return std::string("swipe: template unreadable");
   }
@@ -261,7 +261,7 @@ std::optional<std::string> CcatInterpreter::swipe_templates_impl(
         "swipe: one or both templates not found on current screen");
   }
   if (!m_adb->swipe(m_from->center.x, m_from->center.y, m_to->center.x,
-                    m_to->center.y, m_cfg->swipe_duration_ms)) {
+                    m_to->center.y, m_cfg->input.swipe_duration_ms)) {
     return std::string("swipe: adb swipe failed");
   }
   if (auto sl = cooperative_sleep_ms(
@@ -313,7 +313,7 @@ std::optional<std::string> CcatInterpreter::tap_offset_impl(
     return std::string("tap_offset: screencap failed before match");
   }
   const auto opt =
-      m_matcher.match_file(screen, abs_path.string(), m_cfg->match_threshold);
+      m_matcher.match_file(screen, abs_path.string(), m_cfg->match.threshold);
   if (!opt.has_value()) {
     std::ostringstream oss;
     oss << "tap_offset: unreadable template " << abs_path.string();
@@ -324,7 +324,7 @@ std::optional<std::string> CcatInterpreter::tap_offset_impl(
     std::ostringstream oss;
     oss << "tap_offset: image not found " << abs_path.string()
         << " (best=" << opt->confidence
-        << " threshold=" << m_cfg->match_threshold << ")";
+        << " threshold=" << m_cfg->match.threshold << ")";
     return oss.str();
   }
 
@@ -368,7 +368,7 @@ std::optional<std::string> CcatInterpreter::swipe_at_impl(
   const int ay = norm_axis_to_pixel(_y1, screen.rows);
   const int bx = norm_axis_to_pixel(_x2, screen.cols);
   const int by = norm_axis_to_pixel(_y2, screen.rows);
-  if (!m_adb->swipe(ax, ay, bx, by, m_cfg->swipe_duration_ms)) {
+  if (!m_adb->swipe(ax, ay, bx, by, m_cfg->input.swipe_duration_ms)) {
     return std::string("swipe_at: adb swipe failed");
   }
   if (auto sl = cooperative_sleep_ms(
@@ -383,7 +383,7 @@ CcatInterpreter::home_impl(const std::function<bool()> &_should_stop) {
   if (_should_stop()) {
     return std::string("stopped");
   }
-  const int gap_ms = std::max(0, m_cfg->tap_delay_ms);
+  const int gap_ms = std::max(0, m_cfg->input.tap_delay_ms);
   if (!m_adb->home_and_kill_all(gap_ms)) {
     return std::string(
         "home: KEYCODE_HOME / dumpsys recents / am force-stop failed");

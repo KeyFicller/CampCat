@@ -1,25 +1,35 @@
 {
-  "action_gap_ms": 1000,
-  "active_script": "ccat_script",
-  "adb_connect_address": "127.0.0.1:5555",
-  "adb_path": "/Applications/MuMuPlayer.app/Contents/MacOS/MuMuEmulator.app/Contents/MacOS/tools/adb",
-  "adb_serial": "",
-  "match_debug": false,
-  "match_debug_dir": "match_debug",
-  "match_multiscale": false,
-  "match_threshold": 0.7,
-  "max_step_retries": 12,
-  "mumu_device_index": 0,
-  "mumutool_path": "/Applications/MuMuPlayer.app/Contents/MacOS/mumutool",
-  "require_tool_approval": true,
-  "approval_gates": {
-    "tap": true,
-    "run_script": true,
-    "save_script": true,
-    "save_template": true,
-    "update_script": true,
-    "delete_script": true,
-    "rename_script": true
+  "adb": {
+    "connect_address": "127.0.0.1:5555",
+    "path": "/Applications/MuMuPlayer.app/Contents/MacOS/MuMuEmulator.app/Contents/MacOS/tools/adb",
+    "serial": ""
+  },
+  "approval": {
+    "gates": {
+      "delete_script": true,
+      "rename_script": true,
+      "run_script": true,
+      "save_script": true,
+      "save_template": true,
+      "tap": true,
+      "update_script": true
+    },
+    "require": true
+  },
+  "input": {
+    "action_gap_ms": 1000,
+    "swipe_duration_ms": 300,
+    "tap_delay_ms": 150
+  },
+  "match": {
+    "debug": false,
+    "debug_dir": "match_debug",
+    "multiscale": false,
+    "threshold": 0.7
+  },
+  "mumu": {
+    "device_index": 0,
+    "tool_path": "/Applications/MuMuPlayer.app/Contents/MacOS/mumutool"
   },
   "scheduler": {
     "enabled": true,
@@ -27,11 +37,13 @@
     "jitter_seconds": 7,
     "skip_if_busy": false
   },
-  "scripts": {
-    "ccat_script": "scripts/ccat_script.json"
-  },
-  "step_retry_interval_ms": 500,
-  "swipe_duration_ms": 300,
-  "tap_delay_ms": 150,
-  "version": 1
+  "script": {
+    "active_id": "ccat_script",
+    "registry": [
+      {
+        "id": "ccat_script",
+        "path": "scripts/ccat_script.json"
+      }
+    ]
+  }
 }

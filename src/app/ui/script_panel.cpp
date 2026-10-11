@@ -46,7 +46,7 @@ void append_prefixed_multiline_json(
 
 void log_active_script_bundle(campcat::shell_state &_st,
                               const campcat::app_config &_view_shell) {
-  const std::string &sid = _view_shell.active_script_id;
+  const std::string &sid = _view_shell.script.active_id;
   if (sid.empty() || sid == shell_sid::k_none) {
     _st.append_log("[script cfg] (no script selected) automation disabled");
     return;
@@ -64,12 +64,12 @@ void log_active_script_bundle(campcat::shell_state &_st,
 void maybe_handle_script_combo_change(campcat::shell_state &_st,
                                       campcat::app_config *_view,
                                       campcat::ccat_script_profile *_ccat_ui) {
-  if (_view->active_script_id == _st.last_script_seen) {
+  if (_view->script.active_id == _st.last_script_seen) {
     return;
   }
-  _st.last_script_seen = _view->active_script_id;
+  _st.last_script_seen = _view->script.active_id;
 
-  if (_view->active_script_id == shell_sid::k_ccat_script) {
+  if (_view->script.active_id == shell_sid::k_ccat_script) {
     const auto pj =
         _view->resolve_script_json(std::string{shell_sid::k_ccat_script});
     _st.set_ccat_live(pj.empty() ? campcat::ccat_script_profile::defaults()
@@ -149,23 +149,23 @@ void script_panel_draw(campcat::shell_state &_st, campcat::app_config &_cfg_view
   }
 
   std::vector<std::string> script_ids;
-  script_ids.reserve(_cfg_view.script_config_paths.size() + 1);
+  script_ids.reserve(_cfg_view.script.registry.size() + 1);
   script_ids.push_back("none");
-  for (const auto &kv : _cfg_view.script_config_paths) {
-    script_ids.push_back(kv.first);
+  for (const auto &entry : _cfg_view.script.registry) {
+    script_ids.push_back(entry.id);
   }
   std::sort(script_ids.begin() + 1, script_ids.end());
 
   const std::string preview_str =
-      script_display_label(_cfg_view.active_script_id);
+      script_display_label(_cfg_view.script.active_id);
   ImGui::SeparatorText("Active script");
   ImGui::SetNextItemWidth(-1.0F);
   if (ImGui::BeginCombo("##active_script", preview_str.c_str())) {
     for (const std::string &sid : script_ids) {
-      const bool selected = (sid == _cfg_view.active_script_id);
+      const bool selected = (sid == _cfg_view.script.active_id);
       const auto label_full = script_display_label(sid) + "###sid_" + sid;
       if (ImGui::Selectable(label_full.c_str(), selected)) {
-        _cfg_view.active_script_id = sid;
+        _cfg_view.script.active_id = sid;
         maybe_handle_script_combo_change(_st, &_cfg_view, &_ccat_ui);
       }
       if (selected) {
@@ -179,7 +179,7 @@ void script_panel_draw(campcat::shell_state &_st, campcat::app_config &_cfg_view
   ImGui::Separator();
   ImGui::Spacing();
 
-  if (_cfg_view.active_script_id == shell_sid::k_ccat_script) {
+  if (_cfg_view.script.active_id == shell_sid::k_ccat_script) {
     ImGui::TextWrapped(
         "CampCat uses a .ccat script and a bundle JSON under "
         "config/scripts/.");
@@ -202,9 +202,11 @@ void script_panel_draw(campcat::shell_state &_st, campcat::app_config &_cfg_view
       }
       ImGui::SameLine();
       if (ImGui::Button("Browse##script_path_ccat", ImVec2(80.0F, 0.0F))) {
-        std::filesystem::path start = _cfg_view.config_home / "scripts";
+        std::filesystem::path start =
+            std::filesystem::path(_cfg_view.config_home) / "scripts";
         if (_ccat_ui.has_script_source()) {
-          const auto resolved = _cfg_view.config_home / _ccat_ui.source_rel;
+          const auto resolved = std::filesystem::path(_cfg_view.config_home) /
+                                _ccat_ui.source_rel;
           const auto parent = resolved.parent_path();
           if (!parent.empty()) {
             start = parent;
@@ -228,7 +230,7 @@ void script_panel_draw(campcat::shell_state &_st, campcat::app_config &_cfg_view
               (!rel.begin()->empty() && *rel.begin() == "..")) {
             _st.append_log(
                 "[ui] pick a .ccat file under the config directory: " +
-                _cfg_view.config_home.string());
+                _cfg_view.config_home);
           } else {
             _ccat_ui.source_rel = rel.generic_string();
             std::snprintf(v_src, sizeof(v_src), "%s",
@@ -244,7 +246,9 @@ void script_panel_draw(campcat::shell_state &_st, campcat::app_config &_cfg_view
       }
       ImGui::TextWrapped(
           "Resolved script: %s",
-          (_cfg_view.config_home / _ccat_ui.source_rel).string().c_str());
+          (std::filesystem::path(_cfg_view.config_home) / _ccat_ui.source_rel)
+              .string()
+              .c_str());
       ImGui::TextWrapped(
           "Template folder: %s",
           _ccat_ui.images_base(_cfg_view.config_home).string().c_str());
