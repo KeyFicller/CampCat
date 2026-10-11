@@ -1,8 +1,5 @@
 #include "core/automation/game_automation.h"
 
-#include "core/automation/automation_driver.h"
-
-#include <array>
 #include <memory>
 #include <string>
 
@@ -30,55 +27,20 @@ public:
   }
 };
 
-class ccat_automation_driver final : public automation_driver {
-public:
-  std::string_view script_id() const noexcept override {
-    return shell_script_id::k_ccat_script;
-  }
-
-  std::unique_ptr<game_automation>
-  create(adb_client *adb, const app_config *cfg,
-         const automation_profile *bundle) const override {
-    const auto *typed =
-        bundle ? dynamic_cast<const ccat_script_profile *>(bundle) : nullptr;
-    if (!typed) {
-      return std::make_unique<unknown_automation_game>(
-          "missing ccat_script bundle JSON (load or save profile)");
-    }
-    return std::make_unique<ccat_script_automation>(adb, cfg, typed);
-  }
-};
-
-const ccat_automation_driver g_ccat_driver{};
-
-const std::array<const automation_driver *, 1> k_drivers = {
-    &g_ccat_driver,
-};
-
 } // namespace
 
 std::unique_ptr<game_automation>
 make_game_automation(adb_client *adb, const app_config *cfg,
-                     const automation_profile *script_bundle) {
+                     const ccat_script_profile *script_bundle) {
   if (!adb || !cfg) {
     return std::make_unique<unknown_automation_game>(
         "adb_client or app_config missing");
   }
-
-  const std::string &sid = cfg->script.active_id;
-  if (sid.empty() || sid == shell_script_id::k_none) {
+  if (!script_bundle) {
     return std::make_unique<unknown_automation_game>(
-        "no script selected (active_script='" + sid + "')");
+        "missing ccat_script bundle JSON (load or save profile)");
   }
-
-  for (const automation_driver *drv : k_drivers) {
-    if (drv->supports(sid)) {
-      return drv->create(adb, cfg, script_bundle);
-    }
-  }
-
-  return std::make_unique<unknown_automation_game>("unsupported script: " +
-                                                   sid);
+  return std::make_unique<ccat_script_automation>(adb, cfg, script_bundle);
 }
 
 } // namespace campcat

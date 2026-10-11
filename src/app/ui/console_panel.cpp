@@ -15,7 +15,7 @@ void console_panel_draw(campcat::shell_state &_st, campcat::app_config &_cfg_vie
                        bool _busy_now, ImFont *_font_bold) {
   // Only this page uses them, so they live here rather than in shell_state.
   static campcat::ccat_lang::CcatRepl console_repl;
-  static char console_input[1024] = {};
+  static std::string console_input;
 
   ImGui::TextWrapped(
       "Interactive .ccat console. Multiline uses ... until braces/parens "
@@ -61,8 +61,7 @@ void console_panel_draw(campcat::shell_state &_st, campcat::app_config &_cfg_vie
   ImGui::TextUnformatted(console_repl.prompt());
   ImGui::SameLine();
   ImGui::SetNextItemWidth(-80.0F);
-  const bool submit = prompt_input_text("##console_in", nullptr, console_input,
-                                       sizeof(console_input));
+  const bool submit = prompt_input_text("##console_in", nullptr, &console_input);
   // Must run immediately after InputText; later widgets would steal -1.
   if (submit && !_busy_now) {
     ImGui::SetKeyboardFocusHere(-1);
@@ -83,7 +82,7 @@ void console_panel_draw(campcat::shell_state &_st, campcat::app_config &_cfg_vie
 
   if (submit && !_busy_now) {
     const auto fr = console_repl.feed_line(console_input);
-    console_input[0] = '\0';
+    console_input.clear();
     if (fr == campcat::ccat_lang::repl_feed_result::ready) {
       if (!_ccat_ui.has_script_source()) {
         console_repl.history.push_back("need .ccat path for images_base");

@@ -1,19 +1,22 @@
 #pragma once
 
-#include "core/automation/automation_profile.h"
-
 #include <filesystem>
 #include <string>
+#include <string_view>
 
 #include <nlohmann/json.hpp>
 
 namespace campcat {
 
+/// Bundle JSON path relative to `config_home`.
+inline constexpr std::string_view k_ccat_bundle_rel =
+    "scripts/ccat_script.json";
+
 /**
  * @brief Persisted bundle describing where `.ccat` lives.
  * PNG operands always resolve beside the `.ccat` file.
  */
-struct ccat_script_profile final : automation_profile {
+struct ccat_script_profile {
   /** @brief Bundle schema revision mirrored inside JSON `version` field. */
   int version = 1;
 

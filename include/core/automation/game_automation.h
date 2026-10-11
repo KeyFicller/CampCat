@@ -9,8 +9,8 @@
 namespace campcat {
 
 class adb_client;
-class automation_profile;
 struct app_config;
+struct ccat_script_profile;
 
 /**
  * @brief Shell-level outcome of one automation tick (opaque to scripted payloads).
@@ -37,14 +37,14 @@ public:
 };
 
 /**
- * @brief Factory wiring shell + optional script bundle into an automation driver.
+ * @brief Factory wiring shell + script bundle into an automation run.
  * @param[in] adb Live adb facade (must outlive automation instance usage).
  * @param[in] cfg Loaded shell persistence snapshot.
- * @param[in] script_bundle Concrete profile type decided by active script id; nullable.
- * @return Unique owning pointer honoring `cfg->script.active_id`.
+ * @param[in] script_bundle Concrete profile type; nullable.
+ * @return Unique owning pointer, or one that reports the reason it cannot run.
  */
 std::unique_ptr<game_automation>
 make_game_automation(adb_client *adb, const app_config *cfg,
-                     const automation_profile *script_bundle);
+                     const ccat_script_profile *script_bundle);
 
 } // namespace campcat

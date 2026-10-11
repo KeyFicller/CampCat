@@ -118,13 +118,14 @@ public:
   int mumu_launched_index = -1;
   std::string mumu_app_started;
 
-  char adb_path_buf[512]{};
-  char serial_buf[256]{};
-  char adb_connect_buf[256]{};
-  char mumutool_buf[512]{};
+  /// The Settings page's editable copies. They are seeded from config once, and
+  /// `merge_buffers_into` writes them back, so an edit outlives the per-frame
+  /// config snapshot the page draws from.
+  std::string adb_path_buf;
+  std::string serial_buf;
+  std::string adb_connect_buf;
+  std::string mumutool_buf;
   int mumu_index_buf = 0;
-  /// Last active script id, so the combo can tell a real switch from a redraw.
-  std::string last_script_seen;
 
 private:
   /**

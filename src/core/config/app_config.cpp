@@ -3,7 +3,6 @@
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
-#include <system_error>
 
 #include <llm/reflection_json.h>
 #include <nlohmann/json.hpp>
@@ -11,20 +10,6 @@
 #include "core/file_io.h"
 
 namespace campcat {
-
-std::filesystem::path
-app_config::resolve_script_json(const std::string &_id) const {
-  for (const script_entry &s : script.registry) {
-    if (s.id != _id) {
-      continue;
-    }
-    const std::filesystem::path p = std::filesystem::path(config_home) / s.path;
-    std::error_code ec;
-    const std::filesystem::path c = std::filesystem::weakly_canonical(p, ec);
-    return ec ? p.lexically_normal() : c;
-  }
-  return {};
-}
 
 app_config app_config::defaults() { return app_config{}; }
 

@@ -20,6 +20,7 @@ struct ccat_script_profile;
  * manual actions are disabled.
  * @param[in] _font_bold Bold face for the section headers.
  */
-void script_panel_draw(campcat::shell_state &_st, campcat::app_config &_cfg_view,
-                      campcat::ccat_script_profile &_ccat_ui,
-                      bool _lock_manual_single, ImFont *_font_bold);
+void script_panel_draw(campcat::shell_state &_st,
+                       campcat::app_config &_cfg_view,
+                       campcat::ccat_script_profile &_ccat_ui,
+                       bool _lock_manual_single, ImFont *_font_bold);

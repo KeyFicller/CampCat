@@ -5,6 +5,7 @@
 #include "core/script/ccat_bundle.h"
 
 #include <imgui.h>
+#include <misc/cpp/imgui_stdlib.h>
 
 #include <opencv2/core.hpp>
 #include <opencv2/imgcodecs.hpp>
@@ -12,7 +13,6 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
-#include <cstdio>
 #include <ctime>
 #include <fstream>
 #include <iterator>
@@ -70,7 +70,7 @@ constexpr char k_rename_popup[] = "Rename script";
 std::string g_rename_name; ///< the bundle being renamed
 std::string g_rename_error;
 std::vector<std::string> g_rename_referrers; ///< shown as the rewrite blast radius
-char g_rename_buf[64] = {};
+std::string g_rename_buf;
 bool g_rename_pending = false;
 
 /// A decoded template, kept between hovers: key is the absolute path.
@@ -296,7 +296,7 @@ void draw_rename_modal(const std::filesystem::path &_dir) {
   if (ImGui::IsWindowAppearing()) {
     ImGui::SetKeyboardFocusHere();
   }
-  ImGui::InputText("##new_name", g_rename_buf, sizeof(g_rename_buf));
+  ImGui::InputText("##new_name", &g_rename_buf);
 
   if (!g_rename_referrers.empty()) {
     std::string also;
@@ -315,7 +315,7 @@ void draw_rename_modal(const std::filesystem::path &_dir) {
 
   if (ImGui::Button("Rename")) {
     // A trailing space is invisible and would leave a directory nobody can type.
-    std::string typed(g_rename_buf);
+    std::string typed = g_rename_buf;
     const std::size_t first = typed.find_first_not_of(" \t");
     const std::size_t last = typed.find_last_not_of(" \t");
     typed = first == std::string::npos
@@ -510,7 +510,7 @@ void script_editor_panel_draw(const std::filesystem::path &_script_dir, float _l
     g_rename_referrers =
         campcat::ccat_lang::bundle_referrers(_script_dir, rename_clicked);
     g_rename_error.clear();
-    std::snprintf(g_rename_buf, sizeof(g_rename_buf), "%s", rename_clicked.c_str());
+    g_rename_buf = rename_clicked;
     g_rename_pending = true;
   }
   draw_delete_modal(_script_dir);

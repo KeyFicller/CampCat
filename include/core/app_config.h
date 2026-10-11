@@ -2,18 +2,10 @@
 
 #include <filesystem>
 #include <string>
-#include <vector>
 
 #include <nlohmann/json.hpp>
 
 namespace campcat {
-
-/// One script registered with the shell: `id` is what `script.active_id` names,
-/// `path` is resolved relative to `config_home`.
-struct script_entry {
-  std::string id{};
-  std::string path{};
-};
 
 /**
  * @brief Controls the optional GUI-driven periodic automation worker.
@@ -84,22 +76,9 @@ struct approval_config {
   approval_gates gates{};
 };
 
-/// Which script runs, and the ids it may name.
-struct script_config {
-  /// String id driving `make_game_automation`; empty or `"none"` keeps
-  /// automation idle.
-  std::string active_id = "ccat_script";
-  /// In file order. Replaces the old id -> path map: the reflection layer has no
-  /// map support, and a vector of {id, path} is the shape it can read and write.
-  /// The declared default is the single entry the shell used to inject when the
-  /// key was missing.
-  std::vector<script_entry> registry{{"ccat_script",
-                                      "scripts/ccat_script.json"}};
-};
-
 /**
  * @brief Shell JSON document loaded from disk: adb settings, matchers
- * heuristic defaults, scheduler, active script bookkeeping, persistence paths.
+ * heuristic defaults, scheduler, persistence paths.
  */
 struct app_config {
   /// Where the config file itself lives -- the root every relative path above
@@ -112,18 +91,10 @@ struct app_config {
   match_config match{};
   approval_config approval{};
   scheduler_config scheduler{};
-  script_config script{};
-
-  /**
-   * @brief Resolve `{config_home}/{script.registry[id]}` for known ids.
-   * @param[in] _id Logical script identifier registered inside json.
-   * @return Canonical-ish absolute path token; empty if missing ids/paths.
-   */
-  std::filesystem::path resolve_script_json(const std::string &_id) const;
 
   /**
    * @brief Factory defaults mirrored when load_from_file fails.
-   * @return Default shell record with scripted registry scaffolding.
+   * @return Default shell record.
    */
   static app_config defaults();
 

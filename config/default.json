@@ -36,14 +36,5 @@
     "interval_seconds": 300,
     "jitter_seconds": 7,
     "skip_if_busy": false
-  },
-  "script": {
-    "active_id": "ccat_script",
-    "registry": [
-      {
-        "id": "ccat_script",
-        "path": "scripts/ccat_script.json"
-      }
-    ]
   }
 }

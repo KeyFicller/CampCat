@@ -16,6 +16,7 @@
 
 #include <imgui.h>
 #include <imgui_markdown.h>
+#include <misc/cpp/imgui_stdlib.h>
 
 #include <opencv2/core.hpp>
 #include <opencv2/imgcodecs.hpp>
@@ -35,6 +36,7 @@
 #include <mutex>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -77,7 +79,7 @@ struct handoff {
 
 // UI-thread state: never touched by the worker.
 std::vector<llm_turn> g_turns;
-char g_input[1024] = {};
+std::string g_input;
 bool g_pin_bottom = true;
 bool g_thinking = false; ///< sidecar reports the model is reasoning
 ImFont *g_bold = nullptr; ///< set by llm_panel_set_bold_font
@@ -143,7 +145,7 @@ std::filesystem::path g_config_home;
 
 /// The Long-term memory window, and the copy it displays.
 bool g_mem_open = false;
-std::vector<char> g_mem_buf;
+std::string g_mem_buf;
 
 /// (Re)read the memory file into the window's buffer.
 void reload_memory() {
@@ -153,8 +155,7 @@ void reload_memory() {
   } else if (text.empty()) {
     text = "(no memory yet)";
   }
-  g_mem_buf.assign(text.begin(), text.end());
-  g_mem_buf.push_back('\0');
+  g_mem_buf = std::move(text);
 }
 
 /// Read-only view of the notes, with the one destructive action behind a
@@ -200,7 +201,7 @@ void draw_memory_window() {
   }
 
   ImGui::Separator();
-  ImGui::InputTextMultiline("##memory", g_mem_buf.data(), g_mem_buf.size(),
+  ImGui::InputTextMultiline("##memory", &g_mem_buf,
                             ImGui::GetContentRegionAvail(),
                             ImGuiInputTextFlags_ReadOnly);
   ImGui::End();
@@ -291,9 +292,9 @@ ImVec2 fit_image(int _w, int _h, float _max_w) {
   return ImVec2(w, h);
 }
 
-bool is_blank(const char *_s) {
-  for (const char *p = _s; *p != '\0'; ++p) {
-    if (!std::isspace(static_cast<unsigned char>(*p))) {
+bool is_blank(std::string_view _s) {
+  for (const char c : _s) {
+    if (!std::isspace(static_cast<unsigned char>(c))) {
       return false;
     }
   }
@@ -539,7 +540,7 @@ void send_current(campcat::shell_state &_st, campcat::app_config &_cfg) {
     return;
   }
 
-  g_input[0] = '\0';
+  g_input.clear();
 
   append_user_turn(prompt);
   // Cleared from the UI thread, not just on the worker: the worker clears it
@@ -1301,7 +1302,7 @@ void llm_panel_draw_panel(campcat::shell_state &_st, campcat::app_config &_cfg,
       "##llm_prompt",
       awaiting ? "Optional: tell it what to do instead"
                : "Tell CampCat what to do...",
-      g_input, sizeof(g_input));
+      &g_input);
 
   ImGui::SameLine();
   const bool can_send = awaiting || (!busy && !is_blank(g_input));
@@ -1326,10 +1327,10 @@ void llm_panel_draw_panel(campcat::shell_state &_st, campcat::app_config &_cfg,
   if ((clicked || submitted) && can_send) {
     if (awaiting) {
       const bool blank = is_blank(g_input);
-      g_host.answer_approval(false, blank ? std::string() : std::string(g_input),
+      g_host.answer_approval(false, blank ? std::string() : g_input,
                              g_staged_box);
       clear_staged();
-      g_input[0] = '\0'; // consumed as the answer, not as a prompt
+      g_input.clear(); // consumed as the answer, not as a prompt
     } else {
       send_current(_st, _cfg);
     }

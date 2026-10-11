@@ -4,6 +4,7 @@
 #include "core/mumu_launcher.h"
 
 #include <imgui.h>
+#include <misc/cpp/imgui_stdlib.h>
 
 #include <mutex>
 #include <string>
@@ -53,14 +54,10 @@ void settings_panel_draw(campcat::shell_state &_st,
   ImGui::Spacing();
   if (ImGui::CollapsingHeader("ADB###cfg_adb",
                               ImGuiTreeNodeFlags_DefaultOpen)) {
-    ImGui::InputText("ADB path", _st.adb_path_buf,
-                     IM_ARRAYSIZE(_st.adb_path_buf));
-    ImGui::InputText("Device serial", _st.serial_buf,
-                     IM_ARRAYSIZE(_st.serial_buf));
-    ImGui::InputText("Connect address", _st.adb_connect_buf,
-                     IM_ARRAYSIZE(_st.adb_connect_buf));
-    ImGui::InputText("MuMu tool", _st.mumutool_buf,
-                     IM_ARRAYSIZE(_st.mumutool_buf));
+    ImGui::InputText("ADB path", &_st.adb_path_buf);
+    ImGui::InputText("Device serial", &_st.serial_buf);
+    ImGui::InputText("Connect address", &_st.adb_connect_buf);
+    ImGui::InputText("MuMu tool", &_st.mumutool_buf);
     ImGui::InputInt("Instance index", &_st.mumu_index_buf);
     // The button starts a VM, which takes a while; the wait runs on the
     // worker so the frame keeps drawing while it happens.

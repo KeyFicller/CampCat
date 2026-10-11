@@ -6,6 +6,7 @@
 #include "ccat_driver/ccat_script_profile.h"
 
 #include <imgui.h>
+#include <misc/cpp/imgui_stdlib.h>
 
 #include <opencv2/imgcodecs.hpp>
 #include <opencv2/imgproc.hpp>
@@ -20,8 +21,8 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
-#include <cstring>
 #include <filesystem>
+#include <string_view>
 #include <utility>
 
 namespace {
@@ -42,7 +43,7 @@ int g_sel_y0 = 0;
 int g_sel_x1 = 0;
 int g_sel_y1 = 0;
 
-char g_filename[256] = "template.png";
+std::string g_filename = "template.png";
 
 void release_tex() {
   if (g_tex != 0) {
@@ -74,7 +75,7 @@ bool upload_bgr(const cv::Mat &_bgr) {
   return true;
 }
 
-bool safe_leaf_name(const char *_s) {
+bool safe_leaf_name(std::string_view _s) {
   const std::string s(_s);
   if (s.empty()) {
     return false;
@@ -193,8 +194,7 @@ void template_capture_panel_draw(campcat::app_config &_cfg,
     clear_capture();
   }
 
-  ImGui::InputText("png filename##adb_tpl", g_filename,
-                   IM_ARRAYSIZE(g_filename));
+  ImGui::InputText("png filename##adb_tpl", &g_filename);
 
   if (g_tex == 0 || g_bgr.empty()) {
     ImGui::TextDisabled("(no screenshot)");

@@ -1,14 +1,12 @@
 #include "app/shell_state.h"
 
 #include "core/adb_client.h"
-#include "core/automation/automation_driver.h"
 #include "core/automation/game_automation.h"
 #include "core/automation_log.h"
 #include "ccat_driver/ccat_program_runner.h"
 #include "core/script/ccat_parser.h"
 
 #include <chrono>
-#include <cstdio>
 #include <ctime>
 #include <filesystem>
 #include <functional>
@@ -24,8 +22,6 @@
 #endif
 
 namespace {
-
-namespace shell_sid = campcat::shell_script_id;
 
 /// How long the start button waits for the instance to leave its not-ready
 /// states before it gives up. Booting the VM is slow; this only bounds it.
@@ -71,11 +67,10 @@ bool persist_bundle_to_disk(
     std::filesystem::create_directories(_shell_path.parent_path());
     campcat::app_config tmp_shell = _shell_written;
     tmp_shell.save_to_file(_shell_path);
-    const auto pj_vis =
-        _shell_written.resolve_script_json(std::string{shell_sid::k_ccat_script});
-    if (!pj_vis.empty()) {
-      _ccat_snap.save_to_bundle_path(pj_vis, _shell_written.config_home);
-    }
+    const std::filesystem::path bundle_json =
+        std::filesystem::path(_shell_written.config_home) /
+        campcat::k_ccat_bundle_rel;
+    _ccat_snap.save_to_bundle_path(bundle_json, _shell_written.config_home);
     return true;
   } catch (const std::exception &ex) {
     if (_error_out) {
@@ -92,24 +87,16 @@ namespace campcat {
 shell_state::shell_state(std::filesystem::path _cfg_path)
     : cfg_path(std::move(_cfg_path)),
       m_cfg(campcat::app_config::load_from_file(cfg_path)) {
-  const auto pj = m_cfg.resolve_script_json(std::string{shell_sid::k_ccat_script});
-  m_ccat_live = pj.empty()
-                    ? campcat::ccat_script_profile::defaults()
-                    : campcat::ccat_script_profile::load_from_bundle_path(
-                          pj, m_cfg.config_home);
+  m_ccat_live = campcat::ccat_script_profile::load_from_bundle_path(
+      std::filesystem::path(m_cfg.config_home) / k_ccat_bundle_rel,
+      m_cfg.config_home);
 
-  // The Settings fields are character buffers, not strings; seed them once
-  // here instead of on the first frame.
-  std::snprintf(adb_path_buf, sizeof(adb_path_buf), "%s",
-                m_cfg.adb.path.c_str());
-  std::snprintf(serial_buf, sizeof(serial_buf), "%s",
-                m_cfg.adb.serial.c_str());
-  std::snprintf(adb_connect_buf, sizeof(adb_connect_buf), "%s",
-                m_cfg.adb.connect_address.c_str());
-  std::snprintf(mumutool_buf, sizeof(mumutool_buf), "%s",
-                m_cfg.mumu.tool_path.c_str());
+  // Seed the Settings fields once here instead of on the first frame.
+  adb_path_buf = m_cfg.adb.path;
+  serial_buf = m_cfg.adb.serial;
+  adb_connect_buf = m_cfg.adb.connect_address;
+  mumutool_buf = m_cfg.mumu.tool_path;
   mumu_index_buf = m_cfg.mumu.device_index;
-  last_script_seen = m_cfg.script.active_id;
 
   campcat::automation_log::set_sink([this](const std::string &_s) {
     const auto now = std::chrono::system_clock::now();
@@ -182,11 +169,9 @@ void shell_state::save_config(const app_config &_view,
       m_ccat_live = _ui;
     }
     append_log("[ui] saved to shell: " + cfg_path.string());
-    const auto pj_vis =
-        to_write.resolve_script_json(std::string{shell_sid::k_ccat_script});
-    if (!pj_vis.empty()) {
-      append_log("[ui] saved to ccat bundle: " + pj_vis.string());
-    }
+    append_log("[ui] saved to ccat bundle: " +
+               (std::filesystem::path(to_write.config_home) / k_ccat_bundle_rel)
+                   .string());
     if (!snapshot_cfg().scheduler.enabled) {
       sched.stop();
       append_log("[sched] stopped (scheduler.disabled in saved config)");
@@ -218,11 +203,8 @@ void shell_state::run_automation_thread_body(
     if (!_snap_shell.adb.connect_address.empty() && !ok_c) {
       append_log("[adb connect] failed or timeout");
     }
-    const campcat::automation_profile *bundle = nullptr;
-    if (_snap_shell.script.active_id == shell_sid::k_ccat_script) {
-      bundle = &_snap_ccat;
-    }
-    auto automator = campcat::make_game_automation(&adb, &_snap_shell, bundle);
+    auto automator = campcat::make_game_automation(&adb, &_snap_shell,
+                                                   &_snap_ccat);
     const auto should_stop = [this]() { return stop_requested.load(); };
     const auto res = automator->run_cycle(should_stop);
     append_log(std::string("[fsm] ok=") + (res.ok ? "true" : "false") + " | " +

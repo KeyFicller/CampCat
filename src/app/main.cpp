@@ -358,8 +358,6 @@ int main(int argc, char **argv) {
 #endif
 
   st.append_log("[ui] cfg=" + cfg_path.string());
-  st.append_log("[ui] script combo: switching logs that script snapshot to the "
-                "log pane.");
 
   campcat::ccat_script_profile ccat_ui = st.snapshot_ccat_live();
 
