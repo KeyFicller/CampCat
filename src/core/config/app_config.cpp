@@ -37,6 +37,16 @@ void app_config::from_json(const nlohmann::json &_j, app_config &_c) {
       _j.value("step_retry_interval_ms", _c.step_retry_interval_ms);
   _c.require_tool_approval =
       _j.value("require_tool_approval", _c.require_tool_approval);
+  if (_j.contains("approval_gates")) {
+    const auto &g = _j["approval_gates"];
+    _c.gates.tap = g.value("tap", _c.gates.tap);
+    _c.gates.run_script = g.value("run_script", _c.gates.run_script);
+    _c.gates.save_script = g.value("save_script", _c.gates.save_script);
+    _c.gates.save_template = g.value("save_template", _c.gates.save_template);
+    _c.gates.update_script = g.value("update_script", _c.gates.update_script);
+    _c.gates.delete_script = g.value("delete_script", _c.gates.delete_script);
+    _c.gates.rename_script = g.value("rename_script", _c.gates.rename_script);
+  }
 
   if (_j.contains("scheduler")) {
     const auto &s = _j["scheduler"];
@@ -85,6 +95,13 @@ nlohmann::json app_config::to_json(const app_config &_c) {
   j["max_step_retries"] = _c.max_step_retries;
   j["step_retry_interval_ms"] = _c.step_retry_interval_ms;
   j["require_tool_approval"] = _c.require_tool_approval;
+  j["approval_gates"]["tap"] = _c.gates.tap;
+  j["approval_gates"]["run_script"] = _c.gates.run_script;
+  j["approval_gates"]["save_script"] = _c.gates.save_script;
+  j["approval_gates"]["save_template"] = _c.gates.save_template;
+  j["approval_gates"]["update_script"] = _c.gates.update_script;
+  j["approval_gates"]["delete_script"] = _c.gates.delete_script;
+  j["approval_gates"]["rename_script"] = _c.gates.rename_script;
 
   j["scheduler"]["enabled"] = _c.scheduler.enabled;
   j["scheduler"]["interval_seconds"] = _c.scheduler.interval_seconds;

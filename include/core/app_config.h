@@ -61,6 +61,23 @@ struct app_config {
   /// asking. See llm_tools.h / llm_host.h.
   bool require_tool_approval = false;
 
+  /// Per-tool approval gates, consulted only while `require_tool_approval` is
+  /// on. The names are the tools' own: each reports the same string in its
+  /// approval request (`llm_tools.cpp`). Every one defaults on, so a config
+  /// that predates this block keeps exactly the behaviour the master switch
+  /// alone gave it.
+  struct approval_gates {
+    bool tap = true;
+    bool run_script = true;
+    bool save_script = true;
+    bool save_template = true;
+    bool update_script = true;
+    bool delete_script = true;
+    bool rename_script = true;
+  };
+  /// Which tools ask while the master is on.
+  approval_gates gates{};
+
   scheduler_config scheduler{};
 
   /// String id driving `make_game_automation`; empty or `"none"` keeps automation idle.

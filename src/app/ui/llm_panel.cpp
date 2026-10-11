@@ -9,6 +9,7 @@
 #include "app/shell_state.h"
 
 #include "app/ui/gl_texture.h"
+#include "app/ui/icons.h"
 #include "app/ui/prompt_input.h"
 #include "app/ui/script_editor_panel.h"
 
@@ -41,6 +42,11 @@ namespace {
 
 /// Oldest turns are dropped past this.
 constexpr int k_turn_cap = 30;
+
+/// How wide the gear is drawn inside its square button, in pixels. Smaller than
+/// the button frame so the icon does not touch the edges; the source is 32px,
+/// so this also halves it, which is what the 8 teeth need to stay separate.
+constexpr float k_gear_side = 20.0F;
 
 /// One exchange in the conversation: what was sent and what came back.
 struct llm_turn {
@@ -379,7 +385,40 @@ void start_turn(campcat::shell_state &_st, const campcat::app_config &_cfg,
     campcat::llm::tool_context ctx;
     ctx.adb = &adb;
     ctx.adb_busy = [] { return g_adb_busy.load(); };
-    ctx.require_approval = cfg_snapshot.require_tool_approval;
+    // Folded here, in one place: the master switch and the tool's own gate. The
+    // names are the ones the tools report in their approval requests, so a tool
+    // asks about itself and there is no second table to keep in step.
+    const bool master = cfg_snapshot.require_tool_approval;
+    const campcat::app_config::approval_gates gates = cfg_snapshot.gates;
+    ctx.needs_approval = [master, gates](std::string_view _tool) {
+      if (!master) {
+        return false;
+      }
+      if (_tool == "tap") {
+        return gates.tap;
+      }
+      if (_tool == "run_script") {
+        return gates.run_script;
+      }
+      if (_tool == "save_script") {
+        return gates.save_script;
+      }
+      if (_tool == "save_template") {
+        return gates.save_template;
+      }
+      if (_tool == "update_script") {
+        return gates.update_script;
+      }
+      if (_tool == "delete_script") {
+        return gates.delete_script;
+      }
+      if (_tool == "rename_script") {
+        return gates.rename_script;
+      }
+      // A gated tool this table has not heard of asks rather than skips: an
+      // unguarded surprise is the one failure worth avoiding here.
+      return true;
+    };
     ctx.cfg = &cfg_snapshot;
     ctx.script_dir = cfg_snapshot.config_home / "scripts/llm";
     ctx.start_emulator = [st](const std::function<bool()> &_should_stop) {
@@ -656,6 +695,75 @@ bool sync_approval_texture(const campcat::llm_approval &_a) {
   const cv::Mat bgr = cv::imdecode(buf, cv::IMREAD_COLOR);
   g_appr_tex = campcat::app::upload_bgr(bgr, &g_appr_w, &g_appr_h);
   return true;
+}
+
+/// The gear next to Send, and the approval gates behind it.
+GLuint g_gear_tex = 0;
+int g_gear_w = 0;
+int g_gear_h = 0;
+
+/// Uploaded once, on first draw: the icon never changes, and this is only
+/// reached while frames are being drawn, so the GL context is current.
+GLuint gear_icon() {
+  if (g_gear_tex != 0) {
+    return g_gear_tex;
+  }
+  const cv::Mat raw(1, static_cast<int>(campcat::app_icons::gear_png_size),
+                    CV_8UC1,
+                    const_cast<unsigned char *>(campcat::app_icons::gear_png));
+  const cv::Mat icon = cv::imdecode(raw, cv::IMREAD_UNCHANGED);
+  if (icon.empty()) {
+    campcat::automation_log::emit("[llm] gear icon did not decode");
+    return 0;
+  }
+  g_gear_tex = campcat::app::upload_bgra(icon, &g_gear_w, &g_gear_h);
+  return g_gear_tex;
+}
+
+/// Which tools ask the human before acting. The master switch keeps its old
+/// meaning -- off means nothing asks -- and the seven under it only matter
+/// while it is on, hence the greying rather than hiding them.
+void draw_approval_settings(campcat::app_config &_c) {
+  const float side = ImGui::GetFrameHeight();
+  if (ImGui::Button("##approval_settings", ImVec2(side, side))) {
+    ImGui::OpenPopup("llm_approval_settings");
+  }
+  if (ImGui::IsItemHovered()) {
+    ImGui::SetTooltip("Which tools ask before acting");
+  }
+  // Drawn after the button, into the same window list, so the icon lands on top
+  // of the frame. Tinted with the text colour so it follows the theme.
+  const GLuint tex = gear_icon();
+  if (tex != 0) {
+    const ImVec2 mn = ImGui::GetItemRectMin();
+    const float pad = (side - k_gear_side) * 0.5F;
+    ImGui::GetWindowDrawList()->AddImage(
+        static_cast<ImTextureID>(static_cast<uintptr_t>(tex)),
+        ImVec2(mn.x + pad, mn.y + pad),
+        ImVec2(mn.x + side - pad, mn.y + side - pad), ImVec2(0.0F, 0.0F),
+        ImVec2(1.0F, 1.0F), ImGui::GetColorU32(ImGuiCol_Text));
+  }
+
+  if (!ImGui::BeginPopup("llm_approval_settings")) {
+    return;
+  }
+  ImGui::Checkbox("Require approval", &_c.require_tool_approval);
+  ImGui::Separator();
+  const bool master_off = !_c.require_tool_approval;
+  if (master_off) {
+    ImGui::BeginDisabled();
+  }
+  ImGui::Checkbox("Device tap", &_c.gates.tap);
+  ImGui::Checkbox("Run script", &_c.gates.run_script);
+  ImGui::Checkbox("Save script", &_c.gates.save_script);
+  ImGui::Checkbox("Save template", &_c.gates.save_template);
+  ImGui::Checkbox("Update script", &_c.gates.update_script);
+  ImGui::Checkbox("Delete script", &_c.gates.delete_script);
+  ImGui::Checkbox("Rename script", &_c.gates.rename_script);
+  if (master_off) {
+    ImGui::EndDisabled();
+  }
+  ImGui::EndPopup();
 }
 
 /// The box-annotation window, opened by double-clicking the preview. The box is
@@ -1074,6 +1182,7 @@ void llm_panel_shutdown_gl() {
   }
 
   campcat::app::delete_tex(&g_appr_tex, &g_appr_w, &g_appr_h);
+  campcat::app::delete_tex(&g_gear_tex, &g_gear_w, &g_gear_h);
   g_appr_id = -1;
   drop_all_turns();
   g_thinking = false;
@@ -1148,11 +1257,15 @@ void llm_panel_draw_panel(campcat::shell_state &_st, campcat::app_config &_cfg,
     start_memorize(g_config_home);
   }
 
-  // The reservation has to track the widest label the button can carry: at
-  // 132px plus the 10px ItemSpacing it needs 142, so the old flat -116 pushed
-  // "Summarizing..." 26px past the content region.
+  // The reservation has to track the widest label the button can carry (at
+  // 132px "Summarizing..." is the widest) plus the gear next to it. Derived
+  // rather than hard-coded: the old flat -116 pushed "Summarizing..." 26px past
+  // the content region.
   const bool memorizing = g_memorizing.load();
-  ImGui::SetNextItemWidth(memorizing ? -144.0F : -116.0F);
+  const float send_w = memorizing ? 132.0F : 104.0F;
+  const float gap = ImGui::GetStyle().ItemSpacing.x;
+  const float gear_w = ImGui::GetFrameHeight() + gap;
+  ImGui::SetNextItemWidth(-(send_w + gear_w + gap * 2.0F + 2.0F));
   const bool submitted = prompt_input_text(
       "##llm_prompt",
       awaiting ? "Optional: tell it what to do instead"
@@ -1170,13 +1283,14 @@ void llm_panel_draw_panel(campcat::shell_state &_st, campcat::app_config &_cfg,
   ImGui::PushStyleColor(ImGuiCol_Button, k_primary);
   ImGui::PushStyleColor(ImGuiCol_ButtonHovered, k_primary_hi);
   ImGui::PushStyleColor(ImGuiCol_ButtonActive, k_primary_lo);
-  const bool clicked = ImGui::Button(
-      memorizing ? "Summarizing..." : "Send",
-      ImVec2(memorizing ? 132.0F : 104.0F, 0.0F));
+  const bool clicked = ImGui::Button(memorizing ? "Summarizing..." : "Send",
+                                     ImVec2(send_w, 0.0F));
   ImGui::PopStyleColor(3);
   if (!can_send) {
     ImGui::EndDisabled();
   }
+  ImGui::SameLine();
+  draw_approval_settings(_cfg);
 
   if ((clicked || submitted) && can_send) {
     if (awaiting) {

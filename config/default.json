@@ -12,6 +12,15 @@
   "mumu_device_index": 0,
   "mumutool_path": "/Applications/MuMuPlayer.app/Contents/MacOS/mumutool",
   "require_tool_approval": true,
+  "approval_gates": {
+    "tap": true,
+    "run_script": true,
+    "save_script": true,
+    "save_template": true,
+    "update_script": true,
+    "delete_script": true,
+    "rename_script": true
+  },
   "scheduler": {
     "enabled": true,
     "interval_seconds": 300,

@@ -76,10 +76,13 @@ struct tool_context {
   /// nobody to ask, and the tool then refuses: a gate that silently opens is
   /// worse than no gate.
   std::function<approval_decision(const approval_request &)> request_approval;
-  /// Mirrors app_config::require_tool_approval: whether the tools that change the
-  /// device or write files (`tap`, `run_script`, `save_script`, `save_template`)
-  /// ask the human before acting.
-  bool require_approval = false;
+  /// Mirrors app_config's approval settings, folded into one answer about the
+  /// tool asking: whether that tool shows the human what it is about to do and
+  /// waits for approval. The shell supplies it (`llm_panel`), so a tool reads
+  /// one answer about its own name instead of a flag plus a table of its own.
+  /// Empty means never: a context built without one gates nothing, which is
+  /// what the default means.
+  std::function<bool(std::string_view _tool)> needs_approval;
   /// Config the script tools hand to the interpreter (matcher thresholds, pacing).
   /// Null makes `run_script` refuse rather than run with defaults nobody chose.
   const app_config *cfg = nullptr;

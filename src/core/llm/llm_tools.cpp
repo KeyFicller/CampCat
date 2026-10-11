@@ -97,6 +97,12 @@ struct emulator_run_guard {
   ~emulator_run_guard() { g_emulator_running.store(false); }
 };
 
+/// Whether this tool asks the human first. The context decides; a context with
+/// no callback never asks.
+bool needs_approval(std::string_view _tool) {
+  return g_ctx.needs_approval && g_ctx.needs_approval(_tool);
+}
+
 /// Parses `_source` or turns the syntax error into the bind_error the model
 /// reads.
 std::unique_ptr<ccat_lang::Program> parse_or_throw(const std::string &_source) {
@@ -499,7 +505,7 @@ CPP_REFLECT_TOOL(mark)
   if (!box_on_screen(g_ctx.screen.w, g_ctx.screen.h, x, y, w, h, &error)) {
     throw js::bind_error(error);
   }
-  if (g_ctx.require_approval) {
+  if (needs_approval("tap")) {
     if (!g_ctx.request_approval) {
       throw js::bind_error("no human available to approve the tap");
     }
@@ -590,7 +596,7 @@ CPP_REFLECT_TOOL(start_emulator)
   // Parse first: a syntax error answers the model directly instead of asking a
   // human to read a script that cannot run.
   const std::unique_ptr<ccat_lang::Program> prog = parse_or_throw(source);
-  if (g_ctx.require_approval) {
+  if (needs_approval("run_script")) {
     if (!g_ctx.request_approval) {
       throw js::bind_error("no human available to approve running the script");
     }
@@ -647,7 +653,7 @@ CPP_REFLECT_TOOL(run_script)
         save_script(std::string name, std::string source) {
   const std::unique_ptr<ccat_lang::Program> prog =
       check_new_bundle(name, source);
-  if (g_ctx.require_approval) {
+  if (needs_approval("save_script")) {
     if (!g_ctx.request_approval) {
       throw js::bind_error("no human available to approve saving the script");
     }
@@ -717,7 +723,7 @@ CPP_REFLECT_TOOL(save_script)
   std::string frame_png;
   const cv::Mat img =
       check_template_target(bundle, name, box, shot, &file, &frame_png);
-  if (g_ctx.require_approval) {
+  if (needs_approval("save_template")) {
     if (!g_ctx.request_approval) {
       throw js::bind_error("no human available to approve saving the template");
     }
@@ -1000,7 +1006,7 @@ struct template_cut {
     }
   }
 
-  if (g_ctx.require_approval) {
+  if (needs_approval("update_script")) {
     if (!g_ctx.request_approval) {
       throw js::bind_error("no human available to approve updating the script");
     }
@@ -1104,7 +1110,7 @@ CPP_REFLECT_TOOL(update_script)
   if (checked != ccat_lang::delete_status::ok) {
     throw js::bind_error(err);
   }
-  if (g_ctx.require_approval) {
+  if (needs_approval("delete_script")) {
     if (!g_ctx.request_approval) {
       throw js::bind_error("no human available to approve deleting the script");
     }
@@ -1162,7 +1168,7 @@ CPP_REFLECT_TOOL(delete_script)
                                         &err) != ccat_lang::rename_status::ok) {
     throw js::bind_error(err);
   }
-  if (g_ctx.require_approval) {
+  if (needs_approval("rename_script")) {
     if (!g_ctx.request_approval) {
       throw js::bind_error("no human available to approve renaming the script");
     }
