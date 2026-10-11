@@ -1,5 +1,7 @@
 #pragma once
 
+#include "app/ui/activity_status.h"
+
 struct ImFont; // only ever held as a pointer here, so imgui.h stays out
 
 namespace campcat {
@@ -44,6 +46,14 @@ void llm_panel_shutdown_finish();
  */
 void llm_panel_draw_panel(campcat::shell_state &_st, campcat::app_config &_cfg,
                           bool _adb_busy);
+
+/**
+ * @brief What the LLM page is doing, for the shell's status chip.
+ *
+ * UI thread only: it reads the same flags the page's own draw reads, and `main`
+ * asks before this page has drawn for the frame.
+ */
+campcat::activity_status llm_panel_activity();
 
 /**
  * @brief Draw the box-annotation window for a pending approval, if one is open.

@@ -31,9 +31,12 @@ public:
 
   /**
    * @brief List devices/emulators parsed from `adb devices`.
+   * @param[in] _timeout_ms Budget for the subprocess. The device poll shortens
+   * it: this call sits on a 2s timer, and an `adb` that hangs must not make the
+   * poll -- or the join on it at exit -- wait four intervals.
    * @return Serialized device descriptors (similar to adb output tokens).
    */
-  std::vector<std::string> list_devices();
+  std::vector<std::string> list_devices(int _timeout_ms = 8000);
 
   /**
    * @brief Emulator/device serial (if any).
@@ -122,5 +125,13 @@ private:
   std::string m_adb_path;
   std::string m_serial;
 };
+
+/// True when `adb devices` output lists `_serial`, or lists anything at all
+/// when `_serial` is empty -- which is how a client with no `-s` picks its one
+/// device. This is what the shell's device chip reports as connected. Offline
+/// and unauthorized devices never reach `devices`: `list_devices` keeps only
+/// the ones in state `device`.
+bool device_online(const std::vector<std::string> &_devices,
+                   const std::string &_serial);
 
 } // namespace campcat

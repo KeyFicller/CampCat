@@ -44,6 +44,17 @@ inline void release_cycle(std::atomic<bool> &_cycle_running) {
   _cycle_running.store(false);
 }
 
+/// How often the device poll asks adb. Short enough that an emulator coming up
+/// shows on the chip while the user is still watching, long enough that an
+/// `adb devices` per tick is not noise. The wait is sliced, so a stop never has
+/// to wait out a whole interval.
+constexpr int k_poll_interval_ms = 2000;
+constexpr int k_poll_slice_ms = 100;
+/// Shorter than the interval: a poll that runs long is stale anyway, and at exit
+/// `stop_workers` joins this thread before the window goes down, so a hung `adb`
+/// would otherwise freeze the quit for its full 8s default.
+constexpr int k_poll_adb_timeout_ms = 1500;
+
 bool persist_bundle_to_disk(
     const campcat::app_config &_shell_written,
     const campcat::ccat_script_profile &_ccat_snap,
@@ -445,9 +456,45 @@ void shell_state::stop_workers() {
   stop_requested.store(true);
   sched.stop();
 
+  device_poll_stop.store(true);
+  if (device_poll_thread.joinable()) {
+    device_poll_thread.join();
+  }
+
   if (worker_thread.joinable()) {
     worker_thread.join();
   }
+}
+
+void shell_state::start_device_poll() {
+  device_poll_stop.store(false);
+  device_poll_thread = std::thread([this]() {
+    while (!device_poll_stop.load()) {
+      std::string adb_path;
+      std::string serial;
+      {
+        // The UI pushes this snapshot every frame, so it already carries what
+        // the Settings fields say.
+        std::lock_guard<std::mutex> lk(m_cfg_mu);
+        adb_path = m_cfg.adb_path;
+        serial = m_cfg.adb_serial;
+      }
+      bool online = false;
+      if (!adb_path.empty()) {
+        online = campcat::device_online(
+            campcat::adb_client(adb_path, serial).list_devices(
+                k_poll_adb_timeout_ms),
+            serial);
+      }
+      device_online.store(online);
+      for (int waited = 0;
+           waited < k_poll_interval_ms && !device_poll_stop.load();
+           waited += k_poll_slice_ms) {
+        std::this_thread::sleep_for(
+            std::chrono::milliseconds(k_poll_slice_ms));
+      }
+    }
+  });
 }
 
 void shell_state::close_launched_mumu() {

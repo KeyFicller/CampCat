@@ -3,6 +3,7 @@
 
 #include <opencv2/imgcodecs.hpp>
 
+#include <algorithm>
 #include <cctype>
 #include <chrono>
 #include <sstream>
@@ -60,13 +61,14 @@ bool adb_client::connect_remote(std::string_view _address, int _timeout_ms,
              _timeout_ms);
 }
 
-std::vector<std::string> adb_client::list_devices() {
+std::vector<std::string> adb_client::list_devices(int _timeout_ms) {
   std::vector<std::string> devices;
   std::string out;
 #ifndef _WIN32
   std::vector<std::string> argv = {m_adb_path, "devices"};
   int code = 0;
-  if (!process::run_process_posix(m_adb_path, argv, &out, nullptr, 8000, &code) ||
+  if (!process::run_process_posix(m_adb_path, argv, &out, nullptr, _timeout_ms,
+                                  &code) ||
       code != 0) {
     return devices;
   }
@@ -258,6 +260,14 @@ bool adb_client::home_and_kill_all(int _gap_ms) {
 bool adb_client::delay_after_action(std::chrono::milliseconds _tap_delay) const {
   std::this_thread::sleep_for(_tap_delay);
   return true;
+}
+
+bool device_online(const std::vector<std::string> &_devices,
+                   const std::string &_serial) {
+  if (_serial.empty()) {
+    return !_devices.empty();
+  }
+  return std::find(_devices.begin(), _devices.end(), _serial) != _devices.end();
 }
 
 } // namespace campcat

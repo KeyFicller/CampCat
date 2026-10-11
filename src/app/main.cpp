@@ -18,7 +18,9 @@
 
 #include "core/app_config.h"
 #include "core/automation_log.h"
+#include "core/llm/llm_tools.h"
 #include "app/shell_state.h"
+#include "app/ui/activity_status.h"
 #include "app/ui/template_capture_panel.h"
 #include "app/ui/console_panel.h"
 #include "app/ui/llm_panel.h"
@@ -31,6 +33,55 @@
 namespace {
 
 constexpr char k_default_config_relative[] = "config/default.json";
+
+/// The dot diameter and the gap after it, in ems of the current font. The dot
+/// sits on the text's midline, so it reads as a bullet rather than a stray dot.
+constexpr float k_chip_dot_ems = 0.5F;
+constexpr float k_chip_dot_gap = 6.0F;
+/// Between the page chip and the device chip, wide enough that they read as two
+/// answers instead of one long one.
+constexpr float k_chip_gap = 16.0F;
+
+/// The two colours the chrome did not have: amber (waiting on something) and
+/// red (failed). The rest are the style's own values -- ink_dim, accent_hi, and
+/// the green the idle label used to show for a busy shell -- written out here
+/// as literals, because the palette lives inside the style function.
+ImVec4 activity_color(campcat::activity_level _level) {
+  switch (_level) {
+  case campcat::activity_level::ok:
+    return ImVec4(0.450F, 0.850F, 0.550F, 1.0F);
+  case campcat::activity_level::busy:
+    return ImVec4(0.302F, 0.478F, 0.616F, 1.0F);
+  case campcat::activity_level::waiting:
+    return ImVec4(0.850F, 0.680F, 0.300F, 1.0F);
+  case campcat::activity_level::failed:
+    return ImVec4(0.850F, 0.420F, 0.420F, 1.0F);
+  case campcat::activity_level::idle:
+    break;
+  }
+  return ImVec4(0.478F, 0.510F, 0.549F, 1.0F);
+}
+
+/// One chip's width: the dot, its gap, then the word.
+float chip_width(const campcat::activity_status &_status) {
+  return ImGui::GetTextLineHeight() * k_chip_dot_ems + k_chip_dot_gap +
+         ImGui::CalcTextSize(_status.label).x;
+}
+
+/// Draw one dot-and-word chip at the cursor. The dot goes on the window's draw
+/// list because ImGui has no bullet widget; the dummy reserves its box so the
+/// word starts where the next chip's measurement expects it to.
+void draw_chip(const campcat::activity_status &_status) {
+  const float dot = ImGui::GetTextLineHeight() * k_chip_dot_ems;
+  const ImVec2 at = ImGui::GetCursorScreenPos();
+  const ImVec4 col = activity_color(_status.level);
+  ImGui::GetWindowDrawList()->AddCircleFilled(
+      ImVec2(at.x + dot * 0.5F, at.y + ImGui::GetTextLineHeight() * 0.5F),
+      dot * 0.5F, ImGui::GetColorU32(col));
+  ImGui::Dummy(ImVec2(dot + k_chip_dot_gap, ImGui::GetTextLineHeight()));
+  ImGui::SameLine(0.0F, 0.0F);
+  ImGui::TextColored(col, "%s", _status.label);
+}
 
 } // namespace
 
@@ -49,6 +100,8 @@ int main(int argc, char **argv) {
   // The shell's state and its jobs: what used to be this function's locals and
   // capturing lambdas, now shared with the pages.
   campcat::shell_state st(cfg_path);
+  // Off the UI thread, so the first bad `adb` path cannot freeze the window.
+  st.start_device_poll();
 
   glfwSetErrorCallback([](int code, const char *desc) {
     std::fprintf(stderr, "GLFW error %d: %s\n", code, desc ? desc : "(null)");
@@ -357,10 +410,49 @@ int main(int argc, char **argv) {
 
     const bool busy_now = st.cycle_running.load();
     const bool lock_manual_single = busy_now || st.sched.running();
-    const char *status_label = busy_now ? "Running" : "Idle";
 
     enum class shell_page : int { Script = 0, Llm, Console, Settings };
     static shell_page page = shell_page::Script;
+
+    // What the title row reports. Per page, because the badge sits next to the
+    // page's own title: one global flag there either claimed the LLM was idle
+    // while it thought, or said "Running" on the LLM page because an automation
+    // cycle happened to be running. The device chip is the opposite -- an app
+    // level fact, so every page shows it.
+    campcat::activity_status page_status{};
+    switch (page) {
+    case shell_page::Llm:
+      page_status = llm_panel_activity();
+      break;
+    case shell_page::Script:
+      if (st.mumu_launching.load()) {
+        page_status = {campcat::activity_level::waiting, "Booting"};
+      } else if (busy_now) {
+        page_status = {campcat::activity_level::busy, "Running"};
+      } else if (st.sched.running()) {
+        page_status = {campcat::activity_level::waiting, "Scheduled"};
+      }
+      break;
+    case shell_page::Console:
+      if (busy_now) {
+        page_status = {campcat::activity_level::busy, "Running"};
+      }
+      break;
+    case shell_page::Settings:
+      break; // no activity of its own; the device chip below still shows
+    }
+    const bool show_page_chip = page != shell_page::Settings;
+
+    campcat::activity_status device_status{};
+    if (st.mumu_launching.load() || campcat::llm::emulator_starting()) {
+      // Outranks the poll: while the instance comes up the poll can only report
+      // "not there yet", which would read as a failure for minutes on end.
+      device_status = {campcat::activity_level::waiting, "Booting"};
+    } else if (st.device_online.load()) {
+      device_status = {campcat::activity_level::ok, "Connected"};
+    } else {
+      device_status = {campcat::activity_level::idle, "No device"};
+    }
 
     auto nav_item = [&](const char *label, shell_page target) {
       const bool selected = (page == target);
@@ -482,15 +574,16 @@ int main(int argc, char **argv) {
         ImGui::PopFont();
         ImGui::PushFont(font_bold);
         {
-          const float status_w = ImGui::CalcTextSize(status_label).x;
-          ImGui::SameLine(ImGui::GetWindowContentRegionMax().x - status_w);
+          const float chips_w =
+              (show_page_chip ? chip_width(page_status) + k_chip_gap : 0.0F) +
+              chip_width(device_status);
+          ImGui::SameLine(ImGui::GetWindowContentRegionMax().x - chips_w);
         }
-        if (busy_now) {
-          ImGui::TextColored(ImVec4(0.45F, 0.85F, 0.55F, 1.0F), "%s",
-                             status_label);
-        } else {
-          ImGui::TextDisabled("%s", status_label);
+        if (show_page_chip) {
+          draw_chip(page_status);
+          ImGui::SameLine(0.0F, k_chip_gap);
         }
+        draw_chip(device_status);
         ImGui::PopFont();
         ImGui::Separator();
         ImGui::Spacing();

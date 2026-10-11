@@ -83,6 +83,16 @@ public:
 
   /** @brief Exit path: request stop, stop the scheduler, join the worker. */
   void stop_workers();
+
+  /**
+   * @brief Start the device poll. Call once, after construction, on the UI
+   * thread; `stop_workers` joins it.
+   *
+   * Every `k_poll_interval_ms` it asks adb whether the configured serial is
+   * there, on its own thread: `adb devices` may take seconds to answer, and a
+   * frame must never wait on it.
+   */
+  void start_device_poll();
   /** @brief Quit the instance and app this run started, then drop the watchdog. */
   void close_launched_mumu();
 
@@ -95,6 +105,10 @@ public:
   /// Named `sched`, not `scheduler`: the member would shadow the type.
   campcat::scheduler sched;
   std::thread worker_thread;
+
+  /// True while `adb devices` lists the configured device. Written by the poll
+  /// `start_device_poll` runs, read by the shell's status chip.
+  std::atomic<bool> device_online{false};
 
   std::atomic<bool> mumu_launching{false};
   std::mutex mumu_mu;
@@ -131,6 +145,9 @@ private:
   std::mutex m_cfg_mu;
   app_config m_cfg;
   ccat_script_profile m_ccat_live;
+
+  std::atomic<bool> device_poll_stop{false};
+  std::thread device_poll_thread;
 };
 
 } // namespace campcat

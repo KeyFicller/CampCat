@@ -8,6 +8,7 @@
 
 #include "app/shell_state.h"
 
+#include "app/ui/activity_status.h"
 #include "app/ui/gl_texture.h"
 #include "app/ui/icons.h"
 #include "app/ui/prompt_input.h"
@@ -1195,6 +1196,34 @@ void llm_panel_shutdown_finish() {
     g_shutdown_thread.join();
   }
   g_host.stop();
+}
+
+campcat::activity_status llm_panel_activity() {
+  // Most specific first: a boot and a script both run inside a turn, so reading
+  // `g_running` first would report "Thinking" through all of them. The memory
+  // pass sets `g_running` too, so it has to be read before it.
+  if (g_host.pending_approval().pending) {
+    return {campcat::activity_level::waiting, "Awaiting"};
+  }
+  if (campcat::llm::emulator_starting()) {
+    return {campcat::activity_level::waiting, "Booting"};
+  }
+  if (campcat::llm::script_running()) {
+    return {campcat::activity_level::busy, "Script"};
+  }
+  if (g_memorizing.load()) {
+    return {campcat::activity_level::busy, "Memory"};
+  }
+  if (g_running.load()) {
+    return {campcat::activity_level::busy, "Thinking"};
+  }
+  // The newest turn is "pending" from the moment the prompt is sent, so a new
+  // turn clears this by itself; an empty conversation has nothing to report.
+  const llm_turn *last = g_turns.empty() ? nullptr : &g_turns.back();
+  if (last != nullptr && !last->pending && !last->ok) {
+    return {campcat::activity_level::failed, "Failed"};
+  }
+  return {campcat::activity_level::idle, "Idle"};
 }
 
 void llm_panel_draw_panel(campcat::shell_state &_st, campcat::app_config &_cfg,
