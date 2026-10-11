@@ -231,6 +231,7 @@ add_executable(campcat
   src/app/main.cpp
   src/app/template_capture_ui.cpp
   src/app/llm_ui.cpp
+  src/app/prompt_input.cpp
   src/app/script_editor_ui.cpp
   src/app/gl_texture.cpp
   src/app/native_file_dialog.cpp

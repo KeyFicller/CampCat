@@ -7,14 +7,10 @@
 #include "core/llm/llm_memory.h"
 
 #include "app/gl_texture.h"
+#include "app/prompt_input.h"
 #include "app/script_editor_ui.h"
 
-#if defined(__APPLE__)
-#include "app/macos_ime.h"
-#endif
-
 #include <imgui.h>
-#include <imgui_internal.h> // GetInputTextState: the IME pre-edit hangs off the caret
 #include <imgui_markdown.h>
 
 #include <opencv2/core.hpp>
@@ -31,7 +27,6 @@
 #include <algorithm>
 #include <atomic>
 #include <cctype>
-#include <cstring>
 #include <filesystem>
 #include <mutex>
 #include <optional>
@@ -111,51 +106,6 @@ ImGui::MarkdownConfig &md_config() {
     return c;
   }();
   return cfg;
-}
-
-/// IME helper. Off Apple it is constant, so the input path needs no guard.
-std::string ime_preedit() {
-#if defined(__APPLE__)
-  return macos_ime_preedit();
-#else
-  return {};
-#endif
-}
-
-/// Paints the IME composition over the prompt box. While composing, ImGui's own
-/// buffer is still empty, so nothing else in the box shows what is being typed.
-///
-/// Call it right after the prompt's InputText, before SameLine/Button: the caret
-/// comes from the last item and the origin from its rect.
-///
-/// ponytail: no selection highlight, and the pre-edit is clipped to the box
-/// instead of pushing the text after the caret along; upgrade if a mid-text
-/// composition ever needs either.
-void draw_ime_preedit(const ImVec2 &_box_min, const ImVec2 &_box_max,
-                      const char *_buf, const std::string &_preedit) {
-  ImGuiInputTextState *state = ImGui::GetInputTextState(ImGui::GetItemID());
-  if (state == nullptr) {
-    return; // not the live input right now
-  }
-  const int len = static_cast<int>(std::strlen(_buf));
-  // Stb is only forward-declared outside imgui_widgets.cpp, so read the caret
-  // through the accessor ImGui itself exposes.
-  const int cursor = ImClamp(state->GetCursorPos(), 0, len); // byte index
-  const ImGuiStyle &style = ImGui::GetStyle();
-  const float prefix = ImGui::CalcTextSize(_buf, _buf + cursor).x;
-  const ImVec2 pos(_box_min.x + style.FramePadding.x + prefix - state->Scroll.x,
-                   _box_min.y + style.FramePadding.y);
-  const ImVec2 size = ImGui::CalcTextSize(_preedit.c_str());
-  ImDrawList *dl = ImGui::GetWindowDrawList();
-  dl->PushClipRect(_box_min, _box_max, true);
-  dl->AddRectFilled(ImVec2(pos.x, _box_min.y + 3.0F),
-                    ImVec2(pos.x + size.x + 2.0F, _box_min.y + size.y + 3.0F),
-                    IM_COL32(70, 70, 85, 255), 3.0F);
-  dl->AddText(pos, ImGui::GetColorU32(ImGuiCol_Text), _preedit.c_str());
-  dl->AddLine(ImVec2(pos.x, pos.y + size.y),
-              ImVec2(pos.x + size.x, pos.y + size.y),
-              ImGui::GetColorU32(ImGuiCol_Text), 1.0F);
-  dl->PopClipRect();
 }
 
 // Worker state.
@@ -1149,29 +1099,16 @@ void llm_ui_draw_panel(campcat::app_config &_cfg, bool _adb_busy) {
     start_memorize(g_config_home);
   }
 
-  // ImGui is kept out of the keys while a composition is live (see
-  // macos_ime.mm), so an Enter here is a real Enter.
-  const std::string preedit = ime_preedit();
-
   // The reservation has to track the widest label the button can carry: at
   // 132px plus the 10px ItemSpacing it needs 142, so the old flat -116 pushed
   // "Summarizing..." 26px past the content region.
   const bool memorizing = g_memorizing.load();
   ImGui::SetNextItemWidth(memorizing ? -144.0F : -116.0F);
-  const bool submitted = ImGui::InputTextWithHint(
+  const bool submitted = prompt_input_text(
       "##llm_prompt",
-      // While composing the hint is blanked: the composition is painted over the
-      // box and the two would collide on the same line.
-      preedit.empty() ? (awaiting ? "Optional: tell it what to do instead"
-                                  : "Tell CampCat what to do...")
-                      : "",
-      g_input, sizeof(g_input), ImGuiInputTextFlags_EnterReturnsTrue);
-  // Both need the prompt to still be the last item.
-  const ImVec2 prompt_min = ImGui::GetItemRectMin();
-  const ImVec2 prompt_max = ImGui::GetItemRectMax();
-  if (!preedit.empty()) {
-    draw_ime_preedit(prompt_min, prompt_max, g_input, preedit);
-  }
+      awaiting ? "Optional: tell it what to do instead"
+               : "Tell CampCat what to do...",
+      g_input, sizeof(g_input));
 
   ImGui::SameLine();
   const bool can_send = awaiting || (!busy && !is_blank(g_input));

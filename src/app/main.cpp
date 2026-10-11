@@ -46,6 +46,7 @@
 #include "app/script_editor_ui.h"
 #include "app/macos_ime.h"
 #include "app/native_file_dialog.h"
+#include "app/prompt_input.h"
 #include "ccat_script/ccat_script_profile.h"
 #include "ccat_script/ccat_program_runner.h"
 #include "core/script/ccat_parser.h"
@@ -1229,9 +1230,23 @@ int main(int argc, char **argv) {
             ImVec2(0.0F, -ImGui::GetFrameHeightWithSpacing() * 2.5F),
             ImGuiChildFlags_Borders);
         // An empty bordered box reads as a drawing glitch rather than as "no
-        // output yet".
+        // output yet". Offset and centred the way the LLM log places its own
+        // empty state, so the two panes read the same at rest.
         if (console_repl.history.empty()) {
-          ImGui::TextDisabled("No output yet.");
+          const char *title = "No output yet";
+          const char *hint = "Send some ccat script code for execution.";
+          const ImVec2 avail = ImGui::GetContentRegionAvail();
+          ImGui::SetCursorPosY(ImGui::GetCursorPosY() + avail.y * 0.4F);
+          ImGui::PushFont(font_bold);
+          ImGui::SetCursorPosX(
+              ImGui::GetCursorPosX() +
+              std::max(0.0F, (avail.x - ImGui::CalcTextSize(title).x) * 0.5F));
+          ImGui::TextUnformatted(title);
+          ImGui::PopFont();
+          ImGui::SetCursorPosX(
+              ImGui::GetCursorPosX() +
+              std::max(0.0F, (avail.x - ImGui::CalcTextSize(hint).x) * 0.5F));
+          ImGui::TextDisabled("%s", hint);
         }
         for (const auto &line : console_repl.history) {
           ImGui::TextUnformatted(line.c_str());
@@ -1250,9 +1265,8 @@ int main(int argc, char **argv) {
         ImGui::TextUnformatted(console_repl.prompt());
         ImGui::SameLine();
         ImGui::SetNextItemWidth(-80.0F);
-        const bool submit = ImGui::InputText(
-            "##console_in", console_input, sizeof(console_input),
-            ImGuiInputTextFlags_EnterReturnsTrue);
+        const bool submit = prompt_input_text(
+            "##console_in", nullptr, console_input, sizeof(console_input));
         // Must run immediately after InputText; later widgets would steal -1.
         if (submit && !busy_now) {
           ImGui::SetKeyboardFocusHere(-1);
