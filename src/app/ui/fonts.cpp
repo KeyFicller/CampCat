@@ -122,7 +122,7 @@ void fonts_init() {
     // OFL, unlike Arial itself. San Francisco would be unusable anyway: it is a
     // variable font and ImGui's rasterizer ignores variation axes, so every
     // weight -- titles included -- would draw Regular. That is also why the
-    // bundled faces are pre-instanced; see `tools/fetch_fonts.py`.
+    // bundled faces are pre-instanced; see `assets/fonts/README.md`.
     ImFont *font_body = load_font(k_latin_regular, 16.0F, true, 0);
     if (font_body == nullptr) {
         font_body = io.Fonts->AddFontDefault();
