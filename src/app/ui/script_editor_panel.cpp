@@ -1,7 +1,7 @@
-#include "app/script_editor_ui.h"
+#include "app/ui/script_editor_panel.h"
 
-#include "app/ccat_highlight.h"
-#include "app/gl_texture.h"
+#include "app/ui/ccat_highlight.h"
+#include "app/ui/gl_texture.h"
 #include "core/script/ccat_bundle.h"
 
 #include <imgui.h>
@@ -483,9 +483,9 @@ void draw_editor(const std::filesystem::path &_dir, script_editor &_e) {
 
 } // namespace
 
-void script_ui_set_mono_font(ImFont *_font) { g_mono = _font; }
+void script_editor_panel_set_mono_font(ImFont *_font) { g_mono = _font; }
 
-void script_ui_draw(const std::filesystem::path &_script_dir, float _list_w,
+void script_editor_panel_draw(const std::filesystem::path &_script_dir, float _list_w,
                     float _list_h) {
   scan_scripts(_script_dir);
   std::string rename_clicked;
@@ -526,7 +526,7 @@ void script_ui_draw(const std::filesystem::path &_script_dir, float _list_w,
                   g_editors.end());
 }
 
-void script_ui_shutdown_gl() {
+void script_editor_panel_shutdown_gl() {
   for (auto &pair : g_previews) {
     campcat::app::delete_tex(&pair.second.tex, &pair.second.w, &pair.second.h);
   }

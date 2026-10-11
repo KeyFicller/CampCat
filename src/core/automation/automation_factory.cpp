@@ -8,8 +8,8 @@
 
 #include "core/adb_client.h"
 #include "core/app_config.h"
-#include "ccat_script/ccat_script_automation.h"
-#include "ccat_script/ccat_script_profile.h"
+#include "ccat_driver/ccat_script_automation.h"
+#include "ccat_driver/ccat_script_profile.h"
 
 namespace campcat {
 

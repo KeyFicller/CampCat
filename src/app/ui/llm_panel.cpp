@@ -1,4 +1,4 @@
-#include "app/llm_ui.h"
+#include "app/ui/llm_panel.h"
 
 #include "core/adb_client.h"
 #include "core/app_config.h"
@@ -6,9 +6,9 @@
 #include "core/llm/llm_host.h"
 #include "core/llm/llm_memory.h"
 
-#include "app/gl_texture.h"
-#include "app/prompt_input.h"
-#include "app/script_editor_ui.h"
+#include "app/ui/gl_texture.h"
+#include "app/ui/prompt_input.h"
+#include "app/ui/script_editor_panel.h"
 
 #include <imgui.h>
 #include <imgui_markdown.h>
@@ -71,7 +71,7 @@ std::vector<llm_turn> g_turns;
 char g_input[1024] = {};
 bool g_pin_bottom = true;
 bool g_thinking = false; ///< sidecar reports the model is reasoning
-ImFont *g_bold = nullptr; ///< set by llm_ui_set_bold_font
+ImFont *g_bold = nullptr; ///< set by llm_panel_set_bold_font
 
 /// True while an automation cycle or the scheduler owns adb. Tools must refuse
 /// then rather than contend for the device.
@@ -96,7 +96,7 @@ void md_format(const ImGui::MarkdownFormatInfo &_info, bool _start) {
   ImGui::defaultMarkdownFormatCallback(_info, _start);
 }
 
-/// Built once; the fonts are filled in by llm_ui_set_bold_font.
+/// Built once; the fonts are filled in by llm_panel_set_bold_font.
 ImGui::MarkdownConfig &md_config() {
   static ImGui::MarkdownConfig cfg = [] {
     ImGui::MarkdownConfig c;
@@ -129,7 +129,7 @@ double g_last_llm = 0.0;
 /// How long the conversation must have been quiet before consolidating.
 constexpr double k_idle_seconds = 600.0; // 10 minutes
 /// Remembered every frame so the shutdown pass knows where the memory file is,
-/// since `llm_ui_shutdown_gl` has no config of its own.
+/// since `llm_panel_shutdown_gl` has no config of its own.
 std::filesystem::path g_config_home;
 
 /// The Long-term memory window, and the copy it displays.
@@ -992,7 +992,7 @@ bool draw_log(const ImVec2 &_size) {
 
 } // namespace
 
-void llm_ui_set_bold_font(ImFont *_font) {
+void llm_panel_set_bold_font(ImFont *_font) {
   g_bold = _font;
   // `**strong**` is drawn with the last heading slot rather than with a bold
   // font of its own, so that slot is what has to hold the bold face.
@@ -1001,7 +1001,7 @@ void llm_ui_set_bold_font(ImFont *_font) {
   }
 }
 
-void llm_ui_shutdown_gl() {
+void llm_panel_shutdown_gl() {
   // Unblock a question nobody can answer any more: without this the worker stays
   // inside service_approval and the join below never returns.
   g_host.cancel_approval();
@@ -1014,7 +1014,7 @@ void llm_ui_shutdown_gl() {
 
   // The last consolidation is started, not awaited: this runs with the window
   // still on screen, so blocking here would look like a freeze. It finishes in
-  // `llm_ui_shutdown_finish`, once there is nothing left to freeze.
+  // `llm_panel_shutdown_finish`, once there is nothing left to freeze.
   if (!g_config_home.empty()) {
     g_shutdown_thread = std::thread([]() {
       const campcat::llm_result res =
@@ -1031,7 +1031,7 @@ void llm_ui_shutdown_gl() {
   g_thinking = false;
 }
 
-void llm_ui_shutdown_finish() {
+void llm_panel_shutdown_finish() {
   // Nothing visible is left to stall: the window is gone, so this wait is only
   // the process outliving it. Bounded by the timeout handed to `memorize`.
   if (g_shutdown_thread.joinable()) {
@@ -1040,7 +1040,7 @@ void llm_ui_shutdown_finish() {
   g_host.stop();
 }
 
-void llm_ui_draw_panel(campcat::app_config &_cfg, bool _adb_busy) {
+void llm_panel_draw_panel(campcat::app_config &_cfg, bool _adb_busy) {
   // Finished work is folded in on the UI thread, which owns g_turns.
   consume_handoff();
 
@@ -1058,7 +1058,7 @@ void llm_ui_draw_panel(campcat::app_config &_cfg, bool _adb_busy) {
   // Saved skills in a fixed column on the left, conversation on the right, the
   // prompt box below both. Side by side because the list is an index, not a
   // second conversation: stacked, it took height off every reply.
-  script_ui_draw(_cfg.config_home / "scripts/llm", k_script_list_w, -g_footer_h);
+  script_editor_panel_draw(_cfg.config_home / "scripts/llm", k_script_list_w, -g_footer_h);
   ImGui::SameLine();
   // Measured, not another negative width: a negative size is resolved against
   // the window's content region, not against what is left past the cursor, so
@@ -1147,4 +1147,4 @@ void llm_ui_draw_panel(campcat::app_config &_cfg, bool _adb_busy) {
                ImGui::GetStyle().ItemSpacing.y;
 }
 
-void llm_ui_draw_overlay() { draw_annotation_window(); }
+void llm_panel_draw_overlay() { draw_annotation_window(); }

@@ -10,7 +10,7 @@ struct ccat_script_profile;
 /**
  * @brief Release GL texture used by the template capture panel (call before GL context teardown).
  */
-void template_capture_shutdown_gl();
+void template_capture_panel_shutdown_gl();
 
 /**
  * @brief CampCat-only: ADB screenshot + drag ROI → save PNG beside the `.ccat`.
@@ -21,6 +21,6 @@ void template_capture_shutdown_gl();
  *
  * Log lines use campcat::automation_log::emit (shell sets sink in main).
  */
-void template_capture_draw_panel(campcat::app_config &cfg,
+void template_capture_panel_draw(campcat::app_config &cfg,
                                  campcat::ccat_script_profile *ccat_ui,
                                  bool disable_capture);

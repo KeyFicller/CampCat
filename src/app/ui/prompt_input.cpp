@@ -1,7 +1,7 @@
-#include "app/prompt_input.h"
+#include "app/ui/prompt_input.h"
 
 #if defined(__APPLE__)
-#include "app/macos_ime.h"
+#include "app/ui/macos_ime.h"
 #endif
 
 #include <imgui.h>

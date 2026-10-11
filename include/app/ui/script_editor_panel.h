@@ -15,7 +15,7 @@ inline constexpr float k_script_list_w = 180.0F;
  * current, which a fixed-width text grid does not really support (the caret and
  * the selection drift off the glyphs).
  */
-void script_ui_set_mono_font(ImFont *_font);
+void script_editor_panel_set_mono_font(ImFont *_font);
 
 /**
  * @brief Draw the script list column, and every script window that is open.
@@ -31,9 +31,9 @@ void script_ui_set_mono_font(ImFont *_font);
  * @param[in] _list_h     Column height, negative meaning "the parent's height
  * minus this" the way ImGui reads a size.
  */
-void script_ui_draw(const std::filesystem::path &_script_dir, float _list_w,
+void script_editor_panel_draw(const std::filesystem::path &_script_dir, float _list_w,
                     float _list_h);
 
 /// @brief Release the preview textures and close the editors. Must run before
 /// the GL context goes away.
-void script_ui_shutdown_gl();
+void script_editor_panel_shutdown_gl();

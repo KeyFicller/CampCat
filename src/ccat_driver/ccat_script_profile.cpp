@@ -1,4 +1,4 @@
-#include "ccat_script/ccat_script_profile.h"
+#include "ccat_driver/ccat_script_profile.h"
 
 #include <cctype>
 #include <fstream>

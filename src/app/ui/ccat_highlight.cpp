@@ -1,4 +1,4 @@
-#include "app/ccat_highlight.h"
+#include "app/ui/ccat_highlight.h"
 
 #include <cctype>
 #include <string>

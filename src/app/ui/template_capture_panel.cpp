@@ -1,9 +1,9 @@
-#include "app/template_capture_ui.h"
+#include "app/ui/template_capture_panel.h"
 
 #include "core/adb_client.h"
 #include "core/app_config.h"
 #include "core/automation_log.h"
-#include "ccat_script/ccat_script_profile.h"
+#include "ccat_driver/ccat_script_profile.h"
 
 #include <imgui.h>
 
@@ -160,11 +160,11 @@ void clear_capture() {
 
 } // namespace
 
-void template_capture_shutdown_gl() {
+void template_capture_panel_shutdown_gl() {
   clear_capture();
 }
 
-void template_capture_draw_panel(campcat::app_config &_cfg,
+void template_capture_panel_draw(campcat::app_config &_cfg,
                                  campcat::ccat_script_profile *_ccat_ui,
                                  bool _disable_capture) {
   if (!_ccat_ui) {

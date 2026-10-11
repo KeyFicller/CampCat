@@ -1,4 +1,4 @@
-#include "app/macos_ime.h"
+#include "app/ui/macos_ime.h"
 
 #import <Cocoa/Cocoa.h>
 #import <objc/runtime.h>

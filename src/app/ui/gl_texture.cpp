@@ -1,4 +1,4 @@
-#include "app/gl_texture.h"
+#include "app/ui/gl_texture.h"
 
 #include <opencv2/imgproc.hpp>
 

@@ -176,7 +176,7 @@ target_link_libraries(imgui_lib PUBLIC glfw OpenGL::GL)
 
 add_library(imgui_colortextedit_lib STATIC
   ${imgui_colortextedit_SOURCE_DIR}/TextEditor.cpp
-  src/app/ccat_highlight.cpp
+  src/app/ui/ccat_highlight.cpp
 )
 target_include_directories(imgui_colortextedit_lib PUBLIC
   ${imgui_colortextedit_SOURCE_DIR}
@@ -186,7 +186,7 @@ target_include_directories(imgui_colortextedit_lib PRIVATE
 )
 target_link_libraries(imgui_colortextedit_lib PUBLIC imgui_lib)
 
-# Core framework + Dear ImGui shell + ccat_script driver
+# Core framework + Dear ImGui shell + the ccat driver
 add_library(campcat_core STATIC
   src/core/adb/adb_client.cpp
   src/core/mumu/mumu_launcher.cpp
@@ -207,9 +207,9 @@ add_library(campcat_core STATIC
   src/core/llm/llm_memory.cpp
   src/core/llm/llm_tools.cpp
   src/core/llm/llm_host.cpp
-  src/ccat_script/ccat_script_profile.cpp
-  src/ccat_script/ccat_script_automation.cpp
-  src/ccat_script/ccat_program_runner.cpp
+  src/ccat_driver/ccat_script_profile.cpp
+  src/ccat_driver/ccat_script_automation.cpp
+  src/ccat_driver/ccat_program_runner.cpp
 )
 target_include_directories(campcat_core PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}/include
@@ -224,17 +224,21 @@ target_link_libraries(campcat_core PUBLIC
 # The IME candidate-window fix is Objective-C++, so it stays Apple-only.
 set(campcat_platform_sources)
 if(APPLE)
-  list(APPEND campcat_platform_sources src/app/macos_ime.mm)
+  list(APPEND campcat_platform_sources src/app/ui/macos_ime.mm)
 endif()
 
 add_executable(campcat
   src/app/main.cpp
-  src/app/template_capture_ui.cpp
-  src/app/llm_ui.cpp
-  src/app/prompt_input.cpp
-  src/app/script_editor_ui.cpp
-  src/app/gl_texture.cpp
-  src/app/native_file_dialog.cpp
+  src/app/shell_state.cpp
+  src/app/ui/llm_panel.cpp
+  src/app/ui/console_panel.cpp
+  src/app/ui/script_panel.cpp
+  src/app/ui/settings_panel.cpp
+  src/app/ui/script_editor_panel.cpp
+  src/app/ui/template_capture_panel.cpp
+  src/app/ui/prompt_input.cpp
+  src/app/ui/gl_texture.cpp
+  src/app/ui/native_file_dialog.cpp
   ${campcat_platform_sources}
 )
 target_include_directories(campcat PRIVATE
