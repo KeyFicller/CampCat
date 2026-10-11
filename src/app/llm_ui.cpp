@@ -34,6 +34,7 @@
 #include <cstring>
 #include <filesystem>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <thread>
 #include <utility>
@@ -260,6 +261,10 @@ constexpr float k_bubble_rounding = 6.0F;
 /// Width cap for the approval preview. Wider than a plain screenshot thumbnail
 /// because the user has to judge a highlighted box before allowing a tap.
 constexpr float k_approval_max_w = 420.0F;
+
+/// Bounding side of a staged box's thumbnail in the send bar. Small on purpose: it
+/// confirms "this is what I am about to send", it is not for judging the element.
+constexpr float k_stage_thumb_side = 96.0F;
 
 /// A tool image is decoded at no more than this width. A full frame is ~10 MB of
 /// texture, and turns are kept, so a whole conversation of them would not fit in
@@ -689,6 +694,208 @@ bool sync_approval_texture(const campcat::llm_approval &_a) {
   return true;
 }
 
+/// The box-annotation window, opened by double-clicking the preview. The box is
+/// the user's redraw, kept apart from the model's so Cancel costs nothing.
+bool g_annot_open = false;
+long g_annot_id = -1; ///< which question this edit belongs to (`_a.id`)
+bool g_annot_dragging = false;
+bool g_annot_has_box = false;
+int g_annot_ax = 0; ///< drag anchor, image px
+int g_annot_ay = 0;
+int g_annot_cx = 0; ///< drag current point, image px
+int g_annot_cy = 0;
+int g_annot_x0 = 0; ///< committed box, inclusive image px
+int g_annot_y0 = 0;
+int g_annot_x1 = 0;
+int g_annot_y1 = 0;
+
+/// A redrawn box waiting to go with the reply. The send bar shows it, and Send
+/// and Reject carry it; it belongs to exactly one question.
+std::optional<campcat::llm::rect> g_staged_box;
+long g_staged_id = -1;
+
+/// Drop the staged redraw, because the question it belonged to is gone.
+void clear_staged() {
+  g_staged_box.reset();
+  g_staged_id = -1;
+}
+
+/// Open the annotation window for `_a`. The box is seeded from a staged redraw
+/// when there is one (reopening must not lose the last edit), else from the
+/// model's.
+void open_annotation(const campcat::llm_approval &_a) {
+  g_annot_open = true;
+  g_annot_id = _a.id;
+  g_annot_dragging = false;
+  campcat::llm::rect seed;
+  bool has = false;
+  if (g_staged_box && g_staged_id == _a.id) {
+    seed = *g_staged_box;
+    has = true;
+  } else if (!_a.highlight.empty()) {
+    seed = _a.highlight[0];
+    has = true;
+  }
+  g_annot_has_box = has;
+  if (has) {
+    g_annot_x0 = seed.x;
+    g_annot_y0 = seed.y;
+    g_annot_x1 = seed.x + seed.w - 1;
+    g_annot_y1 = seed.y + seed.h - 1;
+  }
+}
+
+/// The screenshot at 1:1, the model's box under the user's redraw, and the button
+/// that hands the redraw to the send bar. Closes itself when the question goes.
+void draw_annotation_window() {
+  if (!g_annot_open) {
+    return;
+  }
+  const campcat::llm_approval a = g_host.pending_approval();
+  if (!a.pending || a.id != g_annot_id || g_appr_tex == 0 || g_appr_w <= 0) {
+    g_annot_open = false;
+    return;
+  }
+  ImGui::SetNextWindowSize(ImVec2(560.0F, 520.0F), ImGuiCond_FirstUseEver);
+  bool open = true;
+  if (ImGui::Begin("Correct the box", &open)) {
+    ImGui::TextDisabled(
+        "Drag a new box on the image. The thin one is the model's.");
+    // Two rows below the canvas: the box readout and the button row.
+    const float footer = ImGui::GetFrameHeightWithSpacing() * 2.0F;
+    ImGui::BeginChild("annot_scroll", ImVec2(0.0F, -footer),
+                      ImGuiChildFlags_Borders,
+                      ImGuiWindowFlags_HorizontalScrollbar);
+    const ImVec2 canvas(static_cast<float>(g_appr_w),
+                        static_cast<float>(g_appr_h));
+    ImGui::Image(static_cast<ImTextureID>(static_cast<uintptr_t>(g_appr_tex)),
+                 canvas, ImVec2(0.0F, 0.0F), ImVec2(1.0F, 1.0F));
+    const ImVec2 mn = ImGui::GetItemRectMin();
+    // A plain Image carries no id, so ImGui reads a drag on it as "move the
+    // window" (see UpdateMouseMovingWindowEndFrame). An invisible button over it
+    // claims the mouse, which is what makes the drag ours. Same rect, so the
+    // layout below is untouched.
+    ImGui::SetCursorScreenPos(mn);
+    ImGui::InvisibleButton("annot_canvas", canvas,
+                           ImGuiButtonFlags_MouseButtonLeft);
+    const bool hovered = ImGui::IsItemHovered();
+    const bool held = ImGui::IsItemActive();
+    ImGuiIO &io = ImGui::GetIO();
+    // 1:1, so image px is just the offset from the image's top-left: no scale
+    // term to get wrong, unlike the shrunk preview in the bubble.
+    const auto to_px = [&](const ImVec2 &_s, int *_x, int *_y) {
+      *_x = std::clamp(static_cast<int>(_s.x - mn.x), 0, g_appr_w - 1);
+      *_y = std::clamp(static_cast<int>(_s.y - mn.y), 0, g_appr_h - 1);
+    };
+    if (hovered && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+      g_annot_dragging = true;
+      to_px(io.MousePos, &g_annot_ax, &g_annot_ay);
+      g_annot_cx = g_annot_ax;
+      g_annot_cy = g_annot_ay;
+    }
+    if (g_annot_dragging) {
+      to_px(io.MousePos, &g_annot_cx, &g_annot_cy);
+      if (!held) {
+        g_annot_dragging = false;
+        // A click that never moved is a stray click, not a zero-size box.
+        if (g_annot_cx != g_annot_ax || g_annot_cy != g_annot_ay) {
+          g_annot_x0 = std::min(g_annot_ax, g_annot_cx);
+          g_annot_y0 = std::min(g_annot_ay, g_annot_cy);
+          g_annot_x1 = std::max(g_annot_ax, g_annot_cx);
+          g_annot_y1 = std::max(g_annot_ay, g_annot_cy);
+          g_annot_has_box = true;
+        }
+      }
+    }
+    ImDrawList *dl = ImGui::GetWindowDrawList();
+    // The model's box stays visible under the redraw: how much the user moved it
+    // is the whole point of this window.
+    for (const campcat::llm::rect &r : a.highlight) {
+      dl->AddRect(ImVec2(mn.x + static_cast<float>(r.x),
+                         mn.y + static_cast<float>(r.y)),
+                  ImVec2(mn.x + static_cast<float>(r.x + r.w),
+                         mn.y + static_cast<float>(r.y + r.h)),
+                  IM_COL32(255, 200, 60, 130), 0.0F, 0, 1.0F);
+    }
+    if (g_annot_dragging || g_annot_has_box) {
+      const int x0 = g_annot_dragging ? g_annot_ax : g_annot_x0;
+      const int y0 = g_annot_dragging ? g_annot_ay : g_annot_y0;
+      const int x1 = g_annot_dragging ? g_annot_cx : g_annot_x1;
+      const int y1 = g_annot_dragging ? g_annot_cy : g_annot_y1;
+      const ImVec2 s0(mn.x + static_cast<float>(std::min(x0, x1)),
+                      mn.y + static_cast<float>(std::min(y0, y1)));
+      const ImVec2 s1(mn.x + static_cast<float>(std::max(x0, x1)),
+                      mn.y + static_cast<float>(std::max(y0, y1)));
+      dl->AddRectFilled(s0, s1, IM_COL32(80, 200, 255, 55));
+      dl->AddRect(s0, s1, IM_COL32(255, 220, 80, 255), 0.0F, 0, 2.0F);
+    }
+    ImGui::EndChild();
+    if (g_annot_has_box) {
+      ImGui::TextDisabled("box %d,%d %dx%d px", g_annot_x0, g_annot_y0,
+                          g_annot_x1 - g_annot_x0 + 1,
+                          g_annot_y1 - g_annot_y0 + 1);
+    } else {
+      ImGui::TextDisabled("drag on the image to pick a box");
+    }
+    if (!g_annot_has_box) {
+      ImGui::BeginDisabled();
+    }
+    if (ImGui::Button("Use this box")) {
+      g_staged_box = campcat::llm::rect{g_annot_x0, g_annot_y0,
+                                        g_annot_x1 - g_annot_x0 + 1,
+                                        g_annot_y1 - g_annot_y0 + 1};
+      g_staged_id = g_annot_id;
+      g_annot_open = false;
+    }
+    if (!g_annot_has_box) {
+      ImGui::EndDisabled();
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Cancel")) {
+      g_annot_open = false; // the staged box, if any, is left alone
+    }
+  }
+  ImGui::End();
+  if (!open) {
+    g_annot_open = false;
+  }
+}
+
+/// The staged redraw in the send bar: the screenshot with the box on it, so what
+/// is about to be sent is visible before it goes. Reuses the approval's own
+/// texture; nothing new is uploaded.
+void draw_staged_thumb(const std::string &_tool) {
+  // Fitted to a square, not just to a width: a phone frame is portrait, so capping
+  // width alone would turn the send bar's one row into a 200px-tall band.
+  const float s = std::min(k_stage_thumb_side / static_cast<float>(g_appr_w),
+                           k_stage_thumb_side / static_cast<float>(g_appr_h));
+  const ImVec2 size(static_cast<float>(g_appr_w) * s,
+                    static_cast<float>(g_appr_h) * s);
+  ImGui::Image(static_cast<ImTextureID>(static_cast<uintptr_t>(g_appr_tex)),
+               size, ImVec2(0.0F, 0.0F), ImVec2(1.0F, 1.0F));
+  const ImVec2 img_min = ImGui::GetItemRectMin();
+  const ImVec2 img_max = ImGui::GetItemRectMax();
+  // Where the next row starts; the overlay below is put back here so it costs no
+  // layout.
+  const ImVec2 below = ImGui::GetCursorScreenPos();
+  const campcat::llm::rect &r = *g_staged_box;
+  const ImVec2 p0(img_min.x + static_cast<float>(r.x) * s,
+                  img_min.y + static_cast<float>(r.y) * s);
+  const ImVec2 p1(img_min.x + static_cast<float>(r.x + r.w) * s,
+                  img_min.y + static_cast<float>(r.y + r.h) * s);
+  ImDrawList *dl = ImGui::GetWindowDrawList();
+  dl->AddRectFilled(p0, p1, IM_COL32(80, 200, 255, 55));
+  dl->AddRect(p0, p1, IM_COL32(255, 220, 80, 255), 0.0F, 0, 2.0F);
+  ImGui::SameLine();
+  ImGui::TextDisabled("Corrected %s box will be sent with your reply.",
+                      _tool.c_str());
+  ImGui::SetCursorScreenPos(ImVec2(img_max.x - 20.0F, img_min.y + 1.0F));
+  if (ImGui::SmallButton("x##staged_clear")) {
+    clear_staged();
+  }
+  ImGui::SetCursorScreenPos(below);
+}
+
 /// The question waiting on the user: the proposed box drawn over the screenshot,
 /// and the two buttons that decide whether the tap runs at all.
 void draw_approval_bubble(const campcat::llm_approval &_a) {
@@ -710,6 +917,9 @@ void draw_approval_bubble(const campcat::llm_approval &_a) {
     const ImVec2 size = fit_image(g_appr_w, g_appr_h, k_approval_max_w);
     ImGui::Image(static_cast<ImTextureID>(static_cast<uintptr_t>(g_appr_tex)),
                  size, ImVec2(0.0F, 0.0F), ImVec2(1.0F, 1.0F));
+    // Read off the Image before anything else touches the "last item" state.
+    const bool dbl = _a.box_editable && ImGui::IsItemHovered() &&
+                     ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left);
     // The boxes are in screenshot pixels; the image is drawn scaled.
     const ImVec2 origin = ImGui::GetItemRectMin();
     const float scale = size.x / static_cast<float>(g_appr_w);
@@ -722,9 +932,16 @@ void draw_approval_bubble(const campcat::llm_approval &_a) {
       dl->AddRectFilled(p0, p1, IM_COL32(255, 200, 60, 48));
       dl->AddRect(p0, p1, IM_COL32(255, 200, 60, 230), 0.0F, 0, 2.0F);
     }
+    if (dbl) {
+      open_annotation(_a);
+    }
+  }
+  if (_a.box_editable) {
+    ImGui::TextDisabled("Double-click the image to correct the box.");
   }
   if (ImGui::Button("Approve")) {
     g_host.answer_approval(true);
+    clear_staged(); // an approval means the box is right; a redraw is moot
   }
   ImGui::SameLine();
   // Rejection with a typed correction goes through the prompt box, which stays
@@ -732,7 +949,10 @@ void draw_approval_bubble(const campcat::llm_approval &_a) {
   // Plain words, not ✓/✗: the UI font carries no glyphs for those two and draws
   // them as "?" (see 2026-10-09-llm-tap-approval-design.md §4.5).
   if (ImGui::Button("Reject")) {
-    g_host.answer_approval(false);
+    // A staged redraw rides along: the user staged it to be sent, and dropping it
+    // silently here would surprise them.
+    g_host.answer_approval(false, {}, g_staged_box);
+    clear_staged();
   }
   ImGui::EndChild();
   ImGui::PopStyleVar();
@@ -903,7 +1123,16 @@ void llm_ui_draw_panel(campcat::app_config &_cfg, bool _adb_busy) {
   // While a question waits on the user, this box and its Send are the rejection
   // form: the text becomes the correction the model gets back. One input, one
   // habit, instead of a second box inside the bubble.
-  const bool awaiting = g_host.pending_approval().pending;
+  const campcat::llm_approval approval = g_host.pending_approval();
+  const bool awaiting = approval.pending;
+  // A staged redraw belongs to exactly one question. Drop it as soon as that
+  // question is gone, so it cannot ride the next one.
+  if (g_staged_box && (!awaiting || g_staged_id != approval.id)) {
+    clear_staged();
+  }
+  if (awaiting && g_staged_box && g_appr_tex != 0 && g_appr_w > 0) {
+    draw_staged_thumb(approval.tool);
+  }
 
   // Idle consolidation. Measured from the last LLM request rather than from
   // mouse or keyboard activity: an agent nobody is talking to is an agent that
@@ -956,7 +1185,9 @@ void llm_ui_draw_panel(campcat::app_config &_cfg, bool _adb_busy) {
   if ((clicked || submitted) && can_send) {
     if (awaiting) {
       const bool blank = is_blank(g_input);
-      g_host.answer_approval(false, blank ? std::string() : std::string(g_input));
+      g_host.answer_approval(false, blank ? std::string() : std::string(g_input),
+                             g_staged_box);
+      clear_staged();
       g_input[0] = '\0'; // consumed as the answer, not as a prompt
     } else {
       send_current(_cfg);
@@ -968,3 +1199,5 @@ void llm_ui_draw_panel(campcat::app_config &_cfg, bool _adb_busy) {
   g_footer_h = ImGui::GetItemRectMax().y - footer_top +
                ImGui::GetStyle().ItemSpacing.y;
 }
+
+void llm_ui_draw_overlay() { draw_annotation_window(); }

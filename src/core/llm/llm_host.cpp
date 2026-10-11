@@ -642,6 +642,7 @@ llm::approval_decision llm_host::service_approval(
   m_approval_approved = false;
   m_approval_cancelled = false;
   m_approval_guidance.clear(); // a stale correction must not leak into this one
+  m_approval_box.reset();
   ++m_next_approval_id;
   // Deliberately no notify: the UI polls pending_approval() per frame, so no
   // thread is waiting on publication.
@@ -649,16 +650,19 @@ llm::approval_decision llm_host::service_approval(
                      [this] { return m_approval_answered || m_approval_cancelled; });
   const bool approved = m_approval_approved && !m_approval_cancelled;
   const std::string guidance = approved ? std::string{} : m_approval_guidance;
+  const std::optional<llm::rect> box =
+      approved ? std::nullopt : m_approval_box;
   m_approval_pending = false;
   lk.unlock();
   m_approval_wait += std::chrono::steady_clock::now() - start;
-  return {approved, guidance};
+  return {approved, guidance, box};
 }
 
 llm_approval llm_host::pending_approval() const {
   std::lock_guard<std::mutex> lk(m_approval_mu);
   return llm_approval{m_approval_pending, m_next_approval_id, m_approval_req.tool,
-                      m_approval_req.summary, m_approval_req.highlight};
+                      m_approval_req.summary, m_approval_req.highlight,
+                      m_approval_req.box_editable};
 }
 
 std::string llm_host::approval_screen_png() const {
@@ -666,15 +670,18 @@ std::string llm_host::approval_screen_png() const {
   return m_approval_req.screen_png;
 }
 
-void llm_host::answer_approval(bool _approved, std::string _guidance) {
+void llm_host::answer_approval(bool _approved, std::string _guidance,
+                               std::optional<llm::rect> _box) {
   std::lock_guard<std::mutex> lk(m_approval_mu);
   if (!m_approval_pending || m_approval_answered || m_approval_cancelled) {
     return;
   }
   m_approval_approved = _approved;
-  // An approval means "the box is right", so any text is dropped. Enforced here
-  // rather than in the UI: no caller can sneak a correction onto an approval.
+  // An approval means "the box is right", so any text or redrawn box is dropped.
+  // Enforced here rather than in the UI: no caller can sneak a correction onto an
+  // approval.
   m_approval_guidance = _approved ? std::string{} : std::move(_guidance);
+  m_approval_box = _approved ? std::nullopt : std::move(_box);
   m_approval_answered = true;
   m_approval_cv.notify_all();
 }

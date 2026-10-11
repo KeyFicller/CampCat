@@ -495,6 +495,14 @@ def stream_turn(state: TurnState,
     global _GRAPH
     if _GRAPH is None:
         _GRAPH = build_graph()
+    # The loop runs `invoke` once per round, and the UI streams every round, so
+    # without a separator the rounds run together on one line until the turn
+    # ends and the joined `reply` replaces them. `langgraph_step` is what marks
+    # a round: it is the same for every chunk of one model call and rises for
+    # the next. Kept in step with the join in `invoke`.
+    last_step: object = None
+    gap_pending = False
+    emitted = False
     for mode, payload in _GRAPH.stream(state, stream_mode=["messages", "values"]):
         if mode == "values":
             out_state.update(payload)
@@ -504,5 +512,16 @@ def stream_turn(state: TurnState,
         # stream chunks too; only invoke is the answer.
         if meta.get("langgraph_node") != "invoke":
             continue
+        step = meta.get("langgraph_step")
+        if step != last_step:
+            last_step = step
+            gap_pending = emitted
         text = _content_to_text(getattr(chunk, "content", ""))
-        yield (bool(text), text)
+        if not text:
+            yield (False, "")
+            continue
+        if gap_pending:
+            gap_pending = False
+            yield (True, "\n\n")
+        emitted = True
+        yield (True, text)

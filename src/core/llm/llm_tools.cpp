@@ -116,6 +116,20 @@ bool box_on_screen(int _img_w, int _img_h, int _x, int _y, int _w, int _h,
   return true;
 }
 
+/// What to append to a refusal when the human redrew the box. Empty when they
+/// did not, so the caller keeps its own wording byte for byte.
+std::string corrected_box_note(const llm::approval_decision &_d,
+                               const char *_tool) {
+  if (!_d.box) {
+    return {};
+  }
+  return "; call " + std::string(_tool) +
+         " again with this corrected box {\"x\":" + std::to_string(_d.box->x) +
+         ",\"y\":" + std::to_string(_d.box->y) +
+         ",\"w\":" + std::to_string(_d.box->w) +
+         ",\"h\":" + std::to_string(_d.box->h) + "}";
+}
+
 /// The names, comma-separated, for a sentence read back to the model.
 std::string join_names(const std::vector<std::string> &_names) {
   std::string out;
@@ -446,12 +460,16 @@ std::string tap(int x, int y, int w, int h) {
                   std::to_string(y) + ")";
     req.highlight.push_back(rect{x, y, w, h});
     req.screen_png = g_ctx.screen.png;
+    req.box_editable = true;
     const llm::approval_decision decision = g_ctx.request_approval(req);
     if (!decision.approved) {
-      // Empty guidance keeps this string byte-for-byte the same as the bare refusal.
-      throw js::bind_error(decision.guidance.empty()
-                               ? "user rejected the tap"
-                               : "user rejected the tap: " + decision.guidance);
+      // Empty guidance and no redrawn box keep this string byte-for-byte the same
+      // as the bare refusal.
+      std::string msg = decision.guidance.empty()
+                            ? std::string("user rejected the tap")
+                            : "user rejected the tap: " + decision.guidance;
+      msg += corrected_box_note(decision, "tap");
+      throw js::bind_error(msg);
     }
   }
   // The tap lands at the box centre: the model marks the element, this picks the
@@ -587,11 +605,15 @@ std::string save_template(std::string bundle, std::string name,
     // The frame the model named, not the current screen: that is what is being cut,
     // and seeing it is how the human notices a box aimed at the wrong one.
     req.screen_png = frame_png;
+    req.box_editable = true;
     const llm::approval_decision decision = g_ctx.request_approval(req);
     if (!decision.approved) {
-      throw js::bind_error(decision.guidance.empty()
-                               ? "user rejected saving the template"
-                               : "user rejected saving the template: " + decision.guidance);
+      std::string msg =
+          decision.guidance.empty()
+              ? std::string("user rejected saving the template")
+              : "user rejected saving the template: " + decision.guidance;
+      msg += corrected_box_note(decision, "save_template");
+      throw js::bind_error(msg);
     }
   }
   const std::filesystem::path path = g_ctx.script_dir / bundle / file;

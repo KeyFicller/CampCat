@@ -4,6 +4,7 @@
 #include <chrono>
 #include <filesystem>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <thread>
 #include <vector>
@@ -29,10 +30,11 @@ struct llm_result {
 /// megabyte, so it fetches that separately, once per `id`.
 struct llm_approval {
   bool pending = false;
-  long id = 0; ///< 每次新请求自增；UI 用它对贴图换缓存
+  long id = 0; ///< Bumped per request; the UI caches its texture against it
   std::string tool;
   std::string summary;
   std::vector<llm::rect> highlight;
+  bool box_editable = false; ///< Whether the human may redraw this box
 };
 
 /// How long an idle consolidation may take. One model call and a file write, so
@@ -160,8 +162,9 @@ public:
   std::string approval_screen_png() const;
 
   /// Answer the pending question. A no-op when nothing is pending. `_guidance`
-  /// is a correction for the model and is kept only on a rejection.
-  void answer_approval(bool _approved, std::string _guidance = {});
+  /// and `_box` are corrections for the model and are kept only on a rejection.
+  void answer_approval(bool _approved, std::string _guidance = {},
+                       std::optional<llm::rect> _box = std::nullopt);
 
   /**
    * @brief Resolve the hanging question as rejected, and refuse later ones, so
@@ -253,6 +256,8 @@ private:
   bool m_approval_cancelled = false;
   /// Correction typed by the human; only read when the question is rejected.
   std::string m_approval_guidance;
+  /// Box the human redrew; same lifetime and same rule as the guidance.
+  std::optional<llm::rect> m_approval_box;
   /// Set once the host is going away; no question is answered after that.
   bool m_approval_abort = false;
   long m_next_approval_id = 0;

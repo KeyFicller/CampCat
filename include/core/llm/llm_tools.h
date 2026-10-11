@@ -2,6 +2,7 @@
 
 #include <filesystem>
 #include <functional>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -17,25 +18,31 @@ namespace campcat::llm {
 /// model never sees this type (`tap` takes four ints) and reflection,
 /// the schema layer, does not know it.
 struct rect {
-  int x = 0; ///< 左上角 X，截图像素
-  int y = 0; ///< 左上角 Y
-  int w = 0; ///< 宽
-  int h = 0; ///< 高
+  int x = 0; ///< Left edge X, screenshot px
+  int y = 0; ///< Top edge Y
+  int w = 0; ///< Width
+  int h = 0; ///< Height
 };
 
 /// One question for the human, asked before a gated tool is allowed to run.
 struct approval_request {
-  std::string tool;            ///< 被闸的工具名，如 "tap"
-  std::string summary;         ///< 给人看的一句话
-  std::vector<rect> highlight; ///< 要在截图上画出的框
-  std::string screen_png;      ///< 最近一次截图的原始 PNG 字节（不是 base64）；可能为空
+  std::string tool;            ///< Gated tool name, e.g. "tap"
+  std::string summary;         ///< One line for the human
+  std::vector<rect> highlight; ///< Boxes to draw on the screenshot
+  std::string screen_png;      ///< Raw PNG bytes of the latest screenshot (not base64); may be empty
+  /// Whether the human may redraw this box (tap / save_template set it). The UI
+  /// keys on this flag, so it never has to know tool names.
+  bool box_editable = false;
 };
 
-/// How a human answered an approval_request. `guidance` is a correction, so it
-/// only means anything when `approved` is false.
+/// How a human answered an approval_request. `guidance` and `box` are both
+/// corrections, so they only mean anything when `approved` is false.
 struct approval_decision {
   bool approved = false;
   std::string guidance;
+  /// The box the human redrew; same rule as the guidance (an approval means the
+  /// box was right, so this is dropped).
+  std::optional<rect> box;
 };
 
 /// The screenshot the model is working from. Raw PNG bytes (not base64): the wire

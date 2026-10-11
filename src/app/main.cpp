@@ -1098,6 +1098,10 @@ int main(int argc, char **argv) {
 
     ImGui::End();
 
+    // Top level, not inside the shell window: the user may switch pages while
+    // correcting a box, and the window must survive that.
+    llm_ui_draw_overlay();
+
     ImGui::Render();
 
     int display_w = 0;

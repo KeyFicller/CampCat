@@ -40,3 +40,12 @@ void llm_ui_shutdown_finish();
  * tools refuse instead of contending with it.
  */
 void llm_ui_draw_panel(campcat::app_config &_cfg, bool _adb_busy);
+
+/**
+ * @brief Draw the box-annotation window for a pending approval, if one is open.
+ *
+ * Called every frame regardless of the active page: it is a top-level float, and
+ * the user may well switch pages mid-edit. Whether there is anything to show is
+ * the window's own business.
+ */
+void llm_ui_draw_overlay();
