@@ -25,6 +25,7 @@ void macos_ime_attach(GLFWwindow *_window);
  * @brief The IME composition (pinyin) currently being typed, UTF-8.
  *
  * GLFW stores the marked text on its content view and never draws it, so the UI
- * has to paint this itself or the pinyin never appears. Empty when not composing.
+ * has to paint this itself or the pinyin never appears. Empty when not
+ * composing.
  */
 std::string macos_ime_preedit();

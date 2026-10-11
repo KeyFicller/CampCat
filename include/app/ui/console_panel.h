@@ -17,6 +17,7 @@ struct ccat_script_profile;
  * @param[in] _busy_now A cycle is running, so the input and Clear are disabled.
  * @param[in] _font_bold Bold face for the empty-state title.
  */
-void console_panel_draw(campcat::shell_state &_st, campcat::app_config &_cfg_view,
-                       const campcat::ccat_script_profile &_ccat_ui,
-                       bool _busy_now, ImFont *_font_bold);
+void console_panel_draw(campcat::shell_state &_st,
+                        campcat::app_config &_cfg_view,
+                        const campcat::ccat_script_profile &_ccat_ui,
+                        bool _busy_now, ImFont *_font_bold);

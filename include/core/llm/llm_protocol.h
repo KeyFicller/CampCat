@@ -9,8 +9,8 @@ namespace campcat::llm_protocol {
 /// means one side was rebuilt without the other, which breaks the tools.
 /// 4: `tool_call` may carry `image_b64`, a screenshot the sidecar kept.
 /// 5: `tool_call` no longer carries `image_b64` -- the host keeps the session's
-///    numbered screenshots itself -- and `tool_result` carries the `shot` number
-///    an image-returning tool filed its frame under.
+///    numbered screenshots itself -- and `tool_result` carries the `shot`
+///    number an image-returning tool filed its frame under.
 /// 6: `turn` carries `memory`, the long-term notes the host read off disk, and
 ///    `memorize` asks the sidecar to fold the session into them.
 constexpr int k_protocol_version = 6;
@@ -22,33 +22,33 @@ constexpr int k_protocol_version = 6;
  * callers can ignore stray lines instead of treating them as fatal.
  */
 struct message {
-  enum class kind { ready, log, result, chunk, tool_call, unknown };
+    enum class kind { ready, log, result, chunk, tool_call, unknown };
 
-  kind type = kind::unknown;
-  long id = 0;
+    kind type = kind::unknown;
+    long id = 0;
 
-  // result
-  bool ok = false;
-  std::string text;
-  std::string error;
+    // result
+    bool ok = false;
+    std::string text;
+    std::string error;
 
-  // chunk (shares `text` as the delta)
-  bool thinking = false; ///< reasoning heartbeat, `text` is empty
+    // chunk (shares `text` as the delta)
+    bool thinking = false; ///< reasoning heartbeat, `text` is empty
 
-  // tool_call (the sidecar is asking us to run a tool)
-  std::string call_id;        ///< echoed back in the answering tool_result
-  std::string tool_name;
-  std::string tool_args_json; ///< the model's raw arguments object, unparsed
+    // tool_call (the sidecar is asking us to run a tool)
+    std::string call_id; ///< echoed back in the answering tool_result
+    std::string tool_name;
+    std::string tool_args_json; ///< the model's raw arguments object, unparsed
 
-  // log
-  std::string level;
-  std::string log_message;
+    // log
+    std::string level;
+    std::string log_message;
 
-  // ready
-  int protocol = 0;
+    // ready
+    int protocol = 0;
 
-  /// Turns the sidecar retains after this result; 0 after a reset.
-  int turns = 0;
+    /// Turns the sidecar retains after this result; 0 after a reset.
+    int turns = 0;
 };
 
 /**
@@ -69,8 +69,8 @@ std::string base64_encode(const unsigned char *_data, std::size_t _len);
  *
  * @param[in] _text The user's instruction; blank asks for nothing.
  * @param[in] _tools_json OpenAI tools array; empty to offer no tools.
- * @param[in] _memory Long-term notes about this user, read off disk by the host.
- *                    Sent even when empty, so the field's shape never moves.
+ * @param[in] _memory Long-term notes about this user, read off disk by the
+ * host. Sent even when empty, so the field's shape never moves.
  */
 std::string build_turn_request(long _id, std::string_view _text,
                                std::string_view _tools_json,

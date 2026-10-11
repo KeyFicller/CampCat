@@ -14,55 +14,55 @@ namespace campcat::process {
  */
 class child {
 public:
-  child() = default;
+    child() = default;
 
-  /**
-   * @param[in] _pid Child process id.
-   * @param[in] _in Write end feeding the child's stdin (`-1` if absent).
-   * @param[in] _out Read end draining the child's stdout (`-1` if absent).
-   * @param[in] _err Read end draining the child's stderr (`-1` if absent).
-   */
-  child(long _pid, int _in, int _out, int _err)
-      : m_pid(_pid), m_in(_in), m_out(_out), m_err(_err) {}
+    /**
+     * @param[in] _pid Child process id.
+     * @param[in] _in Write end feeding the child's stdin (`-1` if absent).
+     * @param[in] _out Read end draining the child's stdout (`-1` if absent).
+     * @param[in] _err Read end draining the child's stderr (`-1` if absent).
+     */
+    child(long _pid, int _in, int _out, int _err)
+        : m_pid(_pid), m_in(_in), m_out(_out), m_err(_err) {}
 
-  ~child() { release(); }
+    ~child() { release(); }
 
-  child(const child &) = delete;
-  child &operator=(const child &) = delete;
+    child(const child &) = delete;
+    child &operator=(const child &) = delete;
 
-  child(child &&_other) noexcept { adopt(_other); }
+    child(child &&_other) noexcept { adopt(_other); }
 
-  child &operator=(child &&_other) noexcept {
-    if (this != &_other) {
-      release();
-      adopt(_other);
+    child &operator=(child &&_other) noexcept {
+        if (this != &_other) {
+            release();
+            adopt(_other);
+        }
+        return *this;
     }
-    return *this;
-  }
 
-  /// @return Child pid, or `-1` when empty.
-  long pid() const { return m_pid; }
-  /// @return Write end for the child's stdin, or `-1`.
-  int in() const { return m_in; }
-  /// @return Read end for the child's stdout, or `-1`.
-  int out() const { return m_out; }
-  /// @return Read end for the child's stderr, or `-1`.
-  int err() const { return m_err; }
+    /// @return Child pid, or `-1` when empty.
+    long pid() const { return m_pid; }
+    /// @return Write end for the child's stdin, or `-1`.
+    int in() const { return m_in; }
+    /// @return Read end for the child's stdout, or `-1`.
+    int out() const { return m_out; }
+    /// @return Read end for the child's stderr, or `-1`.
+    int err() const { return m_err; }
 
-  /// Close the stdio pipes, signalling EOF to the child. Idempotent.
-  void close_pipes();
+    /// Close the stdio pipes, signalling EOF to the child. Idempotent.
+    void close_pipes();
 
-  /// SIGKILL the child if alive and reap it. Idempotent.
-  void terminate();
+    /// SIGKILL the child if alive and reap it. Idempotent.
+    void terminate();
 
 private:
-  void adopt(child &_other) noexcept;
-  void release();
+    void adopt(child &_other) noexcept;
+    void release();
 
-  long m_pid = -1;
-  int m_in = -1;
-  int m_out = -1;
-  int m_err = -1;
+    long m_pid = -1;
+    int m_in = -1;
+    int m_out = -1;
+    int m_err = -1;
 };
 
 /**

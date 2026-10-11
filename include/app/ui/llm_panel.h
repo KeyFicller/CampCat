@@ -7,7 +7,7 @@ struct ImFont; // only ever held as a pointer here, so imgui.h stays out
 namespace campcat {
 class shell_state;
 struct app_config;
-}
+} // namespace campcat
 
 /**
  * @brief Hand the panel the bold font, used to render `**strong**` runs.
@@ -22,8 +22,8 @@ void llm_panel_set_bold_font(ImFont *_font);
  * the other panels' shutdowns).
  *
  * Starts the last memory consolidation but does not wait for it: the wait would
- * otherwise block while the window is still up. `llm_panel_shutdown_finish` is what
- * waits, and it must be called after the window is destroyed.
+ * otherwise block while the window is still up. `llm_panel_shutdown_finish` is
+ * what waits, and it must be called after the window is destroyed.
  */
 void llm_panel_shutdown_gl();
 
@@ -58,8 +58,8 @@ campcat::activity_status llm_panel_activity();
 /**
  * @brief Draw the box-annotation window for a pending approval, if one is open.
  *
- * Called every frame regardless of the active page: it is a top-level float, and
- * the user may well switch pages mid-edit. Whether there is anything to show is
- * the window's own business.
+ * Called every frame regardless of the active page: it is a top-level float,
+ * and the user may well switch pages mid-edit. Whether there is anything to
+ * show is the window's own business.
  */
 void llm_panel_draw_overlay();

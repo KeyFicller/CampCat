@@ -13,4 +13,4 @@ struct app_config;
  * @param[in,out] _cfg_view This frame's config view.
  */
 void settings_panel_draw(campcat::shell_state &_st,
-                        campcat::app_config &_cfg_view);
+                         campcat::app_config &_cfg_view);

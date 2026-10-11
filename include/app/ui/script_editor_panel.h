@@ -31,8 +31,8 @@ void script_editor_panel_set_mono_font(ImFont *_font);
  * @param[in] _list_h     Column height, negative meaning "the parent's height
  * minus this" the way ImGui reads a size.
  */
-void script_editor_panel_draw(const std::filesystem::path &_script_dir, float _list_w,
-                    float _list_h);
+void script_editor_panel_draw(const std::filesystem::path &_script_dir,
+                              float _list_w, float _list_h);
 
 /// @brief Release the preview textures and close the editors. Must run before
 /// the GL context goes away.

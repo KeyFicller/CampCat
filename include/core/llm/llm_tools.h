@@ -20,40 +20,41 @@ namespace campcat::llm {
 /// model never sees this type (`tap` takes four ints) and reflection,
 /// the schema layer, does not know it.
 struct rect {
-  int x = 0; ///< Left edge X, screenshot px
-  int y = 0; ///< Top edge Y
-  int w = 0; ///< Width
-  int h = 0; ///< Height
+    int x = 0; ///< Left edge X, screenshot px
+    int y = 0; ///< Top edge Y
+    int w = 0; ///< Width
+    int h = 0; ///< Height
 };
 
 /// One question for the human, asked before a gated tool is allowed to run.
 struct approval_request {
-  std::string tool;            ///< Gated tool name, e.g. "tap"
-  std::string summary;         ///< One line for the human
-  std::vector<rect> highlight; ///< Boxes to draw on the screenshot
-  std::string screen_png;      ///< Raw PNG bytes of the latest screenshot (not base64); may be empty
-  /// Whether the human may redraw this box (tap / save_template set it). The UI
-  /// keys on this flag, so it never has to know tool names.
-  bool box_editable = false;
+    std::string tool;            ///< Gated tool name, e.g. "tap"
+    std::string summary;         ///< One line for the human
+    std::vector<rect> highlight; ///< Boxes to draw on the screenshot
+    std::string screen_png; ///< Raw PNG bytes of the latest screenshot (not
+                            ///< base64); may be empty
+    /// Whether the human may redraw this box (tap / save_template set it). The
+    /// UI keys on this flag, so it never has to know tool names.
+    bool box_editable = false;
 };
 
 /// How a human answered an approval_request. `guidance` and `box` are both
 /// corrections, so they only mean anything when `approved` is false.
 struct approval_decision {
-  bool approved = false;
-  std::string guidance;
-  /// The box the human redrew; same rule as the guidance (an approval means the
-  /// box was right, so this is dropped).
-  std::optional<rect> box;
+    bool approved = false;
+    std::string guidance;
+    /// The box the human redrew; same rule as the guidance (an approval means
+    /// the box was right, so this is dropped).
+    std::optional<rect> box;
 };
 
-/// The screenshot the model is working from. Raw PNG bytes (not base64): the wire
-/// encoding happens once, on the way out. Both fields live and die together, and
-/// outlive the turn they were taken in (see `current_screen`).
+/// The screenshot the model is working from. Raw PNG bytes (not base64): the
+/// wire encoding happens once, on the way out. Both fields live and die
+/// together, and outlive the turn they were taken in (see `current_screen`).
 struct screen_state {
-  int w = 0;
-  int h = 0;
-  std::string png;
+    int w = 0;
+    int h = 0;
+    std::string png;
 };
 
 /**
@@ -66,57 +67,61 @@ struct screen_state {
  * taken from it stays valid until the model asks for a fresh one.
  */
 struct tool_context {
-  adb_client *adb = nullptr;
-  /// True while an automation cycle owns adb, so tools must refuse rather than
-  /// compete for the device. An empty function means "never busy".
-  std::function<bool()> adb_busy;
-  /// Last screenshot of the session; injected by `llm_host::run_turn`.
-  screen_state screen;
-  /// Gated tools ask the human through this. An empty function means there is
-  /// nobody to ask, and the tool then refuses: a gate that silently opens is
-  /// worse than no gate.
-  std::function<approval_decision(const approval_request &)> request_approval;
-  /// Mirrors app_config's approval settings, folded into one answer about the
-  /// tool asking: whether that tool shows the human what it is about to do and
-  /// waits for approval. The shell supplies it (`llm_panel`), so a tool reads
-  /// one answer about its own name instead of a flag plus a table of its own.
-  /// Empty means never: a context built without one gates nothing, which is
-  /// what the default means.
-  std::function<bool(std::string_view _tool)> needs_approval;
-  /// Config the script tools hand to the interpreter (matcher thresholds, pacing).
-  /// Null makes `run_script` refuse rather than run with defaults nobody chose.
-  const app_config *cfg = nullptr;
-  /// Root a model-authored script's relative paths (template PNGs, `run`) resolve
-  /// against. It has no file of its own, so this stands in for its directory.
-  std::filesystem::path script_dir;
-  /// Starts the emulator this shell is configured for and waits until it is up.
-  /// Supplied by the shell: the launch, its watchdog and the shutdown
-  /// bookkeeping all live there. Runs on the tool thread and blocks for as long
-  /// as the boot takes. `_should_stop` is polled by the wait: true means give
-  /// up early and report it rather than that something broke. An empty function
-  /// means nobody can start one, and `start_emulator` then refuses -- silence
-  /// would look like success.
-  std::function<campcat::mumu_status(const std::function<bool()> &_should_stop)>
-      start_emulator;
+    adb_client *adb = nullptr;
+    /// True while an automation cycle owns adb, so tools must refuse rather
+    /// than compete for the device. An empty function means "never busy".
+    std::function<bool()> adb_busy;
+    /// Last screenshot of the session; injected by `llm_host::run_turn`.
+    screen_state screen;
+    /// Gated tools ask the human through this. An empty function means there is
+    /// nobody to ask, and the tool then refuses: a gate that silently opens is
+    /// worse than no gate.
+    std::function<approval_decision(const approval_request &)> request_approval;
+    /// Mirrors app_config's approval settings, folded into one answer about the
+    /// tool asking: whether that tool shows the human what it is about to do
+    /// and waits for approval. The shell supplies it (`llm_panel`), so a tool
+    /// reads one answer about its own name instead of a flag plus a table of
+    /// its own. Empty means never: a context built without one gates nothing,
+    /// which is what the default means.
+    std::function<bool(std::string_view _tool)> needs_approval;
+    /// Config the script tools hand to the interpreter (matcher thresholds,
+    /// pacing). Null makes `run_script` refuse rather than run with defaults
+    /// nobody chose.
+    const app_config *cfg = nullptr;
+    /// Root a model-authored script's relative paths (template PNGs, `run`)
+    /// resolve against. It has no file of its own, so this stands in for its
+    /// directory.
+    std::filesystem::path script_dir;
+    /// Starts the emulator this shell is configured for and waits until it is
+    /// up. Supplied by the shell: the launch, its watchdog and the shutdown
+    /// bookkeeping all live there. Runs on the tool thread and blocks for as
+    /// long as the boot takes. `_should_stop` is polled by the wait: true means
+    /// give up early and report it rather than that something broke. An empty
+    /// function means nobody can start one, and `start_emulator` then refuses
+    /// -- silence would look like success.
+    std::function<campcat::mumu_status(
+        const std::function<bool()> &_should_stop)>
+        start_emulator;
 };
 
 /// Outcome of one tool call. `image_png` is set only by image-returning tools
 /// and holds raw PNG bytes; the host base64-encodes them for the wire, which is
 /// the only place the encoding exists.
 struct tool_reply {
-  bool ok = false;
-  std::string text;
-  std::string error;
-  std::string image_png;
-  /// Line the UI's tool note shows instead of `text`; non-empty also marks the
-  /// text as a document for the model, too long to print (see `js::quiet`).
-  /// `{param}` in it is filled from this call's arguments, so the log can say
-  /// which script was read rather than only that one was.
-  std::string quiet_note;
-  /// The session number this call filed a frame under. Only `screenshot` sets it;
-  /// it is what the model's `shot` arguments name later, so the host puts it on
-  /// the wire and the sidecar puts it in the caption below the picture.
-  int shot = 0;
+    bool ok = false;
+    std::string text;
+    std::string error;
+    std::string image_png;
+    /// Line the UI's tool note shows instead of `text`; non-empty also marks
+    /// the text as a document for the model, too long to print (see
+    /// `js::quiet`).
+    /// `{param}` in it is filled from this call's arguments, so the log can say
+    /// which script was read rather than only that one was.
+    std::string quiet_note;
+    /// The session number this call filed a frame under. Only `screenshot` sets
+    /// it; it is what the model's `shot` arguments name later, so the host puts
+    /// it on the wire and the sidecar puts it in the caption below the picture.
+    int shot = 0;
 };
 
 /// Sets the context every tool reads. Called once per turn by the worker that
@@ -153,9 +158,9 @@ bool emulator_starting();
 /// nothing is waiting.
 void request_emulator_stop();
 
-/// Drops every numbered screenshot this session kept, so `shot` numbering starts
-/// over. Called when the session ends, in step with clearing the current screen:
-/// a frame from a finished conversation must not answer a later lookup.
+/// Drops every numbered screenshot this session kept, so `shot` numbering
+/// starts over. Called when the session ends, in step with clearing the current
+/// screen: a frame from a finished conversation must not answer a later lookup.
 void forget_frames();
 
 } // namespace campcat::llm

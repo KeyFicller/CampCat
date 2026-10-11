@@ -13,27 +13,31 @@ struct app_config;
 struct ccat_script_profile;
 
 /**
- * @brief Shell-level outcome of one automation tick (opaque to scripted payloads).
+ * @brief Shell-level outcome of one automation tick (opaque to scripted
+ * payloads).
  */
 struct automation_cycle_result {
-  bool ok = false;
-  std::string message;
+    bool ok = false;
+    std::string message;
 };
 
 /**
- * @brief Polymorphic hook representing one automation profile runnable per shell tick.
+ * @brief Polymorphic hook representing one automation profile runnable per
+ * shell tick.
  */
 class game_automation {
 public:
-  virtual ~game_automation() = default;
+    virtual ~game_automation() = default;
 
-  /**
-   * @brief Execute one scripted pass until completion or cooperative stop hooks.
-   * @param[in] should_stop Predicate polled inside tight loops (e.g. atomic UI cancel).
-   * @return Consolidated telemetry for Dear ImGui / logs.
-   */
-  virtual automation_cycle_result
-  run_cycle(const std::function<bool()> &should_stop) = 0;
+    /**
+     * @brief Execute one scripted pass until completion or cooperative stop
+     * hooks.
+     * @param[in] should_stop Predicate polled inside tight loops (e.g. atomic
+     * UI cancel).
+     * @return Consolidated telemetry for Dear ImGui / logs.
+     */
+    virtual automation_cycle_result
+    run_cycle(const std::function<bool()> &should_stop) = 0;
 };
 
 /**

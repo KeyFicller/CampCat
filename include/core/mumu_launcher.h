@@ -19,21 +19,21 @@ namespace campcat {
  * app (`mumu_launch_app`) and ask again.
  */
 enum class mumu_state {
-  unknown,
-  stopped,
-  starting,
-  running,
-  service_down,
-  failed
+    unknown,
+    stopped,
+    starting,
+    running,
+    service_down,
+    failed
 };
 
 /**
  * @brief One `mumutool` answer, ready for the UI to draw.
  */
 struct mumu_status {
-  mumu_state state = mumu_state::unknown;
-  /// The raw `state` string from mumutool, or why the call failed.
-  std::string message;
+    mumu_state state = mumu_state::unknown;
+    /// The raw `state` string from mumutool, or why the call failed.
+    std::string message;
 };
 
 /**
@@ -148,7 +148,7 @@ mumu_status mumu_wait_ready(const std::string &_mumutool, int _index,
  * @return The handle, or `std::nullopt` when the spawn failed.
  */
 std::optional<process::child> mumu_spawn_watchdog(const std::string &_mumutool,
-                                                 int _index, long _parent_pid,
-                                                 const std::string &_app_path);
+                                                  int _index, long _parent_pid,
+                                                  const std::string &_app_path);
 
 } // namespace campcat
