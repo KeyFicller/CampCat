@@ -84,6 +84,18 @@ std::atomic<bool> g_emulator_stop{false};
 constexpr std::string_view k_device_hint =
     "; if the device is down, start_emulator boots it";
 
+/// The two things the model can do about a template that did not match,
+/// appended to the failures that are exactly that. Same shape, and the same
+/// brittleness, as k_device_hint: the interpreter words these messages, so this
+/// matches on their wording.
+///
+/// Triggered on the failure naming a `.png`, which is what every template
+/// failure in the interpreter does and what a device failure does not -- one
+/// condition covers all of them, including ones this file does not know about.
+constexpr std::string_view k_template_hint =
+    "; view_template shows the template it looked for, view_crop what is there "
+    "now";
+
 /// Clears a stale stop on entry and marks the script as running until it
 /// returns. The clear is not decoration: a turn can run a second script, and
 /// the stop the user pressed for the first one would otherwise kill it on
@@ -549,6 +561,97 @@ CPP_REFLECT_TOOL(view_shot)
 
 [[= js::image_result]][[= js::doc{
     .text = js::str(
+        "Shows a template PNG from a script bundle: what a failed tap, "
+        "tap_offset, swipe or wait_until was matching against. Look at it "
+        "together with a fresh screenshot or view_crop -- the template is the "
+        "side that did not match, so the question is whether the control it "
+        "holds is on the screen at all (then the step before it did not land, or "
+        "the screen is not the one you expected) or is there but different "
+        "(then the cut is loose or stale, or holds text that changes between "
+        "runs).")}]]
+    [[= js::param_docs(
+        js::str("Bundle the template is in, as list_scripts showed it."),
+        js::str("Template name, as read_script lists it; \".png\" is appended "
+                "when missing."))]] std::string
+    view_template(std::string bundle, std::string name) {
+    if (!ccat_lang::safe_leaf_name(bundle)) {
+        throw js::bind_error("bundle \"" + bundle +
+                             "\" is not a plain file name");
+    }
+    const std::string file = with_png_ext(name);
+    if (!ccat_lang::safe_leaf_name(file)) {
+        throw js::bind_error("name \"" + name + "\" is not a plain file name");
+    }
+    std::error_code ec;
+    if (!std::filesystem::is_regular_file(
+            ccat_lang::bundle_main(g_ctx.script_dir, bundle), ec)) {
+        throw js::bind_error("unknown script bundle \"" + bundle +
+                             "\"; save_script first (existing: " +
+                             existing_bundles() + ")");
+    }
+    const std::filesystem::path path = g_ctx.script_dir / bundle / file;
+    if (!std::filesystem::is_regular_file(path, ec)) {
+        throw js::bind_error(
+            "\"" + file + "\" is not in bundle \"" + bundle + "\" (templates: " +
+            joined(ccat_lang::bundle_templates(g_ctx.script_dir, bundle),
+                   "none") +
+            ")");
+    }
+    std::ifstream in(path, std::ios::binary);
+    if (!in) {
+        throw js::bind_error("could not read " + path.string());
+    }
+    const std::string png{std::istreambuf_iterator<char>(in),
+                          std::istreambuf_iterator<char>()};
+    // Decoded once on purpose: a file that is not a picture is exactly what
+    // `tap: unreadable template` reports, so the model gets that answer here
+    // instead of from another failed run.
+    const cv::Mat buf(1, static_cast<int>(png.size()), CV_8UC1,
+                      const_cast<char *>(png.data()));
+    if (png.empty() || cv::imdecode(buf, cv::IMREAD_COLOR).empty()) {
+        throw js::bind_error("\"" + bundle + "/" + file +
+                             "\" is not a decodable picture; re-cut it with "
+                             "save_template");
+    }
+    return png;
+}
+CPP_REFLECT_TOOL(view_template)
+
+[[= js::image_result]][[= js::doc{
+    .text = js::str(
+        "Shows one box of the last screenshot at its own size, with nothing "
+        "drawn on it. Use it with the box a failed statement reported, to see "
+        "what is there now at the same scale as the template it was looking "
+        "for: the whole-screen view is scaled down, so this is the only way to "
+        "compare the two pixel for pixel. It does not change the current "
+        "screen.")}]]
+    [[= js::param_docs(
+        js::str("Left edge X of the box, in screenshot pixels."),
+        js::str("Top edge Y of the box, in screenshot pixels."),
+        js::str("Width of the box in pixels."),
+        js::str("Height of the box in pixels."))]] std::string
+    view_crop(int x, int y, int w, int h) {
+    std::string error;
+    if (!box_on_screen(g_ctx.screen.w, g_ctx.screen.h, x, y, w, h, &error)) {
+        throw js::bind_error(error);
+    }
+    const cv::Mat buf(1, static_cast<int>(g_ctx.screen.png.size()), CV_8UC1,
+                      const_cast<char *>(g_ctx.screen.png.data()));
+    const cv::Mat bgr = cv::imdecode(buf, cv::IMREAD_COLOR);
+    if (bgr.empty()) {
+        // Only reachable if a stored PNG got corrupted, which no tool can do.
+        throw js::bind_error("the stored screenshot is not a decodable picture");
+    }
+    std::vector<unsigned char> png;
+    if (!cv::imencode(".png", bgr(cv::Rect(x, y, w, h)), png)) {
+        throw js::bind_error("png encode failed");
+    }
+    return std::string(png.begin(), png.end());
+}
+CPP_REFLECT_TOOL(view_crop)
+
+[[= js::image_result]][[= js::doc{
+    .text = js::str(
         "Draws a box on the last screenshot and returns the marked image, "
         "so the user can see where you think something is. Nothing is "
         "tapped and nothing needs approval; the box lives in the picture.")}]][
@@ -762,6 +865,9 @@ CPP_REFLECT_TOOL(start_emulator)
         if (msg.find("screencap failed") != std::string::npos ||
             msg.find("adb tap failed") != std::string::npos) {
             msg += k_device_hint;
+        }
+        if (msg.find(".png") != std::string::npos) {
+            msg += k_template_hint;
         }
         throw js::bind_error(msg + script_log_suffix(script_logs));
     }

@@ -18,6 +18,22 @@ struct match_result {
 };
 
 /**
+ * @brief The matcher's verdict as one clause for an error message: how close
+ * the best candidate came, where it was, and the bar it had to clear.
+ *
+ * Worded here rather than at each call site, so every statement that fails on a
+ * template reports the same numbers -- and so a probe can assert the wording
+ * without a device. The box is the four ints `mark` / `view_crop` take, and it
+ * is the best candidate even below the threshold, which is the whole point of
+ * reporting it: the model needs to tell a near miss from a wrong screen.
+ *
+ * @param[in] _r The correlation outcome, hit or miss.
+ * @param[in] _threshold The bar `_r.found` was measured against.
+ * @return One clause, leading space included, ready to append to a sentence.
+ */
+std::string match_verdict_text(const match_result &_r, double _threshold);
+
+/**
  * @brief OpenCV-based template matcher with optional brute-force scale sweep.
  */
 class template_matcher {

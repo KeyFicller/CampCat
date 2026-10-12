@@ -64,7 +64,8 @@ _THUMB_SCALE = 0.4
 # back ok is worth remembering: the ledger exists so a later turn can tell what
 # already happened, and on which frame.
 READ_ONLY_TOOLS = frozenset({
-    "ccat_help", "list_scripts", "mark", "read_script", "view_shot",
+    "ccat_help", "list_scripts", "mark", "read_script", "view_crop",
+    "view_shot", "view_template",
 })
 
 # ponytail: capped so a tool whose text grows cannot bloat the ledger. Raise it

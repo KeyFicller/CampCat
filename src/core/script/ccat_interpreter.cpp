@@ -211,8 +211,7 @@ CcatInterpreter::tap_image(const std::string &_rel_path,
     if (!opt->found) {
         std::ostringstream oss;
         oss << "tap: image not found " << abs_path.string()
-            << " (best=" << opt->confidence
-            << " threshold=" << m_cfg->match.threshold << ")";
+            << match_verdict_text(*opt, m_cfg->match.threshold);
         return oss.str();
     }
 
@@ -257,8 +256,19 @@ std::optional<std::string> CcatInterpreter::swipe_templates_impl(
         return std::string("swipe: template unreadable");
     }
     if (!m_from->found || !m_to->found) {
-        return std::string(
-            "swipe: one or both templates not found on current screen");
+        // Which one failed, and how close each came: the old sentence named
+        // neither, and a swipe has two templates to tell apart.
+        std::ostringstream oss;
+        oss << "swipe: not found on the current screen:";
+        if (!m_from->found) {
+            oss << ' ' << _from_rel
+                << match_verdict_text(*m_from, m_cfg->match.threshold);
+        }
+        if (!m_to->found) {
+            oss << ' ' << _to_rel
+                << match_verdict_text(*m_to, m_cfg->match.threshold);
+        }
+        return oss.str();
     }
     if (!m_adb->swipe(m_from->center.x, m_from->center.y, m_to->center.x,
                       m_to->center.y, m_cfg->input.swipe_duration_ms)) {
@@ -325,8 +335,7 @@ CcatInterpreter::tap_offset_impl(const std::string &_rel_path, double _dx,
     if (!opt->found) {
         std::ostringstream oss;
         oss << "tap_offset: image not found " << abs_path.string()
-            << " (best=" << opt->confidence
-            << " threshold=" << m_cfg->match.threshold << ")";
+            << match_verdict_text(*opt, m_cfg->match.threshold);
         return oss.str();
     }
 
@@ -507,7 +516,7 @@ CcatInterpreter::wait_until_impl(const std::string &_rel_path, int _timeout_ms,
             dump_match_debug("wait_until", abs_path, screen, mr);
             std::ostringstream oss;
             oss << "wait_until: timeout after " << _timeout_ms << " ms for "
-                << _rel_path;
+                << _rel_path << match_verdict_text(mr, m_cfg->match.threshold);
             return oss.str();
         }
         if (auto sl = cooperative_sleep_ms(50, _should_stop)) {

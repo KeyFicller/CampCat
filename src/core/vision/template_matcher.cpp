@@ -138,4 +138,13 @@ cv::Mat template_matcher::annotate_debug(const cv::Mat &_screen_bgr,
     return out;
 }
 
+std::string match_verdict_text(const match_result &_r, double _threshold) {
+    char buf[128];
+    std::snprintf(buf, sizeof(buf),
+                  " (best=%.3f box=%d,%d,%d,%d threshold=%.3f)", _r.confidence,
+                  _r.bbox.x, _r.bbox.y, _r.bbox.width, _r.bbox.height,
+                  _threshold);
+    return buf;
+}
+
 } // namespace campcat
