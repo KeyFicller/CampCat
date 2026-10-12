@@ -21,6 +21,7 @@ import graph
 import models
 import observability
 import protocol
+import session
 import transport
 
 # Deltas are flushed at most this often. Batching keeps one long answer from
@@ -39,7 +40,7 @@ def handle_request(req: dict) -> Iterator[dict]:
         yield protocol.build_result(rid, True, "pong")
         return
     if rtype == "reset":
-        graph.reset_history()
+        session.reset()
         # A reset ends one conversation; the next turns get a fresh session id.
         observability.new_session()
         yield protocol.build_result(rid, True, turns=0)
@@ -47,7 +48,7 @@ def handle_request(req: dict) -> Iterator[dict]:
     if rtype == "memorize":
         # The conversation is already here, so only the current notes cross the
         # wire; the reply carries the rewritten ones back for the host to write.
-        notes = graph.memorize(req.get("memory") or "")
+        notes = session.memorize(req.get("memory") or "")
         if notes is None:
             yield protocol.build_error_result(rid, "memory not updated")
         else:

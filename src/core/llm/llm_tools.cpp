@@ -153,14 +153,17 @@ bool box_on_screen(int _img_w, int _img_h, int _x, int _y, int _w, int _h,
 }
 
 /// What to append to a refusal when the human redrew the box. Empty when they
-/// did not, so the caller keeps its own wording byte for byte.
+/// did not, so the caller keeps its own wording byte for byte. `_shot` names the
+/// frame the box was drawn on: `save_template` cuts from the number it is given,
+/// so a correction measured on an older frame must carry it back.
 std::string corrected_box_note(const llm::approval_decision &_d,
-                               const char *_tool) {
+                               const char *_tool, int _shot) {
     if (!_d.box) {
         return {};
     }
     return "; call " + std::string(_tool) +
-           " again with this corrected box {\"x\":" +
+           " again with this corrected box {\"shot\":" +
+           std::to_string(_shot) + ",\"x\":" +
            std::to_string(_d.box->x) + ",\"y\":" + std::to_string(_d.box->y) +
            ",\"w\":" + std::to_string(_d.box->w) +
            ",\"h\":" + std::to_string(_d.box->h) + "}";
@@ -461,6 +464,24 @@ CPP_REFLECT_TOOL(screenshot)
 
 [[= js::image_result]][[= js::doc{
     .text = js::str(
+        "Shows a screenshot you took earlier in this session again, by its "
+        "number. Frames leave the message list as the turn moves on, so use "
+        "this when you need to look at an older one before cutting a template "
+        "from it. It does not change the current screen: a tap still lands on "
+        "the newest one.")}]][[= js::param_docs(
+    js::str("Frame number from a screenshot caption."))]] std::string
+    view_shot(int shot) {
+    std::string error;
+    const screen_state *frame = frame_for(shot, &error);
+    if (frame == nullptr) {
+        throw js::bind_error(error);
+    }
+    return frame->png;
+}
+CPP_REFLECT_TOOL(view_shot)
+
+[[= js::image_result]][[= js::doc{
+    .text = js::str(
         "Draws a box on the last screenshot and returns the marked image, "
         "so the user can see where you think something is. Nothing is "
         "tapped and nothing needs approval; the box lives in the picture.")}]][
@@ -530,7 +551,7 @@ CPP_REFLECT_TOOL(mark)
                 decision.guidance.empty()
                     ? std::string("user rejected the tap")
                     : "user rejected the tap: " + decision.guidance;
-            msg += corrected_box_note(decision, "tap");
+            msg += corrected_box_note(decision, "tap", g_next_shot);
             throw js::bind_error(msg);
         }
     }
@@ -764,7 +785,8 @@ CPP_REFLECT_TOOL(save_script)
                 decision.guidance.empty()
                     ? std::string("user rejected saving the template")
                     : "user rejected saving the template: " + decision.guidance;
-            msg += corrected_box_note(decision, "save_template");
+            msg += corrected_box_note(decision, "save_template",
+                                      shot.value_or(g_next_shot));
             throw js::bind_error(msg);
         }
     }

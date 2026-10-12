@@ -1,39 +1,22 @@
 """LangGraph flow for the sidecar's conversation.
 
-Owns the conversation as a real message list. Older turns are summarized once
-the request approaches `models.context_tokens()`, so the whole conversation
-stays available to the model instead of being truncated by a fixed window.
+Moves one turn through the graph: build the request, call the model, run what it
+asks for, record it. The conversation itself -- its messages, memory and
+screenshots -- lives in `session.py`.
 """
 
 from __future__ import annotations
 
-import base64
-import functools
-import re
-import struct
 import sys
-import time
 from typing import Iterator, TypedDict
 
-from langchain.agents.middleware import SummarizationMiddleware
-from langchain.agents.middleware.summarization import count_tokens_approximately
-from langchain_core.messages import (
-    AIMessage,
-    HumanMessage,
-    RemoveMessage,
-    SystemMessage,
-    ToolMessage,
-)
+from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
 from langgraph.graph import END, StateGraph
-from langgraph.runtime import Runtime
 
 import models
 import observability
+import session
 import tools
-
-# Tools hand back PNG only, so the mime type is fixed here. Add a protocol field
-# if a tool ever returns another format.
-MIME = "image/png"
 
 # Rounds of tool calls allowed in one request. The C++ host caps tool calls the
 # same way, and its per-request deadline has to stay long enough for this many
@@ -48,13 +31,6 @@ NO_TOOLS_NOTE = (
     "do not emit any tool call markup."
 )
 
-# DeepSeek writes tool-call syntax into the text content when it wants a tool it
-# was not offered. Nothing else contains the token "DSML", so tags carrying it
-# are markup rather than answer: a whole block goes first, then any orphan half.
-_DSML_BLOCK = re.compile(r"<[^>]*DSML[^>]*>.*?</[^>]*DSML[^>]*>",
-                         re.IGNORECASE | re.DOTALL)
-_DSML_TAG = re.compile(r"</?[^>]*DSML[^>]*>", re.IGNORECASE)
-
 
 class TurnState(TypedDict, total=False):
     text: str       # request: this turn's instruction
@@ -62,141 +38,10 @@ class TurnState(TypedDict, total=False):
     memory: str     # request: long-term notes, read off disk by the host
     messages: list  # built by build_messages
     tool_rounds: int
+    frame_log: list  # built by run_tools: what this turn let through, frame by frame
     reply: str      # response: model output
     turns: int      # response: turns retained in the conversation
     error: str
-
-
-# Only the NDJSON read loop touches this, so it needs no lock.
-_MESSAGES: list = []
-
-# How many of _MESSAGES are already folded into the memory notes. Consolidation
-# runs on a timer through a session's life, so it has to skip what it has already
-# seen: re-summarizing the whole conversation every time would cost more each
-# round and let the notes drift on every pass.
-_MEMORIZED_UPTO = 0
-
-# The most recent screenshot, only so it can ride along as its own user turn in
-# build_messages. Kept out of _MESSAGES on purpose: a picture in the history is
-# re-sent on every later request and eventually summarized away. Every frame
-# stays addressable by its `shot` number, but the host keeps those; older frames
-# are not re-sent, only the last one is.
-_LATEST_NUM = 0
-_LATEST_B64 = ""
-# When those bytes were captured, as a wall clock. The ride-along frame carries
-# it so a later request can tell how stale the screen it is shown is. Not a
-# delta: across turns the gap would be the user's typing, not the device's.
-_LATEST_TIME = 0.0
-# Monotonic time of the previous screenshot in the turn now being served, or
-# None before its first one. Reset per turn, because only inside one turn are
-# two frames separated by device time instead of by the user thinking.
-_TURN_PREV_SHOT = None
-
-# Built lazily: both the budget and the model come from the environment, which
-# main.py loads from llm/.env before the first request. A summary lands in
-# _MESSAGES as the first HumanMessage, never as a SystemMessage: the summarizer
-# drops those, so build_messages prepends the prompt instead.
-_MW = None
-
-
-def reset_history() -> None:
-    """Drop every turn. The next request starts a fresh conversation."""
-    global _MW, _LATEST_NUM, _LATEST_B64, _LATEST_TIME, _MEMORIZED_UPTO, _TURN_PREV_SHOT
-    _MESSAGES.clear()
-    _LATEST_NUM = 0
-    _LATEST_B64 = ""
-    _LATEST_TIME = 0.0
-    _TURN_PREV_SHOT = None
-    _MW = None
-    _MEMORIZED_UPTO = 0
-
-
-def history_size() -> int:
-    """Turns currently kept verbatim; a summary does not count as a turn."""
-    return sum(1 for m in _MESSAGES if isinstance(m, AIMessage))
-
-
-def _transcript(messages: list) -> str:
-    """The conversation as plain text, for the memory model to read."""
-    lines: list[str] = []
-    for m in messages:
-        if isinstance(m, HumanMessage):
-            lines.append("User: " + _content_to_text(m.content))
-        elif isinstance(m, AIMessage):
-            lines.append("Assistant: " + _content_to_text(m.content))
-    return "\n\n".join(lines)
-
-
-def memorize(memory: str) -> str | None:
-    """Fold the turns since the last call into `memory`, returning the new notes.
-
-    Called between turns rather than during one, so the user is never waiting on
-    it. Returns `memory` unchanged when there is nothing new -- no model call --
-    and None when the call fails, which leaves the caller's file alone.
-    """
-    global _MEMORIZED_UPTO
-    if _MEMORIZED_UPTO >= len(_MESSAGES):
-        return memory
-    try:
-        model = models.build_memory_model()
-        instructions = models.MEMORY_INSTRUCTIONS.format(
-            max_chars=models.memory_max_chars()
-        )
-        with observability.turn("rewrite-memory") as callbacks:
-            reply = model.invoke([
-                SystemMessage(content=instructions),
-                HumanMessage(content=(
-                    "## Notes so far\n" + (memory.strip() or "(none)") +
-                    "\n\n## Session transcript\n" +
-                    _transcript(_MESSAGES[_MEMORIZED_UPTO:])
-                )),
-            ], config={"callbacks": callbacks})
-    except Exception as exc:  # noqa: BLE001 - a missed update, never fatal
-        print(f"[sidecar] memory not updated: {exc}", file=sys.stderr)
-        return None
-    text = strip_tool_markup(
-        _content_to_text(getattr(reply, "content", reply))
-    ).strip()
-    if not text:
-        return None
-    _MEMORIZED_UPTO = len(_MESSAGES)
-    return text
-
-
-def _middleware():
-    """Summarizes older turns once the request approaches the budget.
-
-    `keep` is a quarter of the budget. The history is text only -- screenshots
-    live outside it and only the latest one is re-sent, by `build_messages` --
-    so a quarter already covers many turns.
-    """
-    global _MW
-    if _MW is None:
-        counter = functools.partial(
-            count_tokens_approximately, tokens_per_image=models.TOKENS_PER_IMAGE
-        )
-        budget = models.context_tokens()
-        _MW = SummarizationMiddleware(
-            model=models.build_chat_model(),
-            trigger=("tokens", budget),
-            keep=("tokens", budget // 4),
-            token_counter=counter,
-        )
-    return _MW
-
-
-def _content_to_text(content: object) -> str:
-    if isinstance(content, str):
-        return content
-    if isinstance(content, list):
-        parts: list[str] = []
-        for block in content:
-            if isinstance(block, str):
-                parts.append(block)
-            elif isinstance(block, dict) and block.get("type") == "text":
-                parts.append(str(block.get("text", "")))
-        return "".join(parts)
-    return str(content)
 
 
 def precheck(state: TurnState) -> dict:
@@ -205,8 +50,7 @@ def precheck(state: TurnState) -> dict:
     Rejected here rather than at the model, so a stray space in the input box
     never turns into a paid round trip.
     """
-    global _TURN_PREV_SHOT
-    _TURN_PREV_SHOT = None
+    session.start_turn()
     text = (state.get("text") or "").strip()
     if not text:
         return {"error": "empty request"}
@@ -214,58 +58,24 @@ def precheck(state: TurnState) -> dict:
 
 
 def compact(state: TurnState) -> dict:
-    """Fold the oldest turns into a rolling summary once past the budget.
-
-    Summarizing rewrites the request prefix, which invalidates the provider's
-    prompt cache from that point on, so the summarizer's own hysteresis is what
-    keeps this rare. A failure here is skipped, never fatal: the request is
-    still far below the model's real limit, so it goes out unsummarized.
-    """
-    if not _MESSAGES:
-        return {}
-    try:
-        out = _middleware().before_model({"messages": list(_MESSAGES)}, Runtime())
-    except Exception as exc:  # noqa: BLE001 - summarizing must not lose history
-        print(f"[sidecar] summarization skipped: {exc}", file=sys.stderr)
-        return {}
-    if not out or "messages" not in out:
-        return {}
-    # Drop the RemoveMessage sentinel: it signals a reducer this list has none of.
-    _MESSAGES[:] = [m for m in out["messages"] if not isinstance(m, RemoveMessage)]
+    session.compact()
     return {}
 
 
 def build_messages(state: TurnState) -> dict:
-    """Assemble the model input from the conversation plus the current turn.
-
-    The most recent screenshot rides along as its own user turn, so a request
-    that follows a turn full of taps still opens on the screen the model last
-    looked at. Only the latest one: older frames are not re-sent, and the prefix
-    above stays byte-identical for the provider's prompt cache.
-    """
+    """The model input: prompt, conversation, the last screen, this turn's text."""
     messages: list[object] = [
         SystemMessage(
             content=models.system_prompt()
             + models.memory_block(state.get("memory") or "")
         )
     ]
-    messages.extend(_MESSAGES)
-    if _LATEST_NUM:
-        messages.append(
-            HumanMessage(content=_shot_content(
-                _shot_caption(_LATEST_NUM, "The last screenshot you took:",
-                              _LATEST_TIME)))
-        )
+    messages.extend(session.history())
+    frame = session.latest_frame()
+    if frame is not None:
+        messages.append(frame)
     messages.append(HumanMessage(content=state.get("text", "")))
     return {"messages": messages}
-
-
-def strip_tool_markup(text: str) -> str:
-    """Drop leaked tool-call markup, keeping whatever answer surrounds it."""
-    cleaned = _DSML_TAG.sub("", _DSML_BLOCK.sub("", text))
-    # A removed block leaves its own blank lines behind; one blank line is the
-    # most an answer should show where the markup used to be.
-    return re.sub(r"\n{3,}", "\n\n", cleaned).strip()
 
 
 def invoke(state: TurnState) -> dict:
@@ -298,7 +108,8 @@ def invoke(state: TurnState) -> dict:
 
     messages = list(state.get("messages") or [])
     messages.append(response)
-    text = strip_tool_markup(_content_to_text(getattr(response, "content", response)))
+    text = session.strip_tool_markup(
+        session.content_text(getattr(response, "content", response)))
     if not text and exhausted:
         # Tools are gone and the model said nothing usable, so say that rather
         # than showing an empty bubble the user would read as a hang. An empty
@@ -316,56 +127,6 @@ def invoke(state: TurnState) -> dict:
     return {"messages": messages, "reply": reply}
 
 
-def png_size(png_b64: str) -> tuple[int, int] | None:
-    """Width and height of a base64 PNG, read from its fixed-position IHDR.
-
-    The model names tap coordinates in these pixels, so it needs the exact size;
-    the image alone does not state its own resolution.
-    """
-    # Signature (8) + chunk length (4) + "IHDR" (4) + width (4) + height (4) = 24
-    # bytes, so the first 32 base64 characters already cover what we read.
-    try:
-        head = base64.b64decode(png_b64[:32])
-    except ValueError:  # binascii.Error, for a payload that is not base64
-        return None
-    if len(head) < 24 or not head.startswith(b"\x89PNG\r\n\x1a\n"):
-        return None
-    return struct.unpack(">II", head[16:24])
-
-
-def _shot_caption(shot: int, lead: str, captured: float = 0.0,
-                  since_previous: float | None = None) -> str:
-    """`lead` plus the number, size and time, which is what names this frame later.
-
-    `save_template`'s `shot` is this number and its box is in these pixels, so
-    both have to be on screen next to the picture. The time is what lets a wait
-    be reasoned about instead of guessed: `since_previous` is how long passed
-    between this frame and the one before it in the same turn.
-    """
-    size = png_size(_LATEST_B64)
-    parts = [f"#{shot}" + (f" ({size[0]}x{size[1]} pixels)" if size else "")]
-    if captured:
-        stamp = time.strftime("%H:%M:%S", time.localtime(captured))
-        parts.append(f"taken {stamp}.{int(captured * 1000) % 1000:03d}")
-    if since_previous is not None:
-        parts.append(f"+{since_previous:.1f}s since the previous screenshot")
-    return f"{lead} {', '.join(parts)}."
-
-
-def _shot_content(caption: str) -> list[dict]:
-    """The latest screenshot as user-turn content, for the model to look at.
-
-    A user turn, never a tool result: ChatDeepSeek json.dumps()es list content
-    on a `tool` message, so a data URL there is billed as text. One 1080x2400
-    screenshot cost 2.3M tokens that way, against ~1k here.
-    """
-    return [
-        {"type": "text", "text": caption},
-        {"type": "image_url",
-         "image_url": {"url": f"data:{MIME};base64,{_LATEST_B64}"}},
-    ]
-
-
 def run_tools(state: TurnState) -> dict:
     """Run the tool calls the model just asked for, one by one.
 
@@ -373,7 +134,6 @@ def run_tools(state: TurnState) -> dict:
     model as the tool's result rather than raised, so it can correct itself on
     the next round.
     """
-    global _LATEST_NUM, _LATEST_B64, _LATEST_TIME, _TURN_PREV_SHOT
     messages = list(state.get("messages") or [])
     calls = getattr(messages[-1], "tool_calls", None) or []
     results: list = []
@@ -383,6 +143,7 @@ def run_tools(state: TurnState) -> dict:
     # calls before it and reject the whole request (400 "insufficient tool
     # messages following tool_calls message").
     pictures: list = []
+    ledger: list[str] = list(state.get("frame_log") or [])
     for call in calls:
         name = call.get("name", "")
         args = call.get("args") or {}
@@ -392,38 +153,25 @@ def run_tools(state: TurnState) -> dict:
         else:
             content = "error: " + str(reply.get("error", ""))
         results.append(ToolMessage(content=content, tool_call_id=call.get("id", "")))
+        # Only what was let through: a refusal means nothing happened on the
+        # device or the disk, so writing it down would have a later turn rebuild
+        # a step the user explicitly rejected.
+        if reply.get("ok") and name not in session.READ_ONLY_TOOLS:
+            ledger.append(session.ledger_line(name, args, reply))
         image = reply.get("image_b64") or ""
         if not image:
             continue
         if name == "screenshot":
-            shot = reply.get("shot")
-            if not isinstance(shot, int) or isinstance(shot, bool) or shot <= 0:
-                # No number from the host: a picture nobody can name later is
-                # worse than no picture, because a cut box would have no frame
-                # to be checked against.
-                continue
-            now = time.monotonic()
-            since = None if _TURN_PREV_SHOT is None else now - _TURN_PREV_SHOT
-            _TURN_PREV_SHOT = now
-            _LATEST_NUM, _LATEST_B64 = shot, image
-            _LATEST_TIME = time.time()
-            pictures.append(
-                HumanMessage(content=_shot_content(
-                    _shot_caption(shot, "Screenshot", _LATEST_TIME, since)))
-            )
+            frame = session.screenshot_frame(reply.get("shot"), image)
+            if frame is not None:
+                pictures.append(frame)
+        elif name == "view_shot":
+            pictures.append(session.recall_frame(args.get("shot"), image))
         else:
-            # Every other image tool returns a marked-up copy for the user to
-            # look at. It is not stored: its box and label would be baked into
-            # any template cut from it.
-            pictures.append(
-                HumanMessage(content=[
-                    {"type": "text", "text": f"Image after {name}."},
-                    {"type": "image_url",
-                     "image_url": {"url": f"data:{MIME};base64,{image}"}},
-                ])
-            )
-    return {"messages": messages + results + pictures,
-            "tool_rounds": state.get("tool_rounds", 0) + 1}
+            pictures.append(session.picture_of(name, image))
+    return {"messages": session.demote_pictures(messages + results + pictures),
+            "tool_rounds": state.get("tool_rounds", 0) + 1,
+            "frame_log": ledger}
 
 
 def route_after_invoke(state: TurnState) -> str:
@@ -446,11 +194,10 @@ def commit(state: TurnState) -> dict:
     that, and only once the budget is reached.
     """
     if state.get("error"):
-        return {"turns": history_size()}
-
-    _MESSAGES.append(HumanMessage(content=state.get("text", "")))
-    _MESSAGES.append(AIMessage(content=state.get("reply", "")))
-    return {"turns": history_size()}
+        return {"turns": session.size()}
+    session.append_turn(state.get("text", ""), state.get("reply", ""),
+                        state.get("frame_log") or [])
+    return {"turns": session.size()}
 
 
 def route_after_precheck(state: TurnState) -> str:
@@ -523,7 +270,7 @@ def stream_turn(state: TurnState,
             if step != last_step:
                 last_step = step
                 gap_pending = emitted
-            text = _content_to_text(getattr(chunk, "content", ""))
+            text = session.content_text(getattr(chunk, "content", ""))
             if not text:
                 yield (False, "")
                 continue
