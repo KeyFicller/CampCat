@@ -35,7 +35,9 @@ jobs:
           # The Dockerfile copies nothing in, so its own directory is the whole
           # context -- that keeps build/ and .venv away from the daemon.
           context: docker
-          file: campcat-toolchain.Dockerfile
+          # Relative to the repo root, not to `context` -- buildx resolves -f
+          # against the working directory.
+          file: docker/campcat-toolchain.Dockerfile
           platforms: linux/amd64
           push: true
           # Same string as the `container:` image in .github/workflows/ci.yml.
