@@ -3,6 +3,7 @@
 #include "ccat_driver/ccat_program_runner.h" // run_ccat_program
 #include "core/adb_client.h"
 #include "core/app_config.h"
+#include "core/box_snap.h"
 #include "core/script/ccat_bundle.h" // bundle_main / bundle_names / ...
 #include "core/script/ccat_parser.h" // parse_program / parse_error
 
@@ -328,6 +329,57 @@ cv::Mat check_template_target(const std::string &_bundle,
     return img;
 }
 
+/// The current screen as pixels, or an empty Mat when there is nothing to
+/// decode. Only `tap` needs this: it takes no `shot`, and every other tool that
+/// takes a box already holds the picture it is about to act on.
+cv::Mat current_screen_mat() {
+    cv::Mat frame;
+    std::string error;
+    if (!frame_mat(std::nullopt, &frame, &error)) {
+        // An empty frame reads as "do not snap" downstream, which is the right
+        // answer: tapping must not fail because an optional refinement could not.
+        return {};
+    }
+    return frame;
+}
+
+/// The box to act on, after the model's box has been through the optional CV
+/// snap. The switch is checked by the caller, before it spends anything on the
+/// frame: with the snap off, a tap decodes nothing.
+///
+/// An empty `_frame` is not an error here: it means the snap cannot run, and the
+/// model's own box is returned untouched.
+rect snap_model_box(const cv::Mat &_frame, const rect &_box,
+                    const box_snap_config &_cfg) {
+    box_snap_options opts;
+    opts.strategy = _cfg.strategy;
+    const box_snap_result snapped =
+        snap_box(_frame, cv::Rect(_box.x, _box.y, _box.w, _box.h), opts);
+    if (!snapped.moved) {
+        return _box;
+    }
+    return rect{snapped.box.x, snapped.box.y, snapped.box.width,
+                snapped.box.height};
+}
+
+/// Appended to a tool's success sentence when the snap moved the box, so the
+/// model learns its own numbers were adjusted instead of believing the tool used
+/// them. Empty when the box came through unchanged, which keeps that wording
+/// byte for byte what it was.
+///
+/// Shorter than `corrected_box_note` on purpose: that one asks the model to call
+/// again with the human's box, while this call has already happened.
+std::string snapped_box_note(const rect &_from, const rect &_to) {
+    if (_from.x == _to.x && _from.y == _to.y && _from.w == _to.w &&
+        _from.h == _to.h) {
+        return {};
+    }
+    return " (box " + std::to_string(_from.x) + "," + std::to_string(_from.y) +
+           " " + std::to_string(_from.w) + "x" + std::to_string(_from.h) +
+           " snapped to " + std::to_string(_to.x) + "," + std::to_string(_to.y) +
+           " " + std::to_string(_to.w) + "x" + std::to_string(_to.h) + ")";
+}
+
 /// How a template request names the frame it cuts from, for the approval
 /// bubble.
 std::string shot_phrase(const std::optional<int> &_shot) {
@@ -531,16 +583,31 @@ CPP_REFLECT_TOOL(mark)
     if (!box_on_screen(g_ctx.screen.w, g_ctx.screen.h, x, y, w, h, &error)) {
         throw js::bind_error(error);
     }
+    // Snap first, then use that box everywhere below: the human's preview, the
+    // tap point and the sentence sent back all describe one box, so a person
+    // approving what they see is approving what happens.
+    const rect given{x, y, w, h};
+    const box_snap_config snap =
+        g_ctx.cfg != nullptr ? g_ctx.cfg->box_snap : box_snap_config{};
+    const rect use =
+        snap.enabled ? snap_model_box(current_screen_mat(), given, snap) : given;
     if (needs_approval("tap")) {
         if (!g_ctx.request_approval) {
             throw js::bind_error("no human available to approve the tap");
         }
         llm::approval_request req;
         req.tool = "tap";
-        req.summary = "Tap the highlighted element (" + std::to_string(w) +
-                      "x" + std::to_string(h) + " at " + std::to_string(x) +
-                      "," + std::to_string(y) + ")";
-        req.highlight.push_back(rect{x, y, w, h});
+        req.summary = "Tap the highlighted element (" +
+                      std::to_string(use.w) + "x" + std::to_string(use.h) +
+                      " at " + std::to_string(use.x) + "," +
+                      std::to_string(use.y) + ")";
+        req.highlight.push_back(use);
+        // Only when they differ: an identical second frame would just draw over
+        // the first.
+        if (use.x != given.x || use.y != given.y || use.w != given.w ||
+            use.h != given.h) {
+            req.given_box = given;
+        }
         req.screen_png = g_ctx.screen.png;
         req.box_editable = true;
         const llm::approval_decision decision = g_ctx.request_approval(req);
@@ -558,13 +625,14 @@ CPP_REFLECT_TOOL(mark)
     // The tap lands at the box centre: the model marks the element, this picks
     // the point. It used to send the centre as a separate tap() argument every
     // time.
-    const int cx = x + w / 2;
-    const int cy = y + h / 2;
+    const int cx = use.x + use.w / 2;
+    const int cy = use.y + use.h / 2;
     if (!require_adb().tap(cx, cy)) {
         throw js::bind_error(std::string("adb tap failed") +
                              std::string(k_device_hint));
     }
-    return "tapped " + std::to_string(cx) + "," + std::to_string(cy);
+    return "tapped " + std::to_string(cx) + "," + std::to_string(cy) +
+           snapped_box_note(given, use);
 }
 CPP_REFLECT_TOOL(tap)
 
@@ -762,6 +830,12 @@ CPP_REFLECT_TOOL(save_script)
     std::string frame_png;
     const cv::Mat img =
         check_template_target(bundle, name, box, shot, &file, &frame_png);
+    // Given box first, so a bad one is refused on its own terms; then the snap,
+    // against the very frame this cut comes from. Everything below cuts, previews
+    // and reports `use`, so what the human approves is what lands on disk.
+    const box_snap_config snap =
+        g_ctx.cfg != nullptr ? g_ctx.cfg->box_snap : box_snap_config{};
+    const rect use = snap.enabled ? snap_model_box(img, box, snap) : box;
     if (needs_approval("save_template")) {
         if (!g_ctx.request_approval) {
             throw js::bind_error(
@@ -770,10 +844,14 @@ CPP_REFLECT_TOOL(save_script)
         llm::approval_request req;
         req.tool = "save_template";
         req.summary = "Save template \"" + bundle + "/" + file + "\" from " +
-                      shot_phrase(shot) + " at (" + std::to_string(x) + "," +
-                      std::to_string(y) + ") " + std::to_string(w) + "x" +
-                      std::to_string(h);
-        req.highlight.push_back(box);
+                      shot_phrase(shot) + " at (" + std::to_string(use.x) + "," +
+                      std::to_string(use.y) + ") " + std::to_string(use.w) +
+                      "x" + std::to_string(use.h);
+        req.highlight.push_back(use);
+        if (use.x != box.x || use.y != box.y || use.w != box.w ||
+            use.h != box.h) {
+            req.given_box = box;
+        }
         // The frame the model named, not the current screen: that is what is
         // being cut, and seeing it is how the human notices a box aimed at the
         // wrong one.
@@ -798,7 +876,8 @@ CPP_REFLECT_TOOL(save_script)
         // times before it is tight, and refusing would push the model to invent
         // new names and rewrite the script, costing another approval of the
         // whole script.
-        if (!cv::imwrite(path.string(), img(cv::Rect(x, y, w, h)))) {
+        if (!cv::imwrite(path.string(),
+                         img(cv::Rect(use.x, use.y, use.w, use.h)))) {
             throw js::bind_error("could not write " + bundle + "/" + file);
         }
     } catch (const cv::Exception &e) {
@@ -806,10 +885,10 @@ CPP_REFLECT_TOOL(save_script)
                              e.what());
     }
     return std::string(existed ? "overwrote" : "saved") + " template \"" +
-           bundle + "/" + file + "\" (" + std::to_string(w) + "x" +
-           std::to_string(h) + " at " + std::to_string(x) + "," +
-           std::to_string(y) + "); use it as tap(\"" + file +
-           "\") inside that bundle's script";
+           bundle + "/" + file + "\" (" + std::to_string(use.w) + "x" +
+           std::to_string(use.h) + " at " + std::to_string(use.x) + "," +
+           std::to_string(use.y) + "); use it as tap(\"" + file +
+           "\") inside that bundle's script" + snapped_box_note(box, use);
 }
 CPP_REFLECT_TOOL(save_template)
 

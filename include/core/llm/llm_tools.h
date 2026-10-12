@@ -36,6 +36,10 @@ struct approval_request {
     /// Whether the human may redraw this box (tap / save_template set it). The
     /// UI keys on this flag, so it never has to know tool names.
     bool box_editable = false;
+    /// The box the model gave, set only when it is not the one being acted on
+    /// (the optional CV snap moved it). The UI draws this one thin and dim, so
+    /// the human sees both what was asked for and what will actually happen.
+    std::optional<rect> given_box;
 };
 
 /// How a human answered an approval_request. `guidance` and `box` are both

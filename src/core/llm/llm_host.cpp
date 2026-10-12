@@ -674,7 +674,8 @@ llm_approval llm_host::pending_approval() const {
     std::lock_guard<std::mutex> lk(m_approval_mu);
     return llm_approval{m_approval_pending,       m_next_approval_id,
                         m_approval_req.tool,      m_approval_req.summary,
-                        m_approval_req.highlight, m_approval_req.box_editable};
+                        m_approval_req.highlight, m_approval_req.box_editable,
+                        m_approval_req.given_box};
 }
 
 std::string llm_host::approval_screen_png() const {

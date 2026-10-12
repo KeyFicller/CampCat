@@ -5,6 +5,8 @@
 
 #include <nlohmann/json.hpp>
 
+#include "core/box_snap.h"
+
 namespace campcat {
 
 /**
@@ -76,6 +78,20 @@ struct approval_config {
     approval_gates gates{};
 };
 
+/// Pulling the boxes the model gives onto the element's boundary, on the way to
+/// acting on them. See `core/box_snap.h` for what a snap does and what it costs.
+struct box_snap_config {
+    /// On by default. Measurement says the net gain is close to zero and one
+    /// kind of element (a glowing or soft-edged button) comes out worse, so this
+    /// is the whole kill switch: off restores the old behaviour exactly.
+    bool enabled = true;
+    /// Which strategy. `otsu` is the more conservative of the two: it leaves two
+    /// of the three test elements exactly as the model gave them and improves the
+    /// third. `step` wins bigger on one element (18px -> 10px) but worsens
+    /// another by 3px.
+    box_snap_strategy strategy = box_snap_strategy::otsu;
+};
+
 /**
  * @brief Shell JSON document loaded from disk: adb settings, matchers
  * heuristic defaults, scheduler, persistence paths.
@@ -90,6 +106,7 @@ struct app_config {
     input_config input{};
     match_config match{};
     approval_config approval{};
+    box_snap_config box_snap{};
     scheduler_config scheduler{};
 
     /**

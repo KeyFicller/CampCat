@@ -35,6 +35,9 @@ struct llm_approval {
     std::string summary;
     std::vector<llm::rect> highlight;
     bool box_editable = false; ///< Whether the human may redraw this box
+    /// The box the model gave, when the snap moved it: a second, thinner frame
+    /// so the human can compare the two. Empty when they are the same box.
+    std::optional<llm::rect> given_box;
 };
 
 /// How long an idle consolidation may take. One model call and a file write, so

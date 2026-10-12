@@ -823,6 +823,26 @@ void draw_approval_settings(campcat::app_config &_c) {
     if (master_off) {
         ImGui::EndDisabled();
     }
+    ImGui::Separator();
+    // Not an approval gate: the snap is something the tool does on the way to
+    // acting. It sits here because this is where a human comes when a tap landed
+    // wrong, and it needs the same kind of kill switch.
+    ImGui::Checkbox("Snap boxes to element edges", &_c.box_snap.enabled);
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip(
+            "Pull the model's box onto the element before tapping or cutting "
+            "it. The measured gain is small and one kind of element (a glowing "
+            "or soft-edged button) comes out worse, so turn this off to restore "
+            "the old behaviour exactly.");
+    }
+    ImGui::BeginDisabled(!_c.box_snap.enabled);
+    int strategy = _c.box_snap.strategy == campcat::box_snap_strategy::step ? 1 : 0;
+    ImGui::RadioButton("Otsu blobs", &strategy, 0);
+    ImGui::SameLine();
+    ImGui::RadioButton("Edge step", &strategy, 1);
+    _c.box_snap.strategy = strategy == 1 ? campcat::box_snap_strategy::step
+                                         : campcat::box_snap_strategy::otsu;
+    ImGui::EndDisabled();
     ImGui::EndPopup();
 }
 
@@ -893,7 +913,9 @@ void draw_annotation_window() {
     bool open = true;
     if (ImGui::Begin("Correct the box", &open)) {
         ImGui::TextDisabled(
-            "Drag a new box on the image. The thin one is the model's.");
+            a.given_box
+                ? "Drag a new box. Thin: the model's. Solid: after snapping."
+                : "Drag a new box on the image. The thin one is the model's.");
         // Two rows below the canvas: the box readout and the button row.
         const float footer = ImGui::GetFrameHeightWithSpacing() * 2.0F;
         ImGui::BeginChild("annot_scroll", ImVec2(0.0F, -footer),
@@ -943,14 +965,27 @@ void draw_annotation_window() {
             }
         }
         ImDrawList *dl = ImGui::GetWindowDrawList();
-        // The model's box stays visible under the redraw: how much the user
-        // moved it is the whole point of this window.
+        // What the user is correcting, plus the box the model gave when the snap
+        // moved it: without the model's own box on screen there is nothing to
+        // judge the snap against. The model's is a different colour and a thinner
+        // line, the same encoding the approval bubble uses, so "which is which"
+        // does not depend on telling two offsets apart.
         for (const campcat::llm::rect &r : a.highlight) {
             dl->AddRect(ImVec2(mn.x + static_cast<float>(r.x),
                                mn.y + static_cast<float>(r.y)),
                         ImVec2(mn.x + static_cast<float>(r.x + r.w),
                                mn.y + static_cast<float>(r.y + r.h)),
-                        IM_COL32(255, 200, 60, 130), 0.0F, 0, 1.0F);
+                        a.given_box ? IM_COL32(255, 200, 60, 230)
+                                    : IM_COL32(255, 200, 60, 130),
+                        0.0F, 0, a.given_box ? 2.0F : 1.0F);
+        }
+        if (a.given_box) {
+            const campcat::llm::rect &r = *a.given_box;
+            dl->AddRect(ImVec2(mn.x + static_cast<float>(r.x),
+                               mn.y + static_cast<float>(r.y)),
+                        ImVec2(mn.x + static_cast<float>(r.x + r.w),
+                               mn.y + static_cast<float>(r.y + r.h)),
+                        IM_COL32(200, 120, 255, 220), 0.0F, 0, 1.0F);
         }
         if (g_annot_dragging || g_annot_has_box) {
             const int x0 = g_annot_dragging ? g_annot_ax : g_annot_x0;
@@ -1064,8 +1099,25 @@ void draw_approval_bubble(const campcat::llm_approval &_a) {
             dl->AddRectFilled(p0, p1, IM_COL32(255, 200, 60, 48));
             dl->AddRect(p0, p1, IM_COL32(255, 200, 60, 230), 0.0F, 0, 2.0F);
         }
+        // The box the model gave, when the snap moved it. A different colour, not
+        // just a thinner line: the preview is drawn at ~0.16 scale on a phone
+        // resolution, so a 20px snap is a 3px offset and the two frames would read
+        // as one if they were both yellow.
+        if (_a.given_box) {
+            const campcat::llm::rect &r = *_a.given_box;
+            dl->AddRect(
+                ImVec2(origin.x + static_cast<float>(r.x) * scale,
+                       origin.y + static_cast<float>(r.y) * scale),
+                ImVec2(origin.x + static_cast<float>(r.x + r.w) * scale,
+                       origin.y + static_cast<float>(r.y + r.h) * scale),
+                IM_COL32(200, 120, 255, 220), 0.0F, 0, 1.0F);
+        }
         if (dbl) {
             open_annotation(_a);
+        }
+        if (_a.given_box) {
+            ImGui::TextDisabled(
+                "Thin frame: the box the model gave. Solid: after snapping.");
         }
     }
     if (_a.box_editable) {

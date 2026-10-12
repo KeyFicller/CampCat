@@ -193,6 +193,7 @@ add_library(campcat_core STATIC
   src/core/mumu/mumu_launcher.cpp
   src/core/vision/template_matcher.cpp
   src/core/vision/screen_template_ops.cpp
+  src/core/vision/box_snap.cpp
   src/core/config/app_config.cpp
   src/core/automation/automation_factory.cpp
   src/core/app/scheduler.cpp
