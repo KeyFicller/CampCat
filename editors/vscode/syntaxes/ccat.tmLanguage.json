@@ -1,0 +1,62 @@
+{
+  "scopeName": "source.ccat",
+  "patterns": [
+    { "include": "#comment" },
+    { "include": "#string" },
+    { "include": "#unterminated-string" },
+    { "include": "#directive" },
+    { "include": "#number" },
+    { "include": "#constant" },
+    { "include": "#control" },
+    { "include": "#statement" },
+    { "include": "#defs" },
+    { "include": "#punctuation" }
+  ],
+  "repository": {
+    "comment": {
+      "match": "//.*$",
+      "name": "comment.line.double-slash.ccat"
+    },
+    "string": {
+      "match": "\"(\\\\.|[^\"\\\\])*\"",
+      "name": "string.quoted.double.ccat"
+    },
+    "unterminated-string": {
+      "match": "\"(\\\\.|[^\"\\\\])*$",
+      "name": "string.quoted.double.ccat"
+    },
+    "directive": {
+      "match": "(\\$)(\\w+)(\\s+(On|Off|on|off))?",
+      "name": "meta.directive.ccat",
+      "captures": {
+        "1": { "name": "keyword.other.directive.ccat" },
+        "2": { "name": "keyword.other.directive.ccat" },
+        "4": { "name": "constant.language.ccat" }
+      }
+    },
+    "number": {
+      "match": "(?<![\\w.-])-?[0-9]+(\\.[0-9]+)?(?![\\w.-])",
+      "name": "constant.numeric.ccat"
+    },
+    "constant": {
+      "match": "(?<![\\w.-])(true|false)(?![\\w.-])",
+      "name": "constant.language.ccat"
+    },
+    "control": {
+      "match": "(?<![\\w.-])(if|elif|else|do|while|loop|break|return)(?![\\w.-])",
+      "name": "keyword.control.ccat"
+    },
+    "statement": {
+      "match": "(?<![\\w.-])(tap_offset|wait_until|swipe_at|tap_at|swipe|wait|home|tap|log|run|has)(?![\\w.-])",
+      "name": "support.function.ccat"
+    },
+    "defs": {
+      "match": "(?<![\\w.-])(defs)(?![\\w.-])",
+      "name": "keyword.other.ccat"
+    },
+    "punctuation": {
+      "match": "[(){},;=]",
+      "name": "punctuation.ccat"
+    }
+  }
+}

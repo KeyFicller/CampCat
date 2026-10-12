@@ -1,0 +1,66 @@
+{
+  "defs block": {
+    "prefix": "defs",
+    "body": ["defs {", "\t${1:name} = \"${2:x.png}\"", "}"],
+    "description": "defs block with one string template"
+  },
+  "if": {
+    "prefix": "if",
+    "body": ["if (has(\"${1:x.png}\")) {", "\t$0", "}"],
+    "description": "if branch on a template being on screen"
+  },
+  "if else": {
+    "prefix": "ifelse",
+    "body": [
+      "if (has(\"${1:x.png}\")) {",
+      "\t${2}",
+      "} else {",
+      "\t$0",
+      "}"
+    ],
+    "description": "if / else"
+  },
+  "if elif else": {
+    "prefix": "ifelif",
+    "body": [
+      "if (has(\"${1:x.png}\")) {",
+      "\t${2}",
+      "} elif (has(\"${3:y.png}\")) {",
+      "\t${4}",
+      "} else {",
+      "\t$0",
+      "}"
+    ],
+    "description": "if / elif / else chain"
+  },
+  "loop": {
+    "prefix": "loop",
+    "body": ["loop(${1:3}) {", "\t$0", "}"],
+    "description": "loop a fixed number of times"
+  },
+  "do while": {
+    "prefix": "dowhile",
+    "body": ["do {", "\t${1}", "} while (has(\"${2:x.png}\"))"],
+    "description": "do / while"
+  },
+  "tap": {
+    "prefix": "tap",
+    "body": ["tap(\"${1:x.png}\")"],
+    "description": "tap the center of a matched template"
+  },
+  "wait_until": {
+    "prefix": "wait_until",
+    "body": ["wait_until(\"${1:x.png}\", ${2:5000})"],
+    "description": "poll for a template, timeout in ms"
+  },
+  "log": {
+    "prefix": "log",
+    "body": ["log(\"${1:msg}\")"],
+    "description": "write one log line"
+  },
+  "debug": {
+    "prefix": "debug",
+    "body": ["\\$Debug ${1|On,Off|}"],
+    "description": "$Debug On|Off directive"
+  }
+}

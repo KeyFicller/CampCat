@@ -1,0 +1,40 @@
+{
+  "name": "ccat",
+  "displayName": "CCAT",
+  "description": "Syntax highlighting and snippets for CampCat (.ccat) scripts",
+  "version": "0.1.0",
+  "publisher": "campcat",
+  "engines": {
+    "vscode": "^1.75.0"
+  },
+  "categories": [
+    "Programming Languages"
+  ],
+  "contributes": {
+    "languages": [
+      {
+        "id": "ccat",
+        "aliases": [
+          "CCAT"
+        ],
+        "extensions": [
+          ".ccat"
+        ],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "ccat",
+        "scopeName": "source.ccat",
+        "path": "./syntaxes/ccat.tmLanguage.json"
+      }
+    ],
+    "snippets": [
+      {
+        "language": "ccat",
+        "path": "./snippets/ccat.json"
+      }
+    ]
+  }
+}
