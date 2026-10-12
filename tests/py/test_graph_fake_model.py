@@ -12,7 +12,7 @@ import tools
 from langchain_core.language_models.fake_chat_models import (
     FakeMessagesListChatModel,
 )
-from langchain_core.messages import AIMessage
+from langchain_core.messages import AIMessage, ToolMessage
 
 # Shape only: ScriptedModel ignores what it is bound to. The schemas the host
 # really sends are reflection-generated on the C++ side.
@@ -59,7 +59,12 @@ def test_tool_round_then_answer(monkeypatch, scripted):
     assert [c[0] for c in calls] == ["tap"]              # the tool ran once
     assert "Done." in text                               # the second round answered
     assert not out.get("error")
-    assert "tap x=2407 y=142 w=77 h=99" in session.history()[-1].content
+    # The turn is kept as it happened: the model's own call and the host's own
+    # result, not a written-up line about them.
+    kept = session.history()
+    assert [c["name"] for m in kept if isinstance(m, AIMessage)
+            for c in (m.tool_calls or [])] == ["tap"]
+    assert [m.content for m in kept if isinstance(m, ToolMessage)] == ["tapped"]
 
 
 def test_stock_fake_model_cannot_be_bound(monkeypatch):

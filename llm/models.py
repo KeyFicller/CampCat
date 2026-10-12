@@ -169,7 +169,10 @@ DEFAULT_SYSTEM_PROMPT = PERSONA + "\n\n" + "\n\n".join(
     f"## {name}\n\n{body}" for name, body in RULES.items()
 )
 DEFAULT_MAX_TOKENS = 1024
-DEFAULT_CONTEXT_TOKENS = 32000
+# The line compaction triggers at, not the size afterwards: `keep` is a quarter
+# of it. The model in use has a 1,048,576-token window, verified against the
+# provider, so this sits at about a fifth of it.
+DEFAULT_CONTEXT_TOKENS = 200000
 # The memory rewrite is a longer output than a reply: it replaces up to
 # `DEFAULT_MEMORY_MAX_CHARS` characters in one go.
 DEFAULT_MEMORY_MAX_TOKENS = 4096

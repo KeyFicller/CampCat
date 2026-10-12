@@ -1,4 +1,4 @@
-"""The conversation's own state: its messages, its memory, its frames, its ledger.
+"""The conversation's own state: its messages, its memory, its frames.
 
 `graph.py` runs the flow; everything that outlives one round lives here. The
 module holds a single conversation, as the sidecar serves one at a time.
@@ -7,7 +7,6 @@ module holds a single conversation, as the sidecar serves one at a time.
 from __future__ import annotations
 
 import base64
-import functools
 import io
 import re
 import struct
@@ -21,6 +20,7 @@ from langchain_core.messages import (
     HumanMessage,
     RemoveMessage,
     SystemMessage,
+    ToolMessage,
 )
 from langgraph.runtime import Runtime
 
@@ -59,18 +59,6 @@ _THUMB_PX = 960
 # locally, against the 1.35 s each full one costs on the wire -- so this is the
 # sidecar's own business, and the host sends only the full frame.
 _THUMB_SCALE = 0.4
-
-# Tools that only read, or only draw for the human. Everything else that comes
-# back ok is worth remembering: the ledger exists so a later turn can tell what
-# already happened, and on which frame.
-READ_ONLY_TOOLS = frozenset({
-    "ccat_help", "list_scripts", "mark", "read_script", "view_crop",
-    "view_shot", "view_template",
-})
-
-# ponytail: capped so a tool whose text grows cannot bloat the ledger. Raise it
-# if a recorded tool starts returning something longer that matters.
-_LEDGER_CHARS = 80
 
 # DeepSeek writes tool-call syntax into the text content when it wants a tool it
 # was not offered. Nothing else contains the token "DSML", so tags carrying it
@@ -115,10 +103,18 @@ _TURN_PREV_SHOT = None
 # drops those, so build_messages prepends the prompt instead.
 _MW = None
 
+# The opening message of each turn carries this id prefix, so `size()` can count
+# turns without guessing from the rounds in between, and a compaction that folds
+# whole turns away lowers the count on its own. `Message.id` never goes to the
+# provider, so the mark costs nothing on the wire.
+_TURN_MARK = "turn"
+_TURN_SEQ = 0
+
 
 def reset() -> None:
     """Drop every turn. The next request starts a fresh conversation."""
     global _MW, _LATEST_NUM, _LATEST_B64, _LATEST_TIME, _MEMORIZED_UPTO, _TURN_PREV_SHOT
+    global _TURN_SEQ
     _MESSAGES.clear()
     _LATEST_NUM = 0
     _LATEST_B64 = ""
@@ -126,11 +122,13 @@ def reset() -> None:
     _TURN_PREV_SHOT = None
     _MW = None
     _MEMORIZED_UPTO = 0
+    _TURN_SEQ = 0
 
 
 def size() -> int:
     """Turns currently kept verbatim; a summary does not count as a turn."""
-    return sum(1 for m in _MESSAGES if isinstance(m, AIMessage))
+    return sum(1 for m in _MESSAGES
+               if isinstance(m.id, str) and m.id.startswith(_TURN_MARK))
 
 
 def history() -> list:
@@ -148,19 +146,19 @@ def start_turn() -> None:
     _TURN_PREV_SHOT = None
 
 
-def append_turn(text: str, reply: str, ledger: list) -> None:
-    """Add the turn to the conversation, ledger folded into the stored reply.
+def append_turn(text: str, raw: list) -> None:
+    """Add one turn to the conversation, as it really happened.
 
-    The ledger leads the reply rather than trailing it, so the model reads what
-    it did before the prose describing it. It never comes back out either way:
-    it is for the model's own history, while `reply` is what the UI shows.
+    `raw` is the turn's own messages: the model's calls and the host's own
+    results. Keeping those lets a later turn read what actually came back,
+    which a written-up line per call could not. Pictures lose their bytes --
+    only the newest frame is re-sent, by `latest_frame` -- but keep their
+    captions, and a caption is where the frame number lives.
     """
-    if ledger:
-        reply = ("### Actions In Current Turn (For Script Tracking)\n"
-                 + "\n".join("- " + line for line in ledger)
-                 + "\n\n" + reply.lstrip())
-    _MESSAGES.append(HumanMessage(content=text))
-    _MESSAGES.append(AIMessage(content=reply))
+    global _TURN_SEQ
+    _TURN_SEQ += 1
+    _MESSAGES.append(HumanMessage(content=text, id=f"{_TURN_MARK}:{_TURN_SEQ}"))
+    _MESSAGES.extend(_detach_picture(m) if _is_picture(m) else m for m in raw)
 
 
 def memorize(memory: str) -> str | None:
@@ -205,9 +203,34 @@ def _transcript(messages: list) -> str:
     for m in messages:
         if isinstance(m, HumanMessage):
             lines.append("User: " + content_text(m.content))
+        elif isinstance(m, ToolMessage):
+            lines.append("Tool result: " + content_text(m.content))
         elif isinstance(m, AIMessage):
-            lines.append("Assistant: " + content_text(m.content))
+            for call in m.tool_calls or []:
+                lines.append(f"Tool call {call.get('name')} {call.get('args')}")
+            text = content_text(m.content)
+            if text:
+                lines.append("Assistant: " + text)
     return "\n\n".join(lines)
+
+
+def _tokens(messages: list) -> int:
+    """Provider-reported size of the last request, plus what came after it.
+
+    `usage_metadata['total_tokens']` is what the provider really charged for
+    that request, and the next prompt is that plus the reply it produced, so
+    anchoring there beats approximating the whole list. Only the messages after
+    it are unknown, and at compaction time there usually are none.
+    """
+    for i in range(len(messages) - 1, -1, -1):
+        meta = getattr(messages[i], "usage_metadata", None)
+        if meta and meta.get("total_tokens"):
+            return int(meta["total_tokens"]) + count_tokens_approximately(
+                messages[i + 1:], tokens_per_image=models.TOKENS_PER_IMAGE
+            )
+    return count_tokens_approximately(
+        messages, tokens_per_image=models.TOKENS_PER_IMAGE
+    )
 
 
 def _middleware():
@@ -219,15 +242,12 @@ def _middleware():
     """
     global _MW
     if _MW is None:
-        counter = functools.partial(
-            count_tokens_approximately, tokens_per_image=models.TOKENS_PER_IMAGE
-        )
         budget = models.context_tokens()
         _MW = SummarizationMiddleware(
             model=models.build_chat_model(),
             trigger=("tokens", budget),
             keep=("tokens", budget // 4),
-            token_counter=counter,
+            token_counter=_tokens,
         )
     return _MW
 
@@ -462,32 +482,6 @@ def demote_pictures(messages: list, keep: int | None = None) -> list:
         elif n >= 1:
             messages[i] = _shrink_picture(messages[i])
     return messages
-
-
-def ledger_line(name: str, args: dict, reply: dict) -> str:
-    """One ledger line for a tool that ran: what it did, and on which frame.
-
-    Worded to be read without this file: the box names the same `x/y/w/h` the
-    model's own call used, and `on #N` says which frame it acted on. Only
-    frame-bound tools carry a number. A tap always lands on the screen the model
-    last saw, which is the newest frame; `save_template` may name an older one.
-    The rest are worth only the host's own short summary, because a tool's
-    arguments can be a whole script.
-    """
-    if name == "screenshot":
-        return f"screenshot #{reply.get('shot')}"
-    if name == "tap":
-        return (f"tap x={args.get('x')} y={args.get('y')} w={args.get('w')}"
-                f" h={args.get('h')} on #{_LATEST_NUM}")
-    if name == "save_template":
-        shot = args.get("shot") or _LATEST_NUM
-        return (f"save_template \"{args.get('name')}\" x={args.get('x')}"
-                f" y={args.get('y')} w={args.get('w')} h={args.get('h')}"
-                f" on #{shot}")
-    text = " ".join(str(reply.get("text") or "").split())
-    if len(text) > _LEDGER_CHARS:
-        text = text[:_LEDGER_CHARS] + "..."
-    return f"{name}: {text}" if text else name
 
 
 def content_text(content: object) -> str:

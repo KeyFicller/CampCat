@@ -38,7 +38,7 @@ class TurnState(TypedDict, total=False):
     memory: str     # request: long-term notes, read off disk by the host
     messages: list  # built by build_messages
     tool_rounds: int
-    frame_log: list  # built by run_tools: what this turn let through, frame by frame
+    input_len: int  # built by build_messages: where this turn's own messages start
     reply: str      # response: model output
     turns: int      # response: turns retained in the conversation
     error: str
@@ -75,7 +75,7 @@ def build_messages(state: TurnState) -> dict:
     if frame is not None:
         messages.append(frame)
     messages.append(HumanMessage(content=state.get("text", "")))
-    return {"messages": messages}
+    return {"messages": messages, "input_len": len(messages)}
 
 
 def invoke(state: TurnState) -> dict:
@@ -143,7 +143,6 @@ def run_tools(state: TurnState) -> dict:
     # calls before it and reject the whole request (400 "insufficient tool
     # messages following tool_calls message").
     pictures: list = []
-    ledger: list[str] = list(state.get("frame_log") or [])
     for call in calls:
         name = call.get("name", "")
         args = call.get("args") or {}
@@ -153,11 +152,6 @@ def run_tools(state: TurnState) -> dict:
         else:
             content = "error: " + str(reply.get("error", ""))
         results.append(ToolMessage(content=content, tool_call_id=call.get("id", "")))
-        # Only what was let through: a refusal means nothing happened on the
-        # device or the disk, so writing it down would have a later turn rebuild
-        # a step the user explicitly rejected.
-        if reply.get("ok") and name not in session.READ_ONLY_TOOLS:
-            ledger.append(session.ledger_line(name, args, reply))
         image = reply.get("image_b64") or ""
         if not image:
             continue
@@ -170,8 +164,7 @@ def run_tools(state: TurnState) -> dict:
         else:
             pictures.append(session.picture_of(name, image))
     return {"messages": session.demote_pictures(messages + results + pictures),
-            "tool_rounds": state.get("tool_rounds", 0) + 1,
-            "frame_log": ledger}
+            "tool_rounds": state.get("tool_rounds", 0) + 1}
 
 
 def route_after_invoke(state: TurnState) -> str:
@@ -195,8 +188,8 @@ def commit(state: TurnState) -> dict:
     """
     if state.get("error"):
         return {"turns": session.size()}
-    session.append_turn(state.get("text", ""), state.get("reply", ""),
-                        state.get("frame_log") or [])
+    session.append_turn(state.get("text", ""),
+                        list(state.get("messages") or [])[state.get("input_len") or 0:])
     return {"turns": session.size()}
 
 

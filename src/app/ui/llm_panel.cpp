@@ -168,8 +168,8 @@ std::string g_mem_buf;
 
 /// The sidecar's own count of the turns it still holds verbatim, taken from
 /// each successful reply. Deliberately not `g_turns.size()`: that counts
-/// bubbles and stops at `k_turn_cap`, while the sidecar drops turns on a token
-/// budget and folds them into a summary.
+/// bubbles and stops at `k_turn_cap`, while the sidecar compacts once the
+/// conversation reaches its token trigger line.
 int g_sidecar_turns = 0;
 /// Characters in the memory file, for the status line. The window that shows
 /// the notes is opened on demand, so this is kept even while it is closed.
