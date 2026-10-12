@@ -420,6 +420,7 @@ llm_result llm_host::exchange(const std::string &_request_line,
 }
 
 llm_result llm_host::run_turn(const std::filesystem::path &_config_home,
+                              const std::string &_provider,
                               const std::string &_prompt) {
     llm_result r;
     if (_prompt.empty()) {
@@ -459,7 +460,7 @@ llm_result llm_host::run_turn(const std::filesystem::path &_config_home,
 
     const long id = next_request_id();
     std::string request = llm_protocol::build_turn_request(
-        id, _prompt, llm::tools_json(), memory);
+        id, _prompt, llm::tools_json(), memory, _provider);
     request.push_back('\n');
     const llm_result turn = exchange(request, k_request_timeout_ms);
     // This turn may have replaced the screenshot; take it back for the next one
@@ -470,6 +471,7 @@ llm_result llm_host::run_turn(const std::filesystem::path &_config_home,
 }
 
 llm_result llm_host::memorize(const std::filesystem::path &_config_home,
+                              const std::string &_provider,
                               int _timeout_ms) {
     llm_result r;
 
@@ -486,7 +488,7 @@ llm_result llm_host::memorize(const std::filesystem::path &_config_home,
     }
 
     const long id = next_request_id();
-    std::string request = llm_protocol::build_memorize_request(id, current);
+    std::string request = llm_protocol::build_memorize_request(id, current, _provider);
     request.push_back('\n');
     const llm_result out = exchange(request, _timeout_ms);
     if (!out.ok) {
@@ -612,13 +614,14 @@ bool llm_host::ensure_running(const std::filesystem::path &,
 }
 
 llm_result llm_host::run_turn(const std::filesystem::path &,
-                              const std::string &) {
+                              const std::string &, const std::string &) {
     llm_result r;
     r.error = "the LLM sidecar is not supported on Windows";
     return r;
 }
 
-llm_result llm_host::memorize(const std::filesystem::path &, int) {
+llm_result llm_host::memorize(const std::filesystem::path &, const std::string &,
+                              int) {
     llm_result r;
     r.error = "the LLM sidecar is not supported on Windows";
     return r;

@@ -1,6 +1,7 @@
 # The gate's C++ half. One executable per unit under test; link it against
 # campcat_core so tests use the same compile flags and OpenCV as the app.
-add_executable(test_campcat_core cpp/test_automation_log.cpp)
+add_executable(test_campcat_core cpp/test_automation_log.cpp
+                                 cpp/test_llm_protocol.cpp)
 target_link_libraries(test_campcat_core PRIVATE campcat_core GTest::gtest_main)
 
 # Each TEST becomes its own ctest entry, so a failure names the case that broke

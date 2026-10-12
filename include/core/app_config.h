@@ -78,6 +78,12 @@ struct approval_config {
     approval_gates gates{};
 };
 
+/// Which model provider the sidecar talks to. Sent with every request, so a
+/// change takes effect on the next turn rather than the next restart.
+struct llm_config {
+    std::string provider = "deepseek"; ///< "deepseek" or "qwen"
+};
+
 /// Pulling the boxes the model gives onto the element's boundary, on the way to
 /// acting on them. See `core/box_snap.h` for what a snap does and what it costs.
 struct box_snap_config {
@@ -106,6 +112,7 @@ struct app_config {
     input_config input{};
     match_config match{};
     approval_config approval{};
+    llm_config llm{};
     box_snap_config box_snap{};
     scheduler_config scheduler{};
 

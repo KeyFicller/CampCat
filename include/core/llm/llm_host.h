@@ -72,9 +72,12 @@ public:
      * @brief Ask the sidecar for one turn on `_prompt`.
      * @param[in] _config_home The config directory; it holds the memory file
      * this turn carries, and its parent anchors `.venv`/`llm/`.
+     * @param[in] _provider Which model provider the sidecar should build, from
+     * the settings. Taken from a snapshot, so a change mid-turn waits its turn.
      * @param[in] _prompt The user's instruction. Blank is rejected.
      */
     llm_result run_turn(const std::filesystem::path &_config_home,
+                        const std::string &_provider,
                         const std::string &_prompt);
 
     /**
@@ -85,10 +88,13 @@ public:
      * call: notes that cannot be read are never overwritten.
      *
      * @param[in] _config_home The config directory, holding the memory file.
+     * @param[in] _provider Which model provider to consolidate on. Must be the
+     * same one turns use, or a Qwen-only setup fails here.
      * @param[in] _timeout_ms Hard limit on the whole request. Consolidation can
      * be slow, but the shutdown call must not be.
      */
     llm_result memorize(const std::filesystem::path &_config_home,
+                        const std::string &_provider,
                         int _timeout_ms);
 
     /**

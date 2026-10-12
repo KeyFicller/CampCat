@@ -13,7 +13,9 @@ namespace campcat::llm_protocol {
 ///    number an image-returning tool filed its frame under.
 /// 6: `turn` carries `memory`, the long-term notes the host read off disk, and
 ///    `memorize` asks the sidecar to fold the session into them.
-constexpr int k_protocol_version = 6;
+/// 7: `turn` and `memorize` carry `provider`, the model provider the host's
+///    settings selected.
+constexpr int k_protocol_version = 7;
 
 /**
  * @brief One decoded line from the sidecar's stdout.
@@ -71,10 +73,13 @@ std::string base64_encode(const unsigned char *_data, std::size_t _len);
  * @param[in] _tools_json OpenAI tools array; empty to offer no tools.
  * @param[in] _memory Long-term notes about this user, read off disk by the
  * host. Sent even when empty, so the field's shape never moves.
+ * @param[in] _provider Which model provider the sidecar should build, from the
+ * host's settings. Sent even when empty, for the same reason as `_memory`.
  */
 std::string build_turn_request(long _id, std::string_view _text,
                                std::string_view _tools_json,
-                               std::string_view _memory);
+                               std::string_view _memory,
+                               std::string_view _provider);
 
 /**
  * @brief Build one `tool_result` line answering a `tool_call`.
@@ -104,8 +109,11 @@ std::string build_reset_request(long _id);
  * write to disk.
  *
  * @param[in] _memory The notes as they stand now; empty when there are none.
+ * @param[in] _provider Which model provider the sidecar should build, so the
+ * consolidation runs on the model the settings selected.
  */
-std::string build_memorize_request(long _id, std::string_view _memory);
+std::string build_memorize_request(long _id, std::string_view _memory,
+                                   std::string_view _provider);
 
 /**
  * @brief Parse one sidecar line. Never throws.

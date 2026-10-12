@@ -1,7 +1,8 @@
 """Model defaults, `.env` loading, and LangChain chat-model construction.
 
-All model configuration lives here. The C++ side sends only an image and
-receives text; nothing about the provider crosses the protocol.
+All model configuration lives here. Which provider to build arrives with each
+request -- the C++ host sends the name its settings selected -- and `llm/.env`
+holds the keys.
 """
 
 from __future__ import annotations
@@ -180,9 +181,34 @@ DEFAULT_MEMORY_MAX_TOKENS = 4096
 # share a constant, so keep them equal by hand: if this one is larger, the
 # sidecar writes notes the host then refuses, and memory stops updating.
 DEFAULT_MEMORY_MAX_CHARS = 4000
-# The `deepseek:` prefix is what tells init_chat_model which provider to build.
-DEFAULT_MODEL = "deepseek:deepseek-flash"
-DEFAULT_BASE_URL = "https://api.deepseek.com"
+# Every knob, including which variable holds the key and which holds the base
+# URL. Both are passed to the client explicitly, so neither name has to be one an
+# integration already knows: `QWEN_API_KEY` is ours, not ChatOpenAI's. A blank
+# `*_BASE_URL` falls back to the default in the same entry.
+#
+# `extra_body` is the provider's own thinking switch: Qwen3.7 and DeepSeek V4
+# both think by default, and sending one's shape to the other is not a no-op.
+PROVIDERS = {
+    "deepseek": {
+        "key_env": "DEEPSEEK_API_KEY",
+        "base_url_env": "DEEPSEEK_BASE_URL",
+        "base_url": "https://api.deepseek.com",
+        "model": "deepseek:deepseek-flash",
+        "extra_body": {"thinking": {"type": "disabled"}},
+    },
+    "qwen": {
+        # The `openai:` prefix is what tells init_chat_model which client to
+        # build. This base URL is the Token Plan endpoint, not the pay-as-you-go
+        # `dashscope.aliyuncs.com/compatible-mode/v1`: a plan key (`sk-sp-`) is
+        # refused there with a 401, and the two are not interchangeable.
+        "key_env": "QWEN_API_KEY",
+        "base_url_env": "QWEN_BASE_URL",
+        "base_url": "https://token-plan.maas.qianwenaiapi.com/compatible-mode/v1",
+        "model": "openai:qwen3.8-flash",
+        "extra_body": {"enable_thinking": False},
+    },
+}
+DEFAULT_PROVIDER = "deepseek"
 # Measured: a 1080x2400 emulator screenshot costs ~985 input tokens. The
 # summarization counter never sees the image bytes, so it needs this constant.
 TOKENS_PER_IMAGE = 950
@@ -220,6 +246,32 @@ def _env(name: str) -> str:
 
 def _setting(name: str, default: str) -> str:
     return _env(name) or default
+
+
+# Which provider the current request wants, set by main.py from the C++ host's
+# settings. Empty means the request did not say -- a bare `python3 main.py` run
+# -- and the environment, then the default, decides.
+_SELECTED = ""
+
+
+def set_provider(name: str) -> None:
+    """Remember the provider this request asks for; empty clears the choice."""
+    global _SELECTED
+    _SELECTED = name.strip()
+
+
+def _provider() -> dict:
+    """The selected provider's knobs. Raises on a name that is not one of them.
+
+    Loud rather than silently falling back: a mistyped name would otherwise bill
+    DeepSeek while the user believes they are on Qwen.
+    """
+    name = _SELECTED or _setting("CAMPCAT_LLM_PROVIDER", DEFAULT_PROVIDER)
+    if name not in PROVIDERS:
+        raise RuntimeError(
+            f"provider {name!r} is not one of {', '.join(sorted(PROVIDERS))}"
+        )
+    return PROVIDERS[name]
 
 
 _CCAT_CHEATSHEET = (
@@ -331,18 +383,26 @@ def context_tokens() -> int:
 
 
 def _chat_model(name: str, max_tokens: int):
-    """Build a chat model. Raises RuntimeError when the API key is missing."""
-    api_key = _env("DEEPSEEK_API_KEY")
+    """Build a chat model for the selected provider.
+
+    Key and base URL are passed explicitly, so neither has to be a name the
+    integration already reads: `QWEN_API_KEY` is ours. A missing key is refused
+    here, in a sentence that names the variable.
+
+    `base_url` is the one spelling both clients accept. `api_base` is a
+    ChatDeepSeek-only alias that ChatOpenAI drops without complaining, which
+    would send Qwen's key to OpenAI's own endpoint instead.
+    """
+    provider = _provider()
+    api_key = _env(provider["key_env"])
     if not api_key:
-        raise RuntimeError(
-            "DEEPSEEK_API_KEY is not set (put it in llm/.env)"
-        )
+        raise RuntimeError(f"{provider['key_env']} is not set (put it in llm/.env)")
     return init_chat_model(
         name,
         api_key=api_key,
-        api_base=_setting("CAMPCAT_LLM_BASE_URL", DEFAULT_BASE_URL),
+        base_url=_setting(provider["base_url_env"], provider["base_url"]),
         max_tokens=max_tokens,
-        extra_body={"thinking": {"type": "disabled"}},
+        extra_body=provider["extra_body"],
     )
 
 
@@ -353,7 +413,7 @@ def build_chat_model():
     failed result.
     """
     return _chat_model(
-        _setting("CAMPCAT_LLM_MODEL", DEFAULT_MODEL),
+        _setting("CAMPCAT_LLM_MODEL", _provider()["model"]),
         int(_env("CAMPCAT_LLM_MAX_TOKENS") or DEFAULT_MAX_TOKENS),
     )
 
@@ -367,6 +427,6 @@ def build_memory_model():
     """
     return _chat_model(
         _setting("CAMPCAT_LLM_MEMORY_MODEL",
-                 _setting("CAMPCAT_LLM_MODEL", DEFAULT_MODEL)),
+                 _setting("CAMPCAT_LLM_MODEL", _provider()["model"])),
         int(_env("CAMPCAT_LLM_MEMORY_MAX_TOKENS") or DEFAULT_MEMORY_MAX_TOKENS),
     )

@@ -161,6 +161,9 @@ constexpr double k_idle_seconds = 600.0; // 10 minutes
 /// Remembered every frame so the shutdown pass knows where the memory file is,
 /// since `llm_panel_shutdown_gl` has no config of its own.
 std::filesystem::path g_config_home;
+/// Same reason as `g_config_home`: the shutdown pass needs the selected
+/// provider, and only the draw call sees the config.
+std::string g_provider = "deepseek";
 
 /// The Long-term memory window, and the copy it displays.
 bool g_mem_open = false;
@@ -483,7 +486,8 @@ void start_turn(campcat::shell_state &_st, const campcat::app_config &_cfg,
         };
         g_host.set_tool_context(ctx);
         campcat::llm_result res =
-            g_host.run_turn(cfg_snapshot.config_home, prompt);
+            g_host.run_turn(cfg_snapshot.config_home, cfg_snapshot.llm.provider,
+                            prompt);
         g_host.set_tool_context({}); // `adb` dies with this lambda
         {
             std::lock_guard<std::mutex> lk(g_done_mu);
@@ -496,15 +500,16 @@ void start_turn(campcat::shell_state &_st, const campcat::app_config &_cfg,
 }
 
 /// Consolidate the session into the long-term notes, on the worker.
-void start_memorize(std::filesystem::path _config_home) {
+void start_memorize(std::filesystem::path _config_home, std::string _provider) {
     if (g_thread.joinable()) {
         g_thread.join();
     }
     g_running.store(true);
     g_memorizing.store(true);
-    g_thread = std::thread([config_home = std::move(_config_home)]() {
+    g_thread = std::thread([config_home = std::move(_config_home),
+                            provider = std::move(_provider)]() {
         campcat::llm_result res =
-            g_host.memorize(config_home, campcat::k_memorize_timeout_ms);
+            g_host.memorize(config_home, provider, campcat::k_memorize_timeout_ms);
         g_memorizing.store(false);
         {
             std::lock_guard<std::mutex> lk(g_done_mu);
@@ -517,19 +522,20 @@ void start_memorize(std::filesystem::path _config_home) {
     });
 }
 
-void start_reset(std::filesystem::path _config_home) {
+void start_reset(std::filesystem::path _config_home, std::string _provider) {
     if (g_thread.joinable()) {
         g_thread.join();
     }
     g_running.store(true);
-    g_thread = std::thread([config_home = std::move(_config_home)]() {
+    g_thread = std::thread([config_home = std::move(_config_home),
+                            provider = std::move(_provider)]() {
         // Keep the session before forgetting it: `reset` is what drops the
         // history the consolidation reads, so the order here is the whole
         // point. A failed consolidation is not a reason to refuse the clear the
         // user asked for.
         g_memorizing.store(true);
         campcat::llm_result kept =
-            g_host.memorize(config_home, campcat::k_memorize_timeout_ms);
+            g_host.memorize(config_home, provider, campcat::k_memorize_timeout_ms);
         g_memorizing.store(false);
         if (!kept.ok) {
             campcat::automation_log::emit("[llm] memory not saved: " +
@@ -807,6 +813,21 @@ void draw_approval_settings(campcat::app_config &_c) {
     if (!ImGui::BeginPopup("llm_approval_settings")) {
         return;
     }
+    // Not an approval gate either, but this is the panel's one settings popup,
+    // and switching the model is the same kind of "change how it behaves" knob.
+    ImGui::TextDisabled("Model provider");
+    int provider = _c.llm.provider == "qwen" ? 1 : 0;
+    ImGui::RadioButton("DeepSeek", &provider, 0);
+    ImGui::SameLine();
+    ImGui::RadioButton("Qwen", &provider, 1);
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip(
+            "Qwen goes through Aliyun's OpenAI-compatible endpoint and needs "
+            "QWEN_API_KEY in llm/.env. Applies from the next message, no "
+            "restart.");
+    }
+    _c.llm.provider = provider == 1 ? "qwen" : "deepseek";
+    ImGui::Separator();
     ImGui::Checkbox("Require approval", &_c.approval.require);
     ImGui::Separator();
     const bool master_off = !_c.approval.require;
@@ -1289,7 +1310,7 @@ void llm_panel_shutdown_gl() {
     if (!g_config_home.empty()) {
         g_shutdown_thread = std::thread([]() {
             const campcat::llm_result res = g_host.memorize(
-                g_config_home, campcat::k_shutdown_memorize_timeout_ms);
+                g_config_home, g_provider, campcat::k_shutdown_memorize_timeout_ms);
             if (!res.ok) {
                 campcat::automation_log::emit("[llm] memory not saved: " +
                                               res.error);
@@ -1357,6 +1378,7 @@ void llm_panel_draw_panel(campcat::shell_state &_st, campcat::app_config &_cfg,
     // Kept for the shutdown pass and the memory window, neither of which is
     // handed the config: this panel is the only place that sees it.
     g_config_home = _cfg.config_home;
+    g_provider = _cfg.llm.provider;
 
     const bool busy = g_running.load();
 
@@ -1374,7 +1396,7 @@ void llm_panel_draw_panel(campcat::shell_state &_st, campcat::app_config &_cfg,
     const bool clear_requested =
         draw_log(ImVec2(ImGui::GetContentRegionAvail().x, -g_footer_h));
     if (clear_requested) {
-        start_reset(_cfg.config_home);
+        start_reset(_cfg.config_home, _cfg.llm.provider);
     }
 
     draw_memory_window();
@@ -1404,7 +1426,7 @@ void llm_panel_draw_panel(campcat::shell_state &_st, campcat::app_config &_cfg,
     if (!g_running.load() && !awaiting && !g_turns.empty() &&
         is_blank(g_input) && !g_config_home.empty() &&
         ImGui::GetTime() - g_last_llm > k_idle_seconds) {
-        start_memorize(g_config_home);
+        start_memorize(g_config_home, g_provider);
     }
 
     // The button is square like the gear: the icon carries the meaning, so no
