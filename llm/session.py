@@ -154,7 +154,8 @@ def append_turn(text: str, reply: str, ledger: list) -> None:
     `reply` is what the UI shows, so the two stay apart.
     """
     if ledger:
-        reply = reply.rstrip() + "\n\n[turn: " + " | ".join(ledger) + "]"
+        reply = (reply.rstrip() + "\n\n### Actions In Current Turn\n"
+                 + "\n".join("- " + line for line in ledger))
     _MESSAGES.append(HumanMessage(content=text))
     _MESSAGES.append(AIMessage(content=reply))
 
@@ -463,20 +464,23 @@ def demote_pictures(messages: list, keep: int | None = None) -> list:
 def ledger_line(name: str, args: dict, reply: dict) -> str:
     """One ledger line for a tool that ran: what it did, and on which frame.
 
-    Only frame-bound tools carry a number. A tap always lands on the screen the
-    model last saw, which is the newest frame; `save_template` may name an older
-    one. The rest are worth only the host's own short summary, because a tool's
+    Worded to be read without this file: the box names the same `x/y/w/h` the
+    model's own call used, and `on #N` says which frame it acted on. Only
+    frame-bound tools carry a number. A tap always lands on the screen the model
+    last saw, which is the newest frame; `save_template` may name an older one.
+    The rest are worth only the host's own short summary, because a tool's
     arguments can be a whole script.
     """
     if name == "screenshot":
-        return f"#{reply.get('shot')}"
+        return f"screenshot #{reply.get('shot')}"
     if name == "tap":
-        return (f"tap({args.get('x')},{args.get('y')},{args.get('w')},"
-                f"{args.get('h')})@#{_LATEST_NUM}")
+        return (f"tap x={args.get('x')} y={args.get('y')} w={args.get('w')}"
+                f" h={args.get('h')} on #{_LATEST_NUM}")
     if name == "save_template":
         shot = args.get("shot") or _LATEST_NUM
-        return (f"save_template(\"{args.get('name')}\",{args.get('x')},"
-                f"{args.get('y')},{args.get('w')},{args.get('h')})@#{shot}")
+        return (f"save_template \"{args.get('name')}\" x={args.get('x')}"
+                f" y={args.get('y')} w={args.get('w')} h={args.get('h')}"
+                f" on #{shot}")
     text = " ".join(str(reply.get("text") or "").split())
     if len(text) > _LEDGER_CHARS:
         text = text[:_LEDGER_CHARS] + "..."
