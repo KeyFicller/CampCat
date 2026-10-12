@@ -72,7 +72,7 @@ cooperative_sleep_ms(int _ms, const std::function<bool()> &_should_stop) {
 
 } // namespace
 
-CcatInterpreter::CcatInterpreter(adb_client *_adb, const app_config *_cfg,
+CcatInterpreter::CcatInterpreter(adb_api *_adb, const app_config *_cfg,
                                  template_matcher _matcher,
                                  std::filesystem::path _images_base,
                                  std::filesystem::path _script_path)

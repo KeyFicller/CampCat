@@ -21,7 +21,7 @@ std::filesystem::path resolve_under_resolution_dir(
 } // namespace
 
 screen_template_detect_result
-detect_template_on_screen(adb_client &_adb,
+detect_template_on_screen(adb_api &_adb,
                           const app_config &_shell_timing_only,
                           const std::filesystem::path &_template_resolution_dir,
                           std::string_view _relative_template_filename,
@@ -83,7 +83,7 @@ detect_template_on_screen(adb_client &_adb,
 }
 
 screen_template_tap_result
-tap_template_on_screen(adb_client &_adb, const app_config &_shell_timing_only,
+tap_template_on_screen(adb_api &_adb, const app_config &_shell_timing_only,
                        const std::filesystem::path &_template_resolution_dir,
                        std::string_view _relative_template_filename,
                        const screen_template_ops_options &_opts) {

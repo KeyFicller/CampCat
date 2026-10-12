@@ -16,7 +16,7 @@
 
 namespace campcat {
 
-class adb_client;
+class adb_api;
 struct app_config;
 
 namespace ccat_lang {
@@ -56,7 +56,7 @@ public:
      * @param[in] _script_path Absolute path of the entry `.ccat` (for `run`
      * cycle detection).
      */
-    CcatInterpreter(adb_client *_adb, const app_config *_cfg,
+    CcatInterpreter(adb_api *_adb, const app_config *_cfg,
                     template_matcher _matcher,
                     std::filesystem::path _images_base,
                     std::filesystem::path _script_path = {});
@@ -181,7 +181,7 @@ private:
     void dump_match_debug(const char *_op, const std::filesystem::path &_templ,
                           const cv::Mat &_screen, const match_result &_r);
 
-    adb_client *m_adb;
+    adb_api *m_adb;
     const app_config *m_cfg;
     template_matcher m_matcher;
     std::filesystem::path m_images_base;

@@ -10,10 +10,59 @@
 namespace campcat {
 
 /**
+ * @brief The device operations the automation layers depend on.
+ *
+ * `adb_client` is the only implementation that ships; the seam exists so tests
+ * can drive the layers above it with no device attached. It stops where the
+ * module boundary already is: every `adb` invocation stays in `adb_client`.
+ */
+class adb_api {
+public:
+    virtual ~adb_api() = default;
+
+    /// See `adb_client::list_devices`.
+    virtual std::vector<std::string> list_devices(int _timeout_ms = 8000) = 0;
+
+    /// See `adb_client::set_serial`.
+    virtual void set_serial(const std::string &_serial) = 0;
+
+    /// See `adb_client::run`.
+    virtual bool run(const std::vector<std::string> &_args,
+                     std::string *_stdout_out, std::string *_stderr_out,
+                     int _timeout_ms) = 0;
+
+    /// See `adb_client::connect_remote`.
+    virtual bool connect_remote(std::string_view _address, int _timeout_ms = 15000,
+                                std::string *_stdout_out = nullptr,
+                                std::string *_stderr_out = nullptr) = 0;
+
+    /// See `adb_client::tap`.
+    virtual bool tap(int _x, int _y) = 0;
+
+    /// See `adb_client::swipe`.
+    virtual bool swipe(int _x1, int _y1, int _x2, int _y2,
+                       int _duration_ms) = 0;
+
+    /// See `adb_client::keyevent`.
+    virtual bool keyevent(int _keycode) = 0;
+
+    /// See `adb_client::home_and_kill_all`.
+    virtual bool home_and_kill_all(int _gap_ms) = 0;
+
+    /// See `adb_client::screencap_bgr`.
+    virtual bool screencap_bgr(cv::Mat *_bgr_out, int _timeout_ms = 45000,
+                               std::string *_diagnostic_out = nullptr) = 0;
+
+    /// See `adb_client::delay_after_action`.
+    virtual bool delay_after_action(
+        std::chrono::milliseconds _tap_delay) const = 0;
+};
+
+/**
  * @brief Thin wrapper around the host `adb` binary: device enumeration, invoke
  * adb with arguments, screencap, tap/swipe helpers.
  */
-class adb_client {
+class adb_client : public adb_api {
 public:
     /**
      * @brief Construct a client pinned to binaries `adb`.
@@ -37,7 +86,7 @@ public:
      * not make the poll -- or the join on it at exit -- wait four intervals.
      * @return Serialized device descriptors (similar to adb output tokens).
      */
-    std::vector<std::string> list_devices(int _timeout_ms = 8000);
+    std::vector<std::string> list_devices(int _timeout_ms = 8000) override;
 
     /**
      * @brief Emulator/device serial (if any).
@@ -50,7 +99,7 @@ public:
      * @param[in] _serial Emulator/device serial; empty restores default
      * semantics.
      */
-    void set_serial(const std::string &_serial) { m_serial = _serial; }
+    void set_serial(const std::string &_serial) override { m_serial = _serial; }
 
     /**
      * @brief Run `adb` with additional arguments forwarded after base prefix.
@@ -62,7 +111,7 @@ public:
      * @return True if the subprocess finished without transport errors.
      */
     bool run(const std::vector<std::string> &_args, std::string *_stdout_out,
-             std::string *_stderr_out, int _timeout_ms);
+             std::string *_stderr_out, int _timeout_ms) override;
 
     /**
      * @brief When `_address` is non-empty, run `adb connect <address>` (TCP
@@ -73,7 +122,7 @@ public:
      */
     bool connect_remote(std::string_view _address, int _timeout_ms = 15000,
                         std::string *_stdout_out = nullptr,
-                        std::string *_stderr_out = nullptr);
+                        std::string *_stderr_out = nullptr) override;
 
     /**
      * @brief Tap at normalized screen coordinates understood by adb.
@@ -81,7 +130,7 @@ public:
      * @param[in] _y Vertical pixel coordinate.
      * @return False when adb execution fails or returns error.
      */
-    bool tap(int _x, int _y);
+    bool tap(int _x, int _y) override;
 
     /**
      * @brief Swipe from start to end with optional swipe duration hint.
@@ -92,21 +141,21 @@ public:
      * @param[in] _duration_ms Swipe gesture duration forwarded to adb.
      * @return False when adb execution fails or returns error.
      */
-    bool swipe(int _x1, int _y1, int _x2, int _y2, int _duration_ms);
+    bool swipe(int _x1, int _y1, int _x2, int _y2, int _duration_ms) override;
 
     /**
      * @brief Send an Android keyevent (`adb shell input keyevent <code>`).
      * @param[in] _keycode Android KEYCODE_* integer (e.g. 3 = HOME).
      * @return False when adb execution fails or returns error.
      */
-    bool keyevent(int _keycode);
+    bool keyevent(int _keycode) override;
 
     /**
      * @brief HOME, then `am force-stop` every non-home package in recents.
      * @param[in] _gap_ms Delay after HOME before dumpsys / force-stop.
      * @return False when HOME or dumpsys fails, or any force-stop fails.
      */
-    bool home_and_kill_all(int _gap_ms);
+    bool home_and_kill_all(int _gap_ms) override;
 
     /**
      * @brief Capture the device screen as an OpenCV BGR image.
@@ -122,14 +171,14 @@ public:
      * @return True when a frame was produced.
      */
     bool screencap_bgr(cv::Mat *_bgr_out, int _timeout_ms = 45000,
-                       std::string *_diagnostic_out = nullptr);
+                       std::string *_diagnostic_out = nullptr) override;
 
     /**
      * @brief Sleeping helper aligning with configurable shell tap pauses.
      * @param[in] _tap_delay Sleep duration propagated to `sleep` adb pattern.
      * @return True when adb reported success.
      */
-    bool delay_after_action(std::chrono::milliseconds _tap_delay) const;
+    bool delay_after_action(std::chrono::milliseconds _tap_delay) const override;
 
 private:
     std::vector<std::string> base_prefix() const;

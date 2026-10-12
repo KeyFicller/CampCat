@@ -10,7 +10,7 @@
 #include "core/mumu_launcher.h"
 
 namespace campcat {
-class adb_client;
+class adb_api;
 struct app_config;
 } // namespace campcat
 
@@ -71,7 +71,7 @@ struct screen_state {
  * taken from it stays valid until the model asks for a fresh one.
  */
 struct tool_context {
-    adb_client *adb = nullptr;
+    adb_api *adb = nullptr;
     /// True while an automation cycle owns adb, so tools must refuse rather
     /// than compete for the device. An empty function means "never busy".
     std::function<bool()> adb_busy;

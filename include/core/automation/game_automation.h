@@ -8,7 +8,7 @@
 
 namespace campcat {
 
-class adb_client;
+class adb_api;
 struct app_config;
 struct ccat_script_profile;
 
@@ -48,7 +48,7 @@ public:
  * @return Unique owning pointer, or one that reports the reason it cannot run.
  */
 std::unique_ptr<game_automation>
-make_game_automation(adb_client *adb, const app_config *cfg,
+make_game_automation(adb_api *adb, const app_config *cfg,
                      const ccat_script_profile *script_bundle);
 
 } // namespace campcat

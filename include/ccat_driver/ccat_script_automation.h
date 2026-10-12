@@ -4,7 +4,7 @@
 
 namespace campcat {
 
-class adb_client;
+class adb_api;
 struct app_config;
 class ccat_script_profile;
 
@@ -17,13 +17,13 @@ public:
     /**
      * @brief Capture immutable pointers reused for entire automation lifetime
      * (must outlive instance).
-     * @param[in] _adb adb_client performing IO-bound gestures/screenshots.
+     * @param[in] _adb adb facade performing IO-bound gestures/screenshots.
      * @param[in] _cfg Shell knobs forwarded into interpreter layers
      * (thresholds/pacing).
      * @param[in] _profile Loaded bundle describing `.ccat` location plus PNG
      * roots.
      */
-    explicit ccat_script_automation(adb_client *_adb, const app_config *_cfg,
+    explicit ccat_script_automation(adb_api *_adb, const app_config *_cfg,
                                     const ccat_script_profile *_profile);
 
     /**
@@ -37,7 +37,7 @@ public:
     run_cycle(const std::function<bool()> &_should_stop) override;
 
 private:
-    adb_client *m_adb;
+    adb_api *m_adb;
     const app_config *m_cfg;
     const ccat_script_profile *m_profile;
 };

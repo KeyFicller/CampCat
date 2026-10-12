@@ -10,7 +10,7 @@
 
 namespace campcat {
 
-class adb_client;
+class adb_api;
 struct app_config;
 
 /**
@@ -48,7 +48,7 @@ struct screen_template_detect_result {
 /**
  * @brief Capture frame, correlate template anchored under
  * `_template_resolution_dir`.
- * @param[in] _adb Configured adb client for screencap/tunnel.
+ * @param[in] _adb Configured adb facade for screencap/tunnel.
  * @param[in] _shell_timing_only Host shell fields (timeouts, matcher
  * thresholds).
  * @param[in] _template_resolution_dir Directory containing templ png assets.
@@ -58,7 +58,7 @@ struct screen_template_detect_result {
  * @return Populated diagnostics struct ready for callers.
  */
 screen_template_detect_result
-detect_template_on_screen(adb_client &_adb,
+detect_template_on_screen(adb_api &_adb,
                           const app_config &_shell_timing_only,
                           const std::filesystem::path &_template_resolution_dir,
                           std::string_view _relative_template_filename,
@@ -78,7 +78,7 @@ struct screen_template_tap_result {
 /**
  * @brief Run `detect_template_on_screen`; when correlation passes threshold tap
  * center.
- * @param[in] _adb Configured adb client for screencap/tunnel.
+ * @param[in] _adb Configured adb facade for screencap/tunnel.
  * @param[in] _shell_timing_only Host shell fields including tap delay
  * thresholds.
  * @param[in] _template_resolution_dir Directory containing templ png assets.
@@ -88,7 +88,7 @@ struct screen_template_tap_result {
  * @return Tap diagnostics mirroring detector fields plus tapped flag semantics.
  */
 screen_template_tap_result
-tap_template_on_screen(adb_client &_adb, const app_config &_shell_timing_only,
+tap_template_on_screen(adb_api &_adb, const app_config &_shell_timing_only,
                        const std::filesystem::path &_template_resolution_dir,
                        std::string_view _relative_template_filename,
                        const screen_template_ops_options &_opts = {});

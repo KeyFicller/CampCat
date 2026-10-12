@@ -38,7 +38,7 @@ std::string load_ccat_source(const app_config &_cfg,
 } // namespace
 
 ccat_script_automation::ccat_script_automation(
-    adb_client *_adb, const app_config *_cfg,
+    adb_api *_adb, const app_config *_cfg,
     const ccat_script_profile *_profile)
     : m_adb(_adb), m_cfg(_cfg), m_profile(_profile) {
     if (!m_adb || !m_cfg || !m_profile) {

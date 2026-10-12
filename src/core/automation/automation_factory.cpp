@@ -29,7 +29,7 @@ public:
 } // namespace
 
 std::unique_ptr<game_automation>
-make_game_automation(adb_client *adb, const app_config *cfg,
+make_game_automation(adb_api *adb, const app_config *cfg,
                      const ccat_script_profile *script_bundle) {
     if (!adb || !cfg) {
         return std::make_unique<unknown_automation_game>(

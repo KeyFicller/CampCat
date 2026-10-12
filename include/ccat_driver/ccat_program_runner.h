@@ -8,7 +8,7 @@
 
 namespace campcat {
 
-class adb_client;
+class adb_api;
 struct app_config;
 
 /**
@@ -16,7 +16,7 @@ struct app_config;
  * cycles.
  */
 automation_cycle_result
-run_ccat_program(adb_client *_adb, const app_config *_cfg,
+run_ccat_program(adb_api *_adb, const app_config *_cfg,
                  const std::filesystem::path &_images_base,
                  const std::filesystem::path &_script_path,
                  const ccat_lang::Program &_program,

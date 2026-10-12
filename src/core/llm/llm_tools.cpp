@@ -472,7 +472,7 @@ void collect_required_templates(const ccat_lang::Stmt &_s,
     }
 }
 
-adb_client &require_adb() {
+adb_api &require_adb() {
     if (g_ctx.adb == nullptr) {
         throw js::bind_error("no adb session");
     }
@@ -517,7 +517,7 @@ constexpr int k_default_swipe_ms = 300;
     .text =
         js::str("Takes a fresh screenshot of the device screen.")}]] std::string
     screenshot() {
-    adb_client &adb = require_adb();
+    adb_api &adb = require_adb();
     cv::Mat bgr;
     std::string diag;
     if (!adb.screencap_bgr(&bgr, 45000, &diag)) {
@@ -840,7 +840,7 @@ CPP_REFLECT_TOOL(start_emulator)
     }
     // Checked before adb so a refusal above is the reason reported, and so that
     // path is testable without a device.
-    adb_client &adb = require_adb();
+    adb_api &adb = require_adb();
     if (g_ctx.cfg == nullptr) {
         throw js::bind_error("no shell config for the script tools");
     }
