@@ -25,5 +25,8 @@ def test_append_turn_folds_the_ledger_into_the_stored_reply():
     session.append_turn("tap it", "answer", ["screenshot #6"])
 
     stored = session.history()[-1].content
-    assert "### Actions In Current Turn" in stored
+    # Order is what this case guards, so it asserts leading and trailing rather
+    # than membership: a plain `in` would pass with the ledger either side.
+    assert stored.startswith("### Actions In Current Turn")
+    assert stored.endswith("answer")
     assert "- screenshot #6" in stored

@@ -1420,6 +1420,25 @@ void llm_panel_draw_panel(campcat::shell_state &_st, campcat::app_config &_cfg,
                           awaiting ? "Optional: tell it what to do instead"
                                    : "Tell CampCat what to do...",
                           &g_input);
+    // Attached here rather than inside prompt_input_text: that helper paints the
+    // IME pre-edit without submitting an item, so the box is still the last item
+    // at this point. The target would silently leave the box if the helper ever
+    // submitted one.
+    if (ImGui::BeginDragDropTarget()) {
+        if (const ImGuiPayload *payload =
+                ImGui::AcceptDragDropPayload(k_script_drag_payload)) {
+            // `@name` glued to the text before it would not read as a mention, so
+            // a separator goes in unless one is already there.
+            if (!g_input.empty() &&
+                !std::isspace(static_cast<unsigned char>(g_input.back()))) {
+                g_input.push_back(' ');
+            }
+            g_input += '@';
+            g_input.append(static_cast<const char *>(payload->Data),
+                           static_cast<size_t>(payload->DataSize));
+        }
+        ImGui::EndDragDropTarget();
+    }
 
     ImGui::SameLine();
     const bool can_send = awaiting || (!busy && !is_blank(g_input));

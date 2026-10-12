@@ -151,12 +151,14 @@ def start_turn() -> None:
 def append_turn(text: str, reply: str, ledger: list) -> None:
     """Add the turn to the conversation, ledger folded into the stored reply.
 
-    The ledger never comes back out: it is for the model's own history, while
-    `reply` is what the UI shows, so the two stay apart.
+    The ledger leads the reply rather than trailing it, so the model reads what
+    it did before the prose describing it. It never comes back out either way:
+    it is for the model's own history, while `reply` is what the UI shows.
     """
     if ledger:
-        reply = (reply.rstrip() + "\n\n### Actions In Current Turn\n"
-                 + "\n".join("- " + line for line in ledger))
+        reply = ("### Actions In Current Turn (For Script Tracking)\n"
+                 + "\n".join("- " + line for line in ledger)
+                 + "\n\n" + reply.lstrip())
     _MESSAGES.append(HumanMessage(content=text))
     _MESSAGES.append(AIMessage(content=reply))
 

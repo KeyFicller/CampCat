@@ -7,6 +7,11 @@
 /// than taking height off it.
 inline constexpr float k_script_list_w = 180.0F;
 
+/// Payload type the script list drags a row under, and the LLM prompt box takes
+/// it from. ImGui matches drag payloads by this string, so both sides must use
+/// this one constant, and it must not start with '_' (ImGui reserves those).
+inline constexpr const char *k_script_drag_payload = "campcat_script";
+
 /**
  * @brief Draw the script list column, and every script window that is open.
  *

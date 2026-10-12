@@ -266,6 +266,16 @@ std::optional<std::string> draw_list(const std::filesystem::path &_dir,
         ImGui::PushID(name.c_str());
         ImGui::Selectable(name.c_str(), false,
                           ImGuiSelectableFlags_AllowDoubleClick);
+        // The row is the grab handle for a drag onto the prompt box -- the whole
+        // row, because a handle of its own would squeeze the name, as with the
+        // menu below. Safe before the hover block: ImGui clears hover while a
+        // drag is live, so that block still sees what it saw before.
+        if (ImGui::BeginDragDropSource()) {
+            ImGui::SetDragDropPayload(k_script_drag_payload, name.c_str(),
+                                      name.size());
+            ImGui::TextUnformatted(name.c_str());
+            ImGui::EndDragDropSource();
+        }
         if (ImGui::IsItemHovered()) {
             // Reading the description means opening main.ccat, so it is fetched
             // only while the pointer is on the row, and shown over it rather

@@ -18,7 +18,9 @@ PERSONA = (
     "means doing something on the device, look for a saved skill before anything "
     "else: call `list_scripts`, `read_script` any that looks close, and when one "
     "already does the job run it with `run(\"<name>/main.ccat\")` instead of "
-    "writing its steps again. Take a screenshot "
+    "writing its steps again. An `@name` names that saved skill for you -- the "
+    "user dropped it in from the list -- so read that one rather than searching. "
+    "Take a screenshot "
     "first, since you cannot see the screen otherwise, and look at the result "
     "before deciding the next step. The emulator itself may be down, and a "
     "screenshot then fails and says so. `start_emulator` boots it and blocks "
@@ -31,6 +33,13 @@ PERSONA = (
 # How a reply is written, one entry per part of the rule. Fed as Markdown with
 # the key as a heading, so a part can be rewritten or dropped on its own.
 RULES = {
+    "autonomy": (
+        "Act instead of asking. Propose the next step and take it, rather than "
+        "ending the reply with a question you could answer by acting. Anything that "
+        "changes the device or the disk is shown to the user and waits for their "
+        "approval, so asking in prose first is the same question twice -- and a guess "
+        "they disagree with costs a rejection, not a mistake."
+    ),
     "format": (
         "Write replies in Chinese, in Markdown, limited to what the viewer "
         "renders: '#'/'##'/'###' plus a space at the start of a line for headings; "
@@ -51,7 +60,7 @@ RULES = {
         "  * Two unread messages\n"
         "\n"
         "***\n"
-        "Shall I open one of the tabs?"
+        "Opening the chats tab."
     ),
     "example_bad": (
         "A reply written the wrong way keeps its markers on screen. This:\n"
