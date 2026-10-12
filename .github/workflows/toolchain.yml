@@ -1,0 +1,43 @@
+name: Toolchain image
+
+# The image carries a source-built OpenCV on top of the pinned clang-p2996, so it
+# only needs rebuilding when its own Dockerfile changes. Bumping the toolchain
+# means editing the FROM tag here, which is exactly this trigger.
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'docker/campcat-toolchain.Dockerfile'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build:
+    # Native amd64: building OpenCV under Rosetta on an arm64 box is unusably
+    # slow, so this cannot move to a self-hosted macOS runner.
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/build-push-action@v6
+        with:
+          # The Dockerfile copies nothing in, so its own directory is the whole
+          # context -- that keeps build/ and .venv away from the daemon.
+          context: docker
+          file: campcat-toolchain.Dockerfile
+          platforms: linux/amd64
+          push: true
+          # Same string as the `container:` image in .github/workflows/ci.yml.
+          # Change one, change the other.
+          tags: ghcr.io/keyficller/campcat-toolchain:p2996-9ffb96e3ce36-ocv4.13.0

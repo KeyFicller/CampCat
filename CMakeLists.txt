@@ -16,11 +16,14 @@ set(CMAKE_C_COMPILER "${LLVM_ROOT}/bin/clang" CACHE FILEPATH "" FORCE)
 
 project(campcat LANGUAGES CXX)
 
-# A source-built clang has no default sysroot, so it cannot even find the macOS
-# SDK headers without this.
-execute_process(COMMAND xcrun --show-sdk-path
-                OUTPUT_VARIABLE _campcat_sdk OUTPUT_STRIP_TRAILING_WHITESPACE)
-add_compile_options(-isysroot "${_campcat_sdk}")
+if(APPLE)
+  # A source-built clang has no default sysroot, so it cannot even find the
+  # macOS SDK headers without this. Linux has no xcrun and an empty -isysroot
+  # is only noise there.
+  execute_process(COMMAND xcrun --show-sdk-path
+                  OUTPUT_VARIABLE _campcat_sdk OUTPUT_STRIP_TRAILING_WHITESPACE)
+  add_compile_options(-isysroot "${_campcat_sdk}")
+endif()
 # Reflection is a C++ language feature; Objective-C++ does not need it.
 add_compile_options("$<$<COMPILE_LANGUAGE:CXX>:-freflection-latest>")
 # Link the reflective runtime from the prefix instead of /usr/lib.
@@ -145,8 +148,7 @@ target_include_directories(imgui_markdown INTERFACE ${imgui_markdown_SOURCE_DIR}
 
 # The script editor's text widget. Same shape as imgui_markdown above: upstream
 # ships no CMakeLists.txt, so FetchContent only populates and the source is
-# compiled into a small static library of our own -- which the highlighting
-# test links without dragging in the whole app.
+# compiled into a small static library of our own.
 campcat_github_url(_coloredit_git KeyFicller/ImGuiColorTextEdit.git)
 FetchContent_Declare(
   imgui_colortextedit
@@ -258,3 +260,23 @@ if(APPLE)
 endif()
 
 target_compile_definitions(campcat PRIVATE IMGUI_DEFINE_MATH_OPERATORS)
+
+# Test gate. `include(CTest)` is what defines BUILD_TESTING and gives `ctest`
+# something to read, so config a build with -DBUILD_TESTING=OFF to get exactly
+# what shipped before this block existed.
+include(CTest)
+if(BUILD_TESTING)
+  # Same source as every other dependency, so it honours GITHUB_MIRROR.
+  campcat_github_url(_gtest_git google/googletest.git)
+  FetchContent_Declare(
+    googletest
+    GIT_REPOSITORY ${_gtest_git}
+    GIT_TAG        v1.15.2
+    GIT_SHALLOW    TRUE
+    GIT_PROGRESS   TRUE
+    GIT_SUBMODULES ""
+  )
+  set(INSTALL_GTEST OFF CACHE BOOL "" FORCE)
+  FetchContent_MakeAvailable(googletest)
+  add_subdirectory(tests)
+endif()

@@ -1,0 +1,61 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  cpp:
+    runs-on: ubuntu-24.04
+    # The toolchain plus a libc++ OpenCV. apt's OpenCV is libstdc++, which cannot
+    # link against the libc++ binaries this compiler produces.
+    # Built by .github/workflows/toolchain.yml -- that image has to exist before
+    # this job can start, so the first run after a tag bump needs a manual
+    # dispatch of that workflow. The tag string is identical in both files.
+    container:
+      image: ghcr.io/keyficller/campcat-toolchain:p2996-9ffb96e3ce36-ocv4.13.0
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure
+        run: >
+          cmake -S . -B build -G Ninja
+          -DLLVM_ROOT=/opt/clang-p2996
+          -DOpenCV_DIR=/opt/opencv/lib/cmake/opencv4
+      # Both are given explicitly because the image keeps them outside any prefix
+      # CMake searches by default.
+
+      - name: Build
+        # Builds campcat too, so a broken GUI translation unit is a failure here
+        # and not only on the developer's machine.
+        run: cmake --build build
+
+      - name: C++ tests
+        # After the build: gtest_discover_tests reads the test list by running
+        # the binary.
+        run: ctest --test-dir build --output-on-failure
+
+  python:
+    # No C++ here, so no toolchain image needed.
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+
+      - name: Install
+        run: pip install -r requirements.txt
+
+      - name: Python tests
+        run: python -m pytest tests/py -q

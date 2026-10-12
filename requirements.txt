@@ -4,3 +4,4 @@ langgraph-checkpoint-sqlite>=3.1.1
 langchain-deepseek>=1.1.0
 langfuse>=4.17.0
 Pillow>=12.3.0
+pytest>=8
