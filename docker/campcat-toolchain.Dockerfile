@@ -25,20 +25,26 @@ RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-ins
 # The image's cmake is 3.28 and rejects the cxx_std_26 cppreflect asks for.
 RUN python3 -m pip install --break-system-packages "cmake>=4.4,<5"
 
-# Only the four modules the project uses. A full OpenCV is 30-60 minutes; this is
-# 5-15.
+# Only the four modules the project uses. `freetype` lives in opencv_contrib:
+# without the extra modules path the BUILD_LIST whitelist matches nothing and
+# OpenCV installs without it *silently* -- the image builds fine and the failure
+# only surfaces later, at the consumer's find_package(OpenCV COMPONENTS
+# freetype). A full OpenCV is 30-60 minutes; whitelisting keeps this 5-15.
 RUN git clone --depth 1 --branch ${OPENCV_VERSION} \
       https://github.com/opencv/opencv.git /src/opencv \
+ && git clone --depth 1 --branch ${OPENCV_VERSION} \
+      https://github.com/opencv/opencv_contrib.git /src/opencv_contrib \
  && cmake -S /src/opencv -B /src/opencv/build -G Ninja \
       -DCMAKE_INSTALL_PREFIX=/opt/opencv \
       -DCMAKE_C_COMPILER=/opt/clang-p2996/bin/clang \
       -DCMAKE_CXX_COMPILER=/opt/clang-p2996/bin/clang++ \
       -DCMAKE_BUILD_TYPE=Release \
+      -DOPENCV_EXTRA_MODULES_PATH=/src/opencv_contrib/modules \
       -DBUILD_LIST=core,imgproc,imgcodecs,freetype \
       -DWITH_FREETYPE=ON -DWITH_GTK=OFF -DWITH_QT=OFF \
       -DBUILD_TESTS=OFF -DBUILD_PERF_TESTS=OFF -DBUILD_EXAMPLES=OFF \
       -DBUILD_JAVA=OFF -DBUILD_opencv_python3=OFF -DBUILD_DOCS=OFF \
  && cmake --build /src/opencv/build \
  && cmake --install /src/opencv/build \
- && rm -rf /src/opencv
+ && rm -rf /src/opencv /src/opencv_contrib
 # -stdlib=libc++ is deliberately absent: the image's clang++.cfg already forces it.
