@@ -443,41 +443,16 @@ void start_turn(campcat::shell_state &_st, const campcat::app_config &_cfg,
         campcat::llm::tool_context ctx;
         ctx.adb = &adb;
         ctx.adb_busy = [] { return g_adb_busy.load(); };
-        // Folded here, in one place: the master switch and the tool's own gate.
-        // The names are the ones the tools report in their approval requests,
-        // so a tool asks about itself and there is no second table to keep in
-        // step.
-        const bool master = cfg_snapshot.approval.require;
-        const campcat::approval_gates gates = cfg_snapshot.approval.gates;
-        ctx.needs_approval = [master, gates](std::string_view _tool) {
-            if (!master) {
-                return false;
-            }
-            if (_tool == "tap") {
-                return gates.tap;
-            }
-            if (_tool == "run_script") {
-                return gates.run_script;
-            }
-            if (_tool == "save_script") {
-                return gates.save_script;
-            }
-            if (_tool == "save_template") {
-                return gates.save_template;
-            }
-            if (_tool == "update_script") {
-                return gates.update_script;
-            }
-            if (_tool == "delete_script") {
-                return gates.delete_script;
-            }
-            if (_tool == "rename_script") {
-                return gates.rename_script;
-            }
-            // A gated tool this table has not heard of asks rather than skips:
-            // an unguarded surprise is the one failure worth avoiding here.
-            return true;
+        // Both read live rather than folded here: the settings popup can change
+        // them mid-turn, and a gate that keeps asking after it was switched off
+        // is the bug this avoids. `snapshot_cfg` is the thread-safe read, and
+        // `st` outlives the thread (see below). `cfg` itself stays the turn's
+        // snapshot: it is what the adb client was built from.
+        ctx.needs_approval = [st](std::string_view _tool) {
+            return campcat::llm::approval_gate_required(
+                st->snapshot_cfg().approval, _tool);
         };
+        ctx.box_snap = [st] { return st->snapshot_cfg().box_snap; };
         ctx.cfg = &cfg_snapshot;
         ctx.script_dir =
             std::filesystem::path(cfg_snapshot.config_home) / "scripts/llm";
@@ -786,6 +761,9 @@ constexpr char k_send_path[] = "assets/icons/send.png";
 /// box the gear uses, so the two square buttons carry equally sized icons.
 constexpr float k_send_icon_side = 20.0F;
 
+/// Wide enough for the longest snap mode name ("Otsu blobs") plus the arrow.
+constexpr float k_snap_combo_w = 130.0F;
+
 /// Which tools ask the human before acting. The master switch keeps its old
 /// meaning -- off means nothing asks -- and the seven under it only matter
 /// while it is on, hence the greying rather than hiding them.
@@ -847,23 +825,28 @@ void draw_approval_settings(campcat::app_config &_c) {
     ImGui::Separator();
     // Not an approval gate: the snap is something the tool does on the way to
     // acting. It sits here because this is where a human comes when a tap landed
-    // wrong, and it needs the same kind of kill switch.
-    ImGui::Checkbox("Snap boxes to element edges", &_c.box_snap.enabled);
+    // wrong, and it needs the same kind of kill switch. One control rather than
+    // a checkbox over a pair of radios: "off" is just the third mode, so the two
+    // answers cannot disagree.
+    const char *const k_snap_modes[] = {"None", "Otsu blobs", "Edge step"};
+    int snap_mode = 0;
+    if (_c.box_snap.enabled) {
+        snap_mode =
+            _c.box_snap.strategy == campcat::box_snap_strategy::step ? 2 : 1;
+    }
+    ImGui::SetNextItemWidth(k_snap_combo_w);
+    if (ImGui::Combo("Snap boxes", &snap_mode, k_snap_modes, 3)) {
+        _c.box_snap.enabled = snap_mode != 0;
+        _c.box_snap.strategy = snap_mode == 2 ? campcat::box_snap_strategy::step
+                                              : campcat::box_snap_strategy::otsu;
+    }
     if (ImGui::IsItemHovered()) {
         ImGui::SetTooltip(
             "Pull the model's box onto the element before tapping or cutting "
             "it. The measured gain is small and one kind of element (a glowing "
-            "or soft-edged button) comes out worse, so turn this off to restore "
+            "or soft-edged button) comes out worse, so choose None to restore "
             "the old behaviour exactly.");
     }
-    ImGui::BeginDisabled(!_c.box_snap.enabled);
-    int strategy = _c.box_snap.strategy == campcat::box_snap_strategy::step ? 1 : 0;
-    ImGui::RadioButton("Otsu blobs", &strategy, 0);
-    ImGui::SameLine();
-    ImGui::RadioButton("Edge step", &strategy, 1);
-    _c.box_snap.strategy = strategy == 1 ? campcat::box_snap_strategy::step
-                                         : campcat::box_snap_strategy::otsu;
-    ImGui::EndDisabled();
     ImGui::EndPopup();
 }
 

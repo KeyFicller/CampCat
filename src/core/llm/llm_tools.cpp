@@ -706,7 +706,7 @@ CPP_REFLECT_TOOL(mark)
     // approving what they see is approving what happens.
     const rect given{x, y, w, h};
     const box_snap_config snap =
-        g_ctx.cfg != nullptr ? g_ctx.cfg->box_snap : box_snap_config{};
+        g_ctx.box_snap ? g_ctx.box_snap() : box_snap_config{};
     // A box the human drew is the answer, not a guess: the CV must not move it.
     const bool human = g_human_box && same_box(*g_human_box, given);
     const rect use = (snap.enabled && !human)
@@ -969,7 +969,7 @@ CPP_REFLECT_TOOL(save_script)
     // against the very frame this cut comes from. Everything below cuts, previews
     // and reports `use`, so what the human approves is what lands on disk.
     const box_snap_config snap =
-        g_ctx.cfg != nullptr ? g_ctx.cfg->box_snap : box_snap_config{};
+        g_ctx.box_snap ? g_ctx.box_snap() : box_snap_config{};
     // A box the human drew is the answer, not a guess: the CV must not move it.
     const bool human = g_human_box && same_box(*g_human_box, box);
     const rect use =
@@ -1498,6 +1498,37 @@ CPP_REFLECT_TOOL(rename_script)
 }
 
 } // namespace tools
+
+bool approval_gate_required(const approval_config &_gates,
+                            std::string_view _tool) {
+    if (!_gates.require) {
+        return false;
+    }
+    if (_tool == "tap") {
+        return _gates.gates.tap;
+    }
+    if (_tool == "run_script") {
+        return _gates.gates.run_script;
+    }
+    if (_tool == "save_script") {
+        return _gates.gates.save_script;
+    }
+    if (_tool == "save_template") {
+        return _gates.gates.save_template;
+    }
+    if (_tool == "update_script") {
+        return _gates.gates.update_script;
+    }
+    if (_tool == "delete_script") {
+        return _gates.gates.delete_script;
+    }
+    if (_tool == "rename_script") {
+        return _gates.gates.rename_script;
+    }
+    // A gated tool this table has not heard of asks rather than skips: an
+    // unguarded surprise is the one failure worth avoiding here.
+    return true;
+}
 
 void set_context(const tool_context &_ctx) {
     g_ctx = _ctx;

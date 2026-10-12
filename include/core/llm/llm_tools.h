@@ -7,11 +7,11 @@
 #include <string_view>
 #include <vector>
 
+#include "core/app_config.h"
 #include "core/mumu_launcher.h"
 
 namespace campcat {
 class adb_api;
-struct app_config;
 } // namespace campcat
 
 namespace campcat::llm {
@@ -88,6 +88,13 @@ struct tool_context {
     /// its own. Empty means never: a context built without one gates nothing,
     /// which is what the default means.
     std::function<bool(std::string_view _tool)> needs_approval;
+    /// The snap settings for this call. Read live, like `needs_approval`: the
+    /// LLM popup's snap switch takes effect on the next tool call rather than
+    /// the next turn, so this is a getter rather than the copy in `cfg`. Empty
+    /// falls back to a default-constructed `box_snap_config`, which has the
+    /// snap **on** -- the opposite of `needs_approval`'s empty-means-never, and
+    /// deliberately so: it is what this did before there was a getter.
+    std::function<box_snap_config()> box_snap;
     /// Config the script tools hand to the interpreter (matcher thresholds,
     /// pacing). Null makes `run_script` refuse rather than run with defaults
     /// nobody chose.
@@ -132,6 +139,15 @@ struct tool_reply {
 /// runs the sidecar exchange; that same thread performs every dispatch, so no
 /// lock is needed. Passing a default-constructed context disables the tools.
 void set_context(const tool_context &_ctx);
+
+/// Whether `_gates` makes `_tool` ask the human before acting: the master
+/// switch folded with that tool's own gate. The names are the ones the tools
+/// report in their approval requests, so a tool asks about itself and there is
+/// no second table to keep in step. A gated name the table has not heard of
+/// answers true rather than false: an unguarded surprise is the one failure
+/// worth avoiding here.
+bool approval_gate_required(const approval_config &_gates,
+                            std::string_view _tool);
 
 /// The screenshot the tools currently hold: the one injected this turn, or the
 /// one `screenshot` replaced it with. `run_turn` takes it back at the end of a
