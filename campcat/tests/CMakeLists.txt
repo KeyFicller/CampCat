@@ -7,6 +7,7 @@ add_executable(test_campcat_core cpp/test_approval_gate.cpp
                                  cpp/test_ccat_condition_walks.cpp
                                  cpp/test_ccat_return.cpp
                                  cpp/test_ccat_script_profile.cpp
+                                 cpp/test_llm_host.cpp
                                  cpp/test_llm_protocol.cpp)
 target_link_libraries(test_campcat_core PRIVATE campcat_core GTest::gtest_main)
 

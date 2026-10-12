@@ -656,10 +656,11 @@ void draw_turn(llm_turn &_t, int _index) {
     // A markdown reply cannot be measured from the raw text (`**` would be
     // counted), so the bubble goes full width once there is real text; the
     // placeholder stays tight because a wide box holding "..." looks broken. It
-    // is measured at its widest so the ticking dots do not resize it. A tool
-    // image needs the full width too, or it would be clipped into a narrow
-    // strip.
-    const bool placeholder = _t.pending && _t.reply.empty();
+    // is measured at its widest so the ticking dots do not resize it. Tool notes
+    // and a tool image need the full width too, or the notes would be wrapped
+    // into a narrow column and the image clipped into a narrow strip.
+    const bool placeholder =
+        _t.pending && _t.reply.empty() && _t.tool_notes.empty();
     const bool has_image = !_t.image_png.empty();
     const float aw =
         (placeholder && !has_image)
@@ -675,8 +676,16 @@ void draw_turn(llm_turn &_t, int _index) {
     // Shown above the reply so the model's device actions are visible even
     // while the answer is still streaming. Without them a tap that changed the
     // screen would look like nothing happened.
+    //
+    // Markdown rather than plain text: a note carries a whole tool result, and
+    // the renderer is what wraps it to the bubble width -- plain text is simply
+    // clipped at the edge once the line runs long. The disabled colour is pushed
+    // back by hand so the notes still read as quieter than the reply below them.
     for (const std::string &note : _t.tool_notes) {
-        ImGui::TextDisabled("%s", note.c_str());
+        ImGui::PushStyleColor(ImGuiCol_Text,
+                              ImGui::GetStyle().Colors[ImGuiCol_TextDisabled]);
+        ImGui::Markdown(note.c_str(), note.size(), md_config());
+        ImGui::PopStyleColor();
     }
     // What the model was looking at when it wrote the reply below: a tool image
     // (a screenshot, or a box `mark` drew) that would otherwise be invisible

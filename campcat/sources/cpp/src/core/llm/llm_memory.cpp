@@ -46,7 +46,7 @@ bool read_unlocked(const std::filesystem::path &_path, std::string *_out) {
 } // namespace
 
 std::filesystem::path memory_path(const std::filesystem::path &_config_home) {
-    return _config_home / "llm" / "memory.md";
+    return _config_home / "memory.md";
 }
 
 bool read_memory(const std::filesystem::path &_config_home, std::string *_out) {

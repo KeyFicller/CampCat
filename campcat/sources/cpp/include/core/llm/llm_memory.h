@@ -15,7 +15,7 @@ namespace campcat::llm {
 /// host then refuses.
 constexpr std::size_t k_memory_max_chars = 4000;
 
-/// `<config_home>/llm/memory.md`.
+/// `<config_home>/memory.md`.
 std::filesystem::path memory_path(const std::filesystem::path &_config_home);
 
 /// Read the notes into `_out`.

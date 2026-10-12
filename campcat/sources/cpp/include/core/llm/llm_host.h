@@ -283,4 +283,24 @@ private:
     std::chrono::nanoseconds m_approval_wait{0};
 };
 
+/**
+ * @brief One entry of `llm_host::tool_notes`, as Markdown.
+ *
+ * The status is a bold line and `_body` a paragraph of its own below it; the
+ * blank line between them is what keeps a multi-line payload (`list_scripts`
+ * returns one `name -- description` per line) from being soft wrapped into one
+ * paragraph with the status fused onto its first line. Runs of blank lines in
+ * the input collapse to one, since the renderer spends a full empty text row on
+ * each.
+ *
+ * Display only. What the model receives is the tool reply itself, and nothing
+ * here touches the wire.
+ *
+ * @param[in] _name Tool name.
+ * @param[in] _status "ok" or "error".
+ * @param[in] _body Result text; may be empty.
+ */
+std::string tool_note(const std::string &_name, const char *_status,
+                      const std::string &_body);
+
 } // namespace campcat

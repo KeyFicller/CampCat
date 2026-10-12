@@ -45,7 +45,39 @@ void resolve_sidecar_paths(const std::filesystem::path &_repo_root,
     *_script = _repo_root / k_default_script_rel;
 }
 
+/// Collapses a run of blank lines to one. The Markdown renderer spends a full
+/// empty text row on each blank line, so a payload that arrives with a run of
+/// them opens a hole in the bubble.
+std::string collapse_blank_lines(const std::string &_text) {
+    std::string out;
+    bool previous_blank = false;
+    for (std::size_t pos = 0; pos < _text.size();) {
+        const std::size_t newline = _text.find('\n', pos);
+        const std::size_t stop =
+            newline == std::string::npos ? _text.size() : newline;
+        const std::string line = _text.substr(pos, stop - pos);
+        // Whitespace-only counts as blank: it renders as an empty row too.
+        const bool blank = line.find_first_not_of(" \t\r") == std::string::npos;
+        if (!blank || !previous_blank) {
+            out += line;
+            if (newline != std::string::npos) {
+                out += '\n';
+            }
+        }
+        previous_blank = blank;
+        pos = stop + 1;
+    }
+    return out;
+}
+
 } // namespace
+
+std::string tool_note(const std::string &_name, const char *_status,
+                      const std::string &_body) {
+    return collapse_blank_lines(
+        "**" + _name + "** " + _status +
+        (_body.empty() ? std::string() : "\n\n" + _body));
+}
 
 llm_host::~llm_host() { stop(); }
 
@@ -332,7 +364,7 @@ std::string llm_host::run_tool(const llm_protocol::message &_call) {
     if (call_index > k_max_tool_calls) {
         const std::string error = "tool call limit reached (" +
                                   std::to_string(k_max_tool_calls) + ")";
-        record_note(_call.tool_name + " error: " + error);
+        record_note(tool_note(_call.tool_name, "error", error));
         return llm_protocol::build_tool_result(_call.call_id, false, "", error,
                                                "");
     }
@@ -343,10 +375,9 @@ std::string llm_host::run_tool(const llm_protocol::message &_call) {
         const std::string shown = reply.quiet_note.empty()
                                       ? reply.text
                                       : std::string(reply.quiet_note);
-        record_note(_call.tool_name + " ok" +
-                    (shown.empty() ? std::string() : ": " + shown));
+        record_note(tool_note(_call.tool_name, "ok", shown));
     } else {
-        record_note(_call.tool_name + " error: " + reply.error);
+        record_note(tool_note(_call.tool_name, "error", reply.error));
     }
     if (!reply.image_png.empty()) {
         std::lock_guard<std::mutex> lk(m_mu);
