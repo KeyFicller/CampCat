@@ -36,7 +36,7 @@ class CcatInterpreter {
     friend struct TapOffsetStmt;
     friend struct SwipeAtStmt;
     friend struct WaitUntilStmt;
-    friend struct RetryStmt;
+    friend struct HasStmt;
     friend struct DoWhileStmt;
     friend struct LoopStmt;
     friend struct HomeStmt;
@@ -132,7 +132,7 @@ private:
      * @return std::nullopt when tap succeeds; descriptive failure otherwise
      * (including adb tap errors).
      */
-    std::optional<std::string>
+    std::optional<action_failure>
     tap_image(const std::string &_rel_path,
               const std::function<bool()> &_should_stop);
 
@@ -146,33 +146,34 @@ private:
      */
     std::filesystem::path resolve_image_path(const std::string &_rel) const;
 
-    std::optional<std::string>
+    std::optional<action_failure>
     swipe_templates_impl(const std::string &_from_rel,
                          const std::string &_to_rel,
                          const std::function<bool()> &_should_stop);
 
-    std::optional<std::string>
+    std::optional<action_failure>
     tap_at_impl(double _nx, double _ny,
                 const std::function<bool()> &_should_stop);
 
-    std::optional<std::string>
+    std::optional<action_failure>
     tap_offset_impl(const std::string &_rel_path, double _dx, double _dy,
                     const std::function<bool()> &_should_stop);
 
-    std::optional<std::string>
+    std::optional<action_failure>
     swipe_at_impl(double _x1, double _y1, double _x2, double _y2,
                   const std::function<bool()> &_should_stop);
 
-    std::optional<std::string>
+    std::optional<action_failure>
     wait_until_impl(const std::string &_rel_path, int _timeout_ms,
                     const std::function<bool()> &_should_stop);
 
-    std::optional<std::string>
+    std::optional<action_failure>
     home_impl(const std::function<bool()> &_should_stop);
 
-    std::optional<std::string>
+    std::optional<action_failure>
     run_script_impl(const std::string &_rel,
-                    const std::function<bool()> &_should_stop);
+                    const std::function<bool()> &_should_stop,
+                    bool *_value_out);
 
     stmt_exec_outcome
     exec_program_stmts(const Program &_program,

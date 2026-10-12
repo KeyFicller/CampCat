@@ -284,12 +284,19 @@ _CCAT_CHEATSHEET = (
     "  * Actions: tap(\"a.png\"), tap_at(x, y), tap_offset(\"a.png\", dx, dy), "
     "swipe(\"a.png\", \"b.png\"), wait(ms), wait_until(\"a.png\", ms) (a timeout is an "
     "error), log(\"msg\"), home, run(\"other.ccat\").\n"
-    "  * Control flow: if (\"a.png\") { } else { }, retry(n) { } (retries until it "
-    "succeeds), loop(n) { }, do { } while (\"a.png\") (stops hard at 50000 iterations), "
-    "break, return.\n"
+    "  * Control flow: if (has(\"a.png\")) { } else { }, elif for a chain, loop(n) "
+    "{ }, do { } while (has(\"a.png\")) (stops hard at 50000 iterations), break, "
+    "return. `if` / `elif` / `while` also take `has(\"a.png\")`, which answers "
+    "whether that template is on screen right now, or one of the statements that "
+    "reports a result (tap, tap_offset, swipe, tap_at, swipe_at, wait_until, "
+    "run), which then runs and picks the branch: a failure is false, while a bare "
+    "tap still fails the script. `return` / `return true` answer true, "
+    "`return false` answers false, a script with no return answers true, and "
+    "`run(...)` hands that answer back.\n"
     "  * A failing statement stops the script and comes back to you as an error. "
     "Statements that need a PNG (`tap`, `tap_offset`, `swipe`, `wait_until`) or a `.ccat` "
-    "(`run`) fail when the file is missing; an `if` with a missing template is just false.\n"
+    "(`run`) fail when the file is missing; a `has(...)` whose template is missing is "
+    "just false.\n"
 )
 
 

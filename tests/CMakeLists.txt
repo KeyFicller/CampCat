@@ -2,6 +2,9 @@
 # campcat_core so tests use the same compile flags and OpenCV as the app.
 add_executable(test_campcat_core cpp/test_approval_gate.cpp
                                  cpp/test_automation_log.cpp
+                                 cpp/test_ccat_cond_action.cpp
+                                 cpp/test_ccat_condition_walks.cpp
+                                 cpp/test_ccat_return.cpp
                                  cpp/test_llm_protocol.cpp)
 target_link_libraries(test_campcat_core PRIVATE campcat_core GTest::gtest_main)
 

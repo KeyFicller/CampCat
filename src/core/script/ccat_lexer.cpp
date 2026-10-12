@@ -97,6 +97,9 @@ Token Lexer::lex_ident_or_kw() {
     if (buf == "else") {
         return Token{TokKind::KwElse, std::move(buf), line, col};
     }
+    if (buf == "elif") {
+        return Token{TokKind::KwElif, std::move(buf), line, col};
+    }
     if (buf == "tap") {
         return Token{TokKind::KwTap, std::move(buf), line, col};
     }
@@ -121,9 +124,6 @@ Token Lexer::lex_ident_or_kw() {
     if (buf == "wait_until") {
         return Token{TokKind::KwWaitUntil, std::move(buf), line, col};
     }
-    if (buf == "retry") {
-        return Token{TokKind::KwRetry, std::move(buf), line, col};
-    }
     if (buf == "do") {
         return Token{TokKind::KwDo, std::move(buf), line, col};
     }
@@ -144,6 +144,9 @@ Token Lexer::lex_ident_or_kw() {
     }
     if (buf == "run") {
         return Token{TokKind::KwRun, std::move(buf), line, col};
+    }
+    if (buf == "has") {
+        return Token{TokKind::KwHas, std::move(buf), line, col};
     }
     if (buf == "defs") {
         return Token{TokKind::KwDefs, std::move(buf), line, col};

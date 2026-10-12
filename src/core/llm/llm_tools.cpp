@@ -427,10 +427,14 @@ struct pending_cut {
 };
 
 /// Collects the template operands whose missing file fails the script: `tap`,
-/// `tap_offset`, `swipe` (both ends) and `wait_until`. Deliberately not the
-/// `if` and do-while conditions -- a missing template is just a false condition
-/// there
-/// -- and not `run()`'s target, which is another .ccat resolved at run time.
+/// `tap_offset`, `swipe` (both ends) and `wait_until`, plus those same actions
+/// when they stand as a condition -- `if (tap("x.png"))` really runs, so its
+/// template has to be in the bundle.
+///
+/// Deliberately not `has(...)`: "that template is not here" is the `false` a
+/// `has` exists to report, not a failure, so a typo in it is the author's to
+/// find in the else branch. Not `run()`'s target either, which is another .ccat
+/// resolved at run time.
 ///
 /// ponytail: a statement type carrying a template must be added here; the
 /// language only grows in the parser, so nothing can appear unseen.
@@ -442,17 +446,19 @@ void collect_required_templates(const ccat_lang::Stmt &_s,
             collect_required_templates(*child, _out);
         }
     } else if (const auto *i = dynamic_cast<const IfStmt *>(&_s)) {
+        if (i->action) {
+            collect_required_templates(*i->action, _out);
+        }
         if (i->then_branch) {
             collect_required_templates(*i->then_branch, _out);
         }
         if (i->else_branch) {
             collect_required_templates(*i->else_branch, _out);
         }
-    } else if (const auto *r = dynamic_cast<const RetryStmt *>(&_s)) {
-        if (r->body) {
-            collect_required_templates(*r->body, _out);
-        }
     } else if (const auto *d = dynamic_cast<const DoWhileStmt *>(&_s)) {
+        if (d->condition_action) {
+            collect_required_templates(*d->condition_action, _out);
+        }
         if (d->body) {
             collect_required_templates(*d->body, _out);
         }
@@ -1203,9 +1209,10 @@ struct template_cut {
     }
 
     // A template operand that fails the script has to be declared, or the
-    // update would write a script the bundle cannot run. Conditions are not
-    // operands (a missing template is just false there), and neither is an
-    // absolute path, which is not a file in the bundle.
+    // update would write a script the bundle cannot run. A condition's action
+    // is an operand for the same reason (`if (tap("x.png"))` really runs), but
+    // `has(...)` is not: its template missing is the `false` it exists to
+    // report. Neither is an absolute path, which is not a file in the bundle.
     std::vector<std::string> operands;
     for (const auto &stmt : prog->stmts) {
         collect_required_templates(*stmt, &operands);

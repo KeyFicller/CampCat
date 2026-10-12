@@ -55,7 +55,7 @@ int norm_axis_to_pixel(double _n, int _dim) {
         std::lround(clamped * static_cast<double>(_dim - 1)));
 }
 
-std::optional<std::string>
+std::optional<action_failure>
 cooperative_sleep_ms(int _ms, const std::function<bool()> &_should_stop) {
     constexpr int k_slice_ms = 50;
     int remaining = _ms;
@@ -100,7 +100,6 @@ bool CcatInterpreter::capture_screen(
         return false;
     }
     if (!m_adb->screencap_bgr(_out)) {
-        automation_log::emit("[ccat] screencap failed");
         return false;
     }
     return !_should_stop();
@@ -114,8 +113,6 @@ bool CcatInterpreter::image_matches(const std::string &_rel_path,
     const auto abs_path = resolve_image_path(_rel_path);
     std::error_code ec;
     if (!std::filesystem::is_regular_file(abs_path, ec)) {
-        automation_log::emit("[ccat] if: template file missing " +
-                             abs_path.string());
         *_found = false;
         return true;
     }
@@ -126,8 +123,6 @@ bool CcatInterpreter::image_matches(const std::string &_rel_path,
     const auto opt =
         m_matcher.match_file(screen, abs_path.string(), m_cfg->match.threshold);
     if (!opt.has_value()) {
-        automation_log::emit("[ccat] template unreadable or missing: " +
-                             abs_path.string());
         *_found = false;
         return true;
     }
@@ -183,7 +178,7 @@ void CcatInterpreter::dump_match_debug(const char *_op,
     automation_log::emit(log.str());
 }
 
-std::optional<std::string>
+std::optional<action_failure>
 CcatInterpreter::tap_image(const std::string &_rel_path,
                            const std::function<bool()> &_should_stop) {
     const auto abs_path = resolve_image_path(_rel_path);
@@ -198,7 +193,7 @@ CcatInterpreter::tap_image(const std::string &_rel_path,
         if (_should_stop()) {
             return std::string("stopped");
         }
-        return std::string("screencap failed before tap");
+        return action_failure{"screencap failed before tap", true};
     }
     const auto opt =
         m_matcher.match_file(screen, abs_path.string(), m_cfg->match.threshold);
@@ -216,7 +211,7 @@ CcatInterpreter::tap_image(const std::string &_rel_path,
     }
 
     if (!m_adb->tap(opt->center.x, opt->center.y)) {
-        return std::string("tap: adb tap failed");
+        return action_failure{"tap: adb tap failed", true};
     }
     if (auto sl = cooperative_sleep_ms(
             static_cast<int>(pause_after_tap(*m_cfg).count()), _should_stop)) {
@@ -225,7 +220,7 @@ CcatInterpreter::tap_image(const std::string &_rel_path,
     return std::nullopt;
 }
 
-std::optional<std::string> CcatInterpreter::swipe_templates_impl(
+std::optional<action_failure> CcatInterpreter::swipe_templates_impl(
     const std::string &_from_rel, const std::string &_to_rel,
     const std::function<bool()> &_should_stop) {
     const auto abs_from = resolve_image_path(_from_rel);
@@ -246,7 +241,7 @@ std::optional<std::string> CcatInterpreter::swipe_templates_impl(
         if (_should_stop()) {
             return std::string("stopped");
         }
-        return std::string("swipe: screencap failed");
+        return action_failure{"swipe: screencap failed", true};
     }
     const auto m_from =
         m_matcher.match_file(screen, abs_from.string(), m_cfg->match.threshold);
@@ -272,7 +267,7 @@ std::optional<std::string> CcatInterpreter::swipe_templates_impl(
     }
     if (!m_adb->swipe(m_from->center.x, m_from->center.y, m_to->center.x,
                       m_to->center.y, m_cfg->input.swipe_duration_ms)) {
-        return std::string("swipe: adb swipe failed");
+        return action_failure{"swipe: adb swipe failed", true};
     }
     if (auto sl = cooperative_sleep_ms(
             static_cast<int>(pause_after_tap(*m_cfg).count()), _should_stop)) {
@@ -281,7 +276,7 @@ std::optional<std::string> CcatInterpreter::swipe_templates_impl(
     return std::nullopt;
 }
 
-std::optional<std::string>
+std::optional<action_failure>
 CcatInterpreter::tap_at_impl(double _nx, double _ny,
                              const std::function<bool()> &_should_stop) {
     if (!coord_normalized_ok(_nx) || !coord_normalized_ok(_ny)) {
@@ -292,12 +287,12 @@ CcatInterpreter::tap_at_impl(double _nx, double _ny,
         if (_should_stop()) {
             return std::string("stopped");
         }
-        return std::string("tap_at: screencap failed");
+        return action_failure{"tap_at: screencap failed", true};
     }
     const int px = norm_axis_to_pixel(_nx, screen.cols);
     const int py = norm_axis_to_pixel(_ny, screen.rows);
     if (!m_adb->tap(px, py)) {
-        return std::string("tap_at: adb tap failed");
+        return action_failure{"tap_at: adb tap failed", true};
     }
     if (auto sl = cooperative_sleep_ms(
             static_cast<int>(pause_after_tap(*m_cfg).count()), _should_stop)) {
@@ -306,7 +301,7 @@ CcatInterpreter::tap_at_impl(double _nx, double _ny,
     return std::nullopt;
 }
 
-std::optional<std::string>
+std::optional<action_failure>
 CcatInterpreter::tap_offset_impl(const std::string &_rel_path, double _dx,
                                  double _dy,
                                  const std::function<bool()> &_should_stop) {
@@ -322,7 +317,7 @@ CcatInterpreter::tap_offset_impl(const std::string &_rel_path, double _dx,
         if (_should_stop()) {
             return std::string("stopped");
         }
-        return std::string("tap_offset: screencap failed before match");
+        return action_failure{"tap_offset: screencap failed before match", true};
     }
     const auto opt =
         m_matcher.match_file(screen, abs_path.string(), m_cfg->match.threshold);
@@ -352,7 +347,7 @@ CcatInterpreter::tap_offset_impl(const std::string &_rel_path, double _dx,
         return oss.str();
     }
     if (!m_adb->tap(px, py)) {
-        return std::string("tap_offset: adb tap failed");
+        return action_failure{"tap_offset: adb tap failed", true};
     }
     if (auto sl = cooperative_sleep_ms(
             static_cast<int>(pause_after_tap(*m_cfg).count()), _should_stop)) {
@@ -361,7 +356,7 @@ CcatInterpreter::tap_offset_impl(const std::string &_rel_path, double _dx,
     return std::nullopt;
 }
 
-std::optional<std::string>
+std::optional<action_failure>
 CcatInterpreter::swipe_at_impl(double _x1, double _y1, double _x2, double _y2,
                                const std::function<bool()> &_should_stop) {
     if (!coord_normalized_ok(_x1) || !coord_normalized_ok(_y1) ||
@@ -373,14 +368,14 @@ CcatInterpreter::swipe_at_impl(double _x1, double _y1, double _x2, double _y2,
         if (_should_stop()) {
             return std::string("stopped");
         }
-        return std::string("swipe_at: screencap failed");
+        return action_failure{"swipe_at: screencap failed", true};
     }
     const int ax = norm_axis_to_pixel(_x1, screen.cols);
     const int ay = norm_axis_to_pixel(_y1, screen.rows);
     const int bx = norm_axis_to_pixel(_x2, screen.cols);
     const int by = norm_axis_to_pixel(_y2, screen.rows);
     if (!m_adb->swipe(ax, ay, bx, by, m_cfg->input.swipe_duration_ms)) {
-        return std::string("swipe_at: adb swipe failed");
+        return action_failure{"swipe_at: adb swipe failed", true};
     }
     if (auto sl = cooperative_sleep_ms(
             static_cast<int>(pause_after_tap(*m_cfg).count()), _should_stop)) {
@@ -389,7 +384,7 @@ CcatInterpreter::swipe_at_impl(double _x1, double _y1, double _x2, double _y2,
     return std::nullopt;
 }
 
-std::optional<std::string>
+std::optional<action_failure>
 CcatInterpreter::home_impl(const std::function<bool()> &_should_stop) {
     if (_should_stop()) {
         return std::string("stopped");
@@ -423,9 +418,10 @@ CcatInterpreter::exec_program_stmts(const Program &_program,
     return stmt_exec_outcome::make_ok();
 }
 
-std::optional<std::string>
+std::optional<action_failure>
 CcatInterpreter::run_script_impl(const std::string &_rel,
-                                 const std::function<bool()> &_should_stop) {
+                                 const std::function<bool()> &_should_stop,
+                                 bool *_value_out) {
     if (_should_stop()) {
         return std::string("stopped");
     }
@@ -474,6 +470,12 @@ CcatInterpreter::run_script_impl(const std::string &_rel,
     stmt_exec_outcome o = exec_program_stmts(*prog, _should_stop);
 
     if (o.kind == stmt_exec_outcome::tag::returned || o.is_ok()) {
+        // The callee's `return` ends the callee only: its answer surfaces as a
+        // value here, and the caller decides -- nothing at all, unless it wrapped
+        // the run in an `if`.
+        if (_value_out != nullptr) {
+            *_value_out = o.value;
+        }
         return std::nullopt;
     }
     if (o.kind == stmt_exec_outcome::tag::stopped) {
@@ -482,7 +484,7 @@ CcatInterpreter::run_script_impl(const std::string &_rel,
     return o.message.empty() ? std::string("run: error") : std::move(o.message);
 }
 
-std::optional<std::string>
+std::optional<action_failure>
 CcatInterpreter::wait_until_impl(const std::string &_rel_path, int _timeout_ms,
                                  const std::function<bool()> &_should_stop) {
     const auto abs_path = resolve_image_path(_rel_path);
@@ -506,7 +508,7 @@ CcatInterpreter::wait_until_impl(const std::string &_rel_path, int _timeout_ms,
             if (_should_stop()) {
                 return std::string("stopped");
             }
-            return std::string("wait_until: screencap failed");
+            return action_failure{"wait_until: screencap failed", true};
         }
         if (found) {
             dump_match_debug("wait_until", abs_path, screen, mr);
@@ -556,7 +558,7 @@ stmt_exec_outcome BreakStmt::exec(CcatInterpreter &,
 
 stmt_exec_outcome ReturnStmt::exec(CcatInterpreter &,
                                    const std::function<bool()> &) const {
-    return stmt_exec_outcome::make_returned();
+    return stmt_exec_outcome::make_returned(value);
 }
 
 stmt_exec_outcome
@@ -577,7 +579,17 @@ DebugStmt::exec(CcatInterpreter &_interp,
 stmt_exec_outcome
 RunStmt::exec(CcatInterpreter &_interp,
               const std::function<bool()> &_should_stop) const {
-    return outcome_from_opt(_interp.run_script_impl(script_rel, _should_stop));
+    bool value = true;
+    stmt_exec_outcome o = outcome_from_opt(
+        _interp.run_script_impl(script_rel, _should_stop, &value));
+    // A callee that answered false is not a failure: the caller carries on, and
+    // only an `if` / `while` reads the answer. `message` is left empty on
+    // purpose -- nothing prints it, because the interpreter logs nothing; the
+    // answer is the only thing that travels.
+    if (o.is_ok() && !value) {
+        o.value = false;
+    }
+    return o;
 }
 
 stmt_exec_outcome
@@ -602,16 +614,47 @@ LogStmt::exec(CcatInterpreter &_interp,
 stmt_exec_outcome
 IfStmt::exec(CcatInterpreter &_interp,
              const std::function<bool()> &_should_stop) const {
+    // The condition is its own statement: it runs either way, and a failure picks
+    // `else` instead of stopping the script. Every failure is false here, which is
+    // the whole point of writing one in this position -- and what keeps a bare
+    // `tap` hard.
+    //
+    // `stopped` has to pass through: a user who stopped the script must not be
+    // routed into `else` and have it carry on. The other three tags cannot arrive
+    // from these statements.
+    const stmt_exec_outcome o = _interp.exec_stmt(action.get(), _should_stop);
+    if (o.kind == stmt_exec_outcome::tag::stopped) {
+        return o;
+    }
+    // A device failure is not a screen state: let it stop the script rather than
+    // read it as `false` and take `else`.
+    if (o.kind == stmt_exec_outcome::tag::error && o.device) {
+        return o;
+    }
+    // `o.value` is what a `run` that answered false -- or a `has` that did not
+    // find its template -- carries, so `if (run("check.ccat"))` reads the callee's
+    // answer.
+    const Stmt *branch =
+        (o.is_ok() && o.value) ? then_branch.get() : else_branch.get();
+    return _interp.exec_stmt(branch, _should_stop);
+}
+
+stmt_exec_outcome
+HasStmt::exec(CcatInterpreter &_interp,
+              const std::function<bool()> &_should_stop) const {
     bool found = false;
     if (!_interp.image_matches(image_path, _should_stop, &found)) {
         if (_should_stop()) {
             return stmt_exec_outcome::make_stopped();
         }
-        return stmt_exec_outcome::make_error(
-            "screencap failed in if condition");
+        // A device failure rather than a screen state, so it is tagged: the
+        // condition slot lets it through instead of reading it as `false`.
+        return stmt_exec_outcome::make_error("has: screencap failed",
+                                             /*_device=*/true);
     }
-    const Stmt *branch = found ? then_branch.get() : else_branch.get();
-    return _interp.exec_stmt(branch, _should_stop);
+    // A missing or unreadable template is a plain `false` -- exactly what the old
+    // bare-string condition meant.
+    return stmt_exec_outcome::make_ok(found);
 }
 
 stmt_exec_outcome
@@ -649,35 +692,6 @@ WaitUntilStmt::exec(CcatInterpreter &_interp,
 }
 
 stmt_exec_outcome
-RetryStmt::exec(CcatInterpreter &_interp,
-                const std::function<bool()> &_should_stop) const {
-    stmt_exec_outcome last_err = stmt_exec_outcome::make_ok();
-    for (int attempt = 0; attempt < attempts; ++attempt) {
-        if (_should_stop()) {
-            return stmt_exec_outcome::make_stopped();
-        }
-        stmt_exec_outcome o = _interp.exec_stmt(body.get(), _should_stop);
-        if (o.kind == stmt_exec_outcome::tag::ok ||
-            o.kind == stmt_exec_outcome::tag::break_loop) {
-            return stmt_exec_outcome::make_ok();
-        }
-        if (o.kind == stmt_exec_outcome::tag::returned ||
-            o.kind == stmt_exec_outcome::tag::stopped) {
-            return o;
-        }
-        last_err = std::move(o);
-        if (attempt + 1 < attempts) {
-            stmt_exec_outcome sl =
-                outcome_from_opt(cooperative_sleep_ms(50, _should_stop));
-            if (!sl.is_ok()) {
-                return sl;
-            }
-        }
-    }
-    return last_err;
-}
-
-stmt_exec_outcome
 DoWhileStmt::exec(CcatInterpreter &_interp,
                   const std::function<bool()> &_should_stop) const {
     if (!body) {
@@ -698,20 +712,31 @@ DoWhileStmt::exec(CcatInterpreter &_interp,
         if (!body_o.is_ok()) {
             return body_o;
         }
-        bool found = false;
-        if (!_interp.image_matches(condition_image_path, _should_stop,
-                                   &found)) {
-            if (_should_stop()) {
-                return stmt_exec_outcome::make_stopped();
+
+        // The same soft-failure contract `if` has: the condition runs either
+        // way, failing only ends the loop, and `stopped` still passes through.
+        // No logging either.
+        bool again = false;
+        if (condition_action) {
+            const stmt_exec_outcome o =
+                _interp.exec_stmt(condition_action.get(), _should_stop);
+            if (o.kind == stmt_exec_outcome::tag::stopped) {
+                return o;
             }
-            return stmt_exec_outcome::make_error(
-                "do_while: screencap failed in condition");
+            // Same device check as `if`: a broken device is not a screen state,
+            // so the loop stops instead of quietly ending.
+            if (o.kind == stmt_exec_outcome::tag::error && o.device) {
+                return o;
+            }
+            again = o.is_ok() && o.value;
+        } else {
+            // The parser guarantees exactly one of the two is set.
+            again = *condition_literal;
         }
-        if (!found) {
-            break;
+        if (!again) {
+            return stmt_exec_outcome::make_ok();
         }
     }
-    return stmt_exec_outcome::make_ok();
 }
 
 stmt_exec_outcome
@@ -760,8 +785,11 @@ CcatInterpreter::run(const Program &_program,
     stmt_exec_outcome o = exec_program_stmts(_program, _should_stop);
 
     if (o.kind == stmt_exec_outcome::tag::returned || o.is_ok()) {
-        r.ok = true;
-        r.message = "ok";
+        // The answer lands on `ok`, so `automation_cycle_result` keeps its two
+        // fields and every existing consumer -- `run_script`, the scheduled
+        // task, `[console] ok=...` -- reports a false answer without a new one.
+        r.ok = o.value;
+        r.message = o.value ? "ok" : std::string("the script returned false");
         return r;
     }
     r.ok = false;

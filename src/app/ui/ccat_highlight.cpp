@@ -123,10 +123,10 @@ const TextEditor::LanguageDefinition &ccat_language() {
         // ponytail: this list and the lexer's are two copies by choice; a test
         // (`ccat_highlight_test`) fails if they drift apart.
         static const char *const keywords[] = {
-            "if",     "else",       "tap",      "wait",       "log",   "swipe",
-            "tap_at", "tap_offset", "swipe_at", "wait_until", "retry", "do",
-            "while",  "loop",       "break",    "return",     "home",  "run",
-            "defs",   "true",       "false"};
+            "if",    "else",   "elif",       "tap",      "wait",       "log",
+            "swipe", "tap_at", "tap_offset", "swipe_at", "wait_until", "do",
+            "while", "loop",   "break",      "return",   "home",       "run",
+            "has",   "defs",   "true",       "false"};
         for (const char *word : keywords) {
             def.mKeywords.insert(word);
         }

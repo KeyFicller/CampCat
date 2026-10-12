@@ -90,27 +90,30 @@ std::filesystem::path canonical_root(const std::filesystem::path &_script_dir) {
     return ec ? _script_dir : canon;
 }
 
-/// ponytail: a statement type that can hold a body has to be walked here, or a
-/// run() nested inside it becomes an edge nobody sees and its target gets
-/// deleted. New statement types only appear in the parser, so nothing can slip
-/// in unseen.
+/// ponytail: a statement type that can hold a body or a condition has to be
+/// walked here, or a run() nested inside it becomes an edge nobody sees and its
+/// target gets deleted. New statement types only appear in the parser, so
+/// nothing can slip in unseen.
 void collect_run_targets(const Stmt &_s, std::vector<std::string> *_out) {
     if (const auto *b = dynamic_cast<const BlockStmt *>(&_s)) {
         for (const auto &child : b->body) {
             collect_run_targets(*child, _out);
         }
     } else if (const auto *i = dynamic_cast<const IfStmt *>(&_s)) {
+        // `run` is a legal condition, so this is a real edge, not a precaution.
+        if (i->action) {
+            collect_run_targets(*i->action, _out);
+        }
         if (i->then_branch) {
             collect_run_targets(*i->then_branch, _out);
         }
         if (i->else_branch) {
             collect_run_targets(*i->else_branch, _out);
         }
-    } else if (const auto *r = dynamic_cast<const RetryStmt *>(&_s)) {
-        if (r->body) {
-            collect_run_targets(*r->body, _out);
-        }
     } else if (const auto *d = dynamic_cast<const DoWhileStmt *>(&_s)) {
+        if (d->condition_action) {
+            collect_run_targets(*d->condition_action, _out);
+        }
         if (d->body) {
             collect_run_targets(*d->body, _out);
         }

@@ -178,7 +178,7 @@ bool is_source_complete(std::string_view source) {
 
             after_do_body = false;
 
-            if (starts_with_kw(id, "if") || starts_with_kw(id, "retry") ||
+            if (starts_with_kw(id, "if") || starts_with_kw(id, "elif") ||
                 starts_with_kw(id, "loop")) {
                 skip_ws();
                 if (i >= n || source[i] != '(') {

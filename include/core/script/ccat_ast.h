@@ -12,6 +12,22 @@ namespace campcat::ccat_lang {
 class CcatInterpreter;
 
 /**
+ * @brief Why an action failed. The `device` flag is the distinction that lets a
+ * condition tell a broken device from a screen state: a screenshot that never
+ * happened must not read as `false` and quietly take the `else` branch.
+ */
+struct action_failure {
+    std::string message;
+    bool device = false;
+
+    /// One argument (a screen-state failure) converts implicitly, which is the
+    /// common case, so the existing `return oss.str();` sites stay as they are.
+    /// The `device` tag is for the screenshot that never happened.
+    action_failure(std::string _message, bool _device = false)
+        : message(std::move(_message)), device(_device) {}
+};
+
+/**
  * @brief Control-flow result from executing one Stmt subtree (success, loop
  * break, script return, cooperative stop, or error message).
  */
@@ -20,10 +36,24 @@ struct stmt_exec_outcome {
 
     tag kind = tag::ok;
     std::string message;
+    /// The script's own answer. Set on `returned`, and on the `ok` a `run`
+    /// produces for a callee that answered false -- riding `ok` is what keeps
+    /// that answer from being read as an error and stopping the caller. True
+    /// everywhere else: an action reports "it worked" through `kind`.
+    bool value = true;
+    /// Set only alongside `tag::error`: the device itself failed, so a condition
+    /// must not swallow it.
+    bool device = false;
 
     bool is_ok() const { return kind == tag::ok; }
 
-    static stmt_exec_outcome make_ok() { return {}; }
+    /// `_value` is the script's result: a bare `return` ends it with true. A
+    /// `has` that did not find its template is the other caller, with false.
+    static stmt_exec_outcome make_ok(bool _value = true) {
+        stmt_exec_outcome o;
+        o.value = _value;
+        return o;
+    }
 
     static stmt_exec_outcome make_break() {
         stmt_exec_outcome o;
@@ -31,9 +61,11 @@ struct stmt_exec_outcome {
         return o;
     }
 
-    static stmt_exec_outcome make_returned() {
+    /// `_value` is the script's result: a bare `return` ends it with true.
+    static stmt_exec_outcome make_returned(bool _value = true) {
         stmt_exec_outcome o;
         o.kind = tag::returned;
+        o.value = _value;
         return o;
     }
 
@@ -44,23 +76,28 @@ struct stmt_exec_outcome {
         return o;
     }
 
-    static stmt_exec_outcome make_error(std::string _msg) {
+    /// `_device` marks a failure of the device rather than of the screen, which
+    /// only a condition reads.
+    static stmt_exec_outcome make_error(std::string _msg,
+                                        bool _device = false) {
         stmt_exec_outcome o;
         o.kind = tag::error;
         o.message = std::move(_msg);
+        o.device = _device;
         return o;
     }
 };
 
 inline stmt_exec_outcome
-outcome_from_opt(std::optional<std::string> &&_maybe_err) {
+outcome_from_opt(std::optional<action_failure> &&_maybe_err) {
     if (!_maybe_err) {
         return stmt_exec_outcome::make_ok();
     }
-    if (*_maybe_err == "stopped") {
+    if (_maybe_err->message == "stopped") {
         return stmt_exec_outcome::make_stopped();
     }
-    return stmt_exec_outcome::make_error(std::move(*_maybe_err));
+    return stmt_exec_outcome::make_error(std::move(_maybe_err->message),
+                                         _maybe_err->device);
 }
 
 /**
@@ -86,12 +123,21 @@ struct BlockStmt final : Stmt {
 };
 
 /**
- * @brief Conditional branch on template visibility (`if (image)` … optional
- * `else`).
+ * @brief Conditional branch on a statement's own result (`if (...) ... else`)
+ * or on `has(...)`.
  */
 struct IfStmt final : Stmt {
-    /** @brief Relative or absolute template path from DSL semantics. */
-    std::string image_path;
+    /** @brief The condition, as a statement whose own result decides the branch:
+     * one of the seven result actions (`if (tap("a.png"))`) or `has("a.png")`.
+     *
+     * Never null. A literal or bool-def condition is folded away at parse time,
+     * so an `IfStmt` that reaches the tree always has something to evaluate.
+     *
+     * A plain `Stmt` on purpose -- the node really is a `TapStmt` /
+     * `TapOffsetStmt` / `SwipeTemplatesStmt` / `TapAtStmt` / `SwipeAtStmt` /
+     * `WaitUntilStmt` / `RunStmt` / `HasStmt`, so the walks that collect
+     * templates and run() targets still find it. */
+    std::unique_ptr<Stmt> action;
     std::unique_ptr<Stmt> then_branch;
     std::unique_ptr<Stmt> else_branch;
 
@@ -101,7 +147,7 @@ struct IfStmt final : Stmt {
 };
 
 /**
- * @brief Exit the innermost enclosing `loop`, `do`/`while`, or `retry`.
+ * @brief Exit the innermost enclosing `loop` or `do`/`while`.
  */
 struct BreakStmt final : Stmt {
     stmt_exec_outcome
@@ -110,9 +156,12 @@ struct BreakStmt final : Stmt {
 };
 
 /**
- * @brief End the entire script successfully (`return`).
+ * @brief End the entire script with a result (`return` / `return false`).
  */
 struct ReturnStmt final : Stmt {
+    /** @brief The script's result: true unless it wrote `return false`. */
+    bool value = true;
+
     stmt_exec_outcome
     exec(CcatInterpreter &_interp,
          const std::function<bool()> &_should_stop) const override;
@@ -252,11 +301,13 @@ struct WaitUntilStmt final : Stmt {
 };
 
 /**
- * @brief Execute `body` up to `attempts` times until it succeeds (no error).
+ * @brief Test whether `image_path` is on screen right now (`has("a.png")`).
+ *
+ * Never a statement of its own: the parser accepts it only where a condition
+ * belongs. A template that is not there is `false`, not an error.
  */
-struct RetryStmt final : Stmt {
-    int attempts = 0;
-    std::unique_ptr<Stmt> body;
+struct HasStmt final : Stmt {
+    std::string image_path;
 
     stmt_exec_outcome
     exec(CcatInterpreter &_interp,
@@ -264,11 +315,28 @@ struct RetryStmt final : Stmt {
 };
 
 /**
- * @brief Run `body` once then repeat while `condition_image_path` is visible.
+ * @brief Run `body` once then repeat while the condition holds.
  */
 struct DoWhileStmt final : Stmt {
     std::unique_ptr<BlockStmt> body;
-    std::string condition_image_path;
+    /** @brief The action whose own result decides whether to repeat
+     * (`do { A } while (tap("next.png"))`), or null. The same eight statement
+     * types `IfStmt::action` accepts (`has` plus the seven actions), and
+     * `parse_do_while` is what guarantees it. */
+    std::unique_ptr<Stmt> condition_action;
+    /** @brief The answer when the condition is a literal, which the parser knows
+     * without looking at the screen: `while (true)` / `while (false)` / a bool
+     * def. Empty when the condition is an action.
+     *
+     * `std::optional` rather than a plain `bool` so that "not a literal" is
+     * expressible at all: when `condition_action` is set, this must be empty.
+     *
+     * `while (false)` is *not* folded down to its body even though it runs it
+     * once: a `break` in the body would then leave the enclosing `loop` instead
+     * of this statement. Same reason `while (true)` is not rewritten as
+     * `loop(50000)` -- `LoopStmt` ends quietly at its cap while this loop
+     * errors. */
+    std::optional<bool> condition_literal;
 
     stmt_exec_outcome
     exec(CcatInterpreter &_interp,

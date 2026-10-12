@@ -17,23 +17,25 @@ device.
 A PNG path or a message may be a quoted string, a string `def`, or a bare word (letters, digits, `_`, `.`, `-`), so
 `tap(ok.png)` is legal but spaces need quotes. Absolute paths are used as is; relative ones resolve against the
 directory of the `.ccat` file being run. Strings are `"..."` with `\n`, `\t`, `\\`, `\"`; any other `\x` is `x`.
-Scripts you save live in a bundle, `config/scripts/llm/<name>/main.ccat` with their templates beside it; run one from
-another script with `run("<name>/main.ccat")`.
+Scripts you save live in a bundle, `config/scripts/llm/<name>/main.ccat` with their templates beside it; run one with
+`run("<name>/main.ccat")`. A `run` path resolves like any other relative one -- against the calling script's own
+directory -- so a script that is itself saved in a bundle reaches another one as `run("../<name>/main.ccat")`:
+without the `../`, `<name>/main.ccat` means a directory inside its own bundle.
 
 **`<name>` is a skill.** The first line of `main.ccat` is its one-line description when it starts with `//`:
 `// taps the login button and waits for the feed`. `list_scripts` shows every bundle with its description; read one
 before writing a new skill, and build on what is there with `run()` rather than copying its statements. Change an
 existing skill with `update_script`, which replaces the script and its template set together.
 
-Counts and timeouts are non-negative integer literals: `wait(0)` and `loop(0)` are fine, `wait_until("a.png", 0)` and
-`retry(0)` are rejected while parsing. No arithmetic: `wait(1000 + 500)` is a syntax error.
+Counts and timeouts are non-negative integer literals: `wait(0)` and `loop(0)` are fine, `wait_until("a.png", 0)` is
+rejected while parsing. No arithmetic: `wait(1000 + 500)` is a syntax error.
 
 Waits are **capped, not rejected**: `wait(ms)` runs at most `5000` ms and `wait_until("a.png", ms)` at most `20000` ms,
 so a larger number silently becomes the cap rather than an error.
 
 ```ccat
 defs { claim = "claim.png" }
-if (claim) { tap(claim) } else { log("no claim") }
+if (has(claim)) { tap(claim) } else { log("no claim") }
 ```
 
 ## Statements
@@ -52,11 +54,17 @@ if (claim) { tap(claim) } else { log("no claim") }
 | `run("other.ccat")` | another script, relative to this file | unreadable; cyclic; deeper than 16; callee error |
 
 **A named file that is missing fails the statement**, which is why `tap`, `tap_offset`, `swipe`, `wait_until` and
-`run` need their files to exist first. `if` is the exception (below).
+`run` need their files to exist first. `has(...)` is the exception (below): a template that is not there is exactly
+what it reports.
+
+Any statement in the table above that reports a result can also stand as an `if` / `elif` / `while` condition, where
+a failure is `false` instead of stopping the script. See **Conditions that ask the screen**.
 
 `update_script` checks exactly this list: every template a `tap`, `tap_offset`, `swipe` or `wait_until` names must be
-in the declared template set, and it refuses the update naming the ones that are not. `if` conditions and `run()`
-targets are not checked; absolute paths are not bundle files, so they are not either.
+in the declared template set, and it refuses the update naming the ones that are not. A condition counts the same way
+-- `if (tap("x.png"))` really taps, so its template has to be declared -- but `has(...)` does not, because a template
+that is not there is the `false` it reports. `run()` targets are not checked; absolute paths are not bundle files, so
+they are not either.
 
 After a tap or swipe the script waits `max(tap_delay_ms, action_gap_ms)` (config, 1000 ms), so you rarely need `wait`
 after an action.
@@ -77,26 +85,100 @@ the script, so the error names the step that did not land instead of letting the
 the script run against a stale screen. Anchor after `run()` too: a callee that succeeds
 can still leave the screen somewhere you did not expect.
 
-`wait_until` is not `if`. `if ("a.png")` takes one screenshot and treats a missing template
+`wait_until` is not `has`. `if (has("a.png"))` takes one screenshot and treats a missing template
 as false, which is how you branch on the screen you are on. `wait_until` waits for the
 screen you expect, and fails rather than falling through.
 
 ## Control flow
 
-`if ("a.png") { ... } else { ... }` takes one screenshot, then runs a branch. **A missing template is not an error
-here: the condition is simply false.** `else` is optional.
+`if (has("a.png")) { ... } else { ... }` takes one screenshot, then runs a branch. **A missing template is not an
+error here: the condition is simply false.** `else` is optional.
+
+`elif` is `else if`: a chain is tried in order and stops at the first condition that holds, so write the most
+specific one first and put `else` last. `else if` still spells the same thing.
 
 `loop(n) { ... }` runs the body exactly `n` times; `0` succeeds.
 
-`retry(n) { ... }` runs the body **until it succeeds**, 50 ms apart: success exits early, `break` counts as success,
-and if every attempt fails the last error is what the script gets.
+To wait for a template to show up, use `wait_until("a.png", 2000)`: it looks every 50 ms and **times out with an
+error**, so a screen that never arrives stops the script. For anything else, poll with a loop -- but note that
+running out of attempts is **not** an error:
 
-`do { ... } while ("a.png")` runs the body first, then repeats while the template is visible, giving up with an error
-after **50000** iterations, so a polling loop needs another way out.
+```ccat
+loop(5) { if (tap_at(0.5, 0.5)) { break } wait(50) }
+```
 
-`break` leaves the innermost `loop` / `do` / `retry`; elsewhere it is an error (`break outside loop`). `return` ends
-the whole script successfully, including from inside a `retry`. An error stops the script wherever it happens, except
-inside a `retry`, which uses it only to decide whether to try again.
+`do { ... } while (has("a.png"))` runs the body first, then repeats while the condition holds, giving up with an
+error after **50000** iterations. It takes every condition `if` does -- see **Conditions that ask the screen** below.
+
+`break` leaves the innermost `loop` or `do`/`while`; elsewhere it is an error (`break outside loop`). `return` ends
+the whole script and carries its result: `return` and `return true` both answer `true`, `return false` answers
+`false`, and a boolean `def` may stand in for either. A script that runs to the end with no `return` answers `true`,
+so **answering false is something you say, not something that happens** -- an error is still an error, never a
+`false`.
+
+`run("other.ccat")` hands that answer back, which is how one script asks another a question:
+
+```ccat
+if (run("logged_in.ccat")) { tap("feed.png") } else { tap("login.png") }
+```
+
+A bare `run` of a script that answered `false` is not a failure: the caller carries on, and the answer is only
+visible where you test it with `if`. A callee's `return` ends the callee, never the caller. An error stops the script
+wherever it happens.
+
+## Conditions that ask the screen
+
+Two kinds of statement may stand as an `if` / `elif` / `while` condition.
+
+`has("a.png")` answers whether that template is on screen **right now** -- one screenshot, `true` or `false`, never
+an error:
+
+```ccat
+if (has("a.png")) { log("here") } else { log("not here") }
+```
+
+Any statement in the table above that can report a result also works: `tap`, `tap_offset`, `swipe`, `tap_at`,
+`swipe_at`, `wait_until`, `run`. It runs, and its result picks the branch: a failure is `false`, so it does not stop
+the script.
+
+```ccat
+if (tap("claim.png")) { log("collected") } else { log("no claim button") }
+if (wait_until("feed.png", 8000)) { tap("post.png") }
+```
+
+A chain reads as "whichever of these is on screen first", because an action that finds nothing changes nothing:
+
+```ccat
+if (tap("claim.png")) { log("claimed") }
+elif (tap("sign_in.png")) { log("signed in") }
+elif (has("already.png")) { log("already claimed") }
+else { log("neither is here") }
+```
+
+Nothing else. `log`, `wait` and `home` cannot be conditions: the first two always succeed, and `home` only fails when
+the device itself is gone, which is not a screen state. `break`, `return`, `loop`, `do` are control flow rather than
+answers. A template is always tested through `has(...)` -- never as a string on its own, so a condition never leaves
+you guessing whether it is a template or a boolean.
+
+**A bare `tap("x.png")` still fails the script.** Being written as a condition is what turns a failure into a
+`false`. Nothing is written to the log for you: if you want a record of which branch was taken, `log` it yourself in
+the branch. One screenshot, not two: `if (tap("x.png")) { ... }` captures once, where
+`if (has("x.png")) { tap("x.png") }` captures for the test and again for the tap.
+
+A condition's action is checked like a bare one: `update_script` needs the `x.png` of `if (tap("x.png"))` in the
+bundle. A `has(...)` template is **not** checked -- "that template is not here" is a `false`, not an error, so a typo
+in `has` shows up as the else branch.
+
+`do ... while` takes the same conditions and repeats **while** one holds -- the usual way to page through a list
+until the next button is gone:
+
+```ccat
+do { tap("swipe_left.png") } while (has("next_page.png"))
+```
+
+`while (true)` repeats until a `break` in the body, so it is how you write a loop that ends on a condition of your
+own; it still errors if it reaches 50000 iterations. `while (false)` runs the body once. Nothing is logged for you
+here either.
 
 ## defs
 
@@ -105,7 +187,8 @@ string, `true`, `false`: `defs { n = 3  btn = "ok.png"  fast = true }`.
 
 `defs` is parse-time substitution (the AST never sees it), so a string def can stand wherever a PNG path or a message
 is expected. `if (fast)` on a bool def is folded into the chosen branch while parsing; a **number** def in an `if` is
-a syntax error.
+a syntax error, and a **string** def has to be spelled `has(name)` -- a bare `if (name)` would not say whether it
+means a template or a boolean.
 
 ## Coordinates & timing
 

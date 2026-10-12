@@ -45,6 +45,30 @@ bool is_simple_def_name(const std::string &_name) {
     return true;
 }
 
+/// The statements that may stand as an `if` / `elif` / `while` condition: each
+/// answers a real question about the screen or the device. `log` and `wait`
+/// always succeed, `home` only fails when the device is gone (a broken device,
+/// not a screen state), and `break` / `return` / `loop` / `do` are control flow
+/// rather than answers.
+///
+/// `has` is in here although it cannot stand alone as a statement -- `parse_stmt`
+/// is what rejects it. This helper only answers "may this be a condition?".
+bool is_cond_action(TokKind _k) {
+    switch (_k) {
+    case TokKind::KwHas:
+    case TokKind::KwTap:
+    case TokKind::KwTapOffset:
+    case TokKind::KwSwipe:
+    case TokKind::KwTapAt:
+    case TokKind::KwSwipeAt:
+    case TokKind::KwWaitUntil:
+    case TokKind::KwRun:
+        return true;
+    default:
+        return false;
+    }
+}
+
 class Parser {
 public:
     explicit Parser(std::string_view _src) : m_lex(_src) {}
@@ -322,8 +346,11 @@ private:
             return parse_swipe_at();
         case TokKind::KwWaitUntil:
             return parse_wait_until();
-        case TokKind::KwRetry:
-            return parse_retry();
+        case TokKind::KwHas:
+            // Falling through to `expected statement (...)` would leave the author
+            // guessing; `has("x.png")` on its own is a real mistake to make.
+            fail("has(\"a.png\") is a condition: write it inside if (...) or "
+                 "while (...)");
         case TokKind::KwDo:
             return parse_do_while();
         case TokKind::KwLoop:
@@ -343,7 +370,7 @@ private:
         default:
             fail("expected statement (if, tap, wait, log, swipe, tap_at, "
                  "tap_offset, "
-                 "swipe_at, wait_until, retry, do, loop, break, return, home, "
+                 "swipe_at, wait_until, do, loop, break, return, home, "
                  "run, "
                  "$Debug, or block)");
         }
@@ -364,46 +391,74 @@ private:
     }
 
     std::unique_ptr<Stmt> parse_if() {
-        expect(TokKind::KwIf, "expected if");
-        expect(TokKind::LParen, "expected '(' after if");
+        // Both keywords: `parse_else_tail` sends `elif` here rather than
+        // duplicating the body below.
+        const bool is_elif = m_lex.peek().kind == TokKind::KwElif;
+        if (!is_elif && m_lex.peek().kind != TokKind::KwIf) {
+            fail("expected if");
+        }
+        (void)m_lex.next();
+        // `expect` takes a `const char *`, so the message is picked, not built.
+        expect(TokKind::LParen, is_elif ? "expected '(' after elif"
+                                        : "expected '(' after if");
 
-        Token cond = m_lex.peek();
-        if (cond.kind == TokKind::Ident) {
-            if (const DefValue *def = find_def(cond.text)) {
-                if (def->kind == DefKind::boolean) {
-                    const bool take_then = def->boolean;
-                    (void)m_lex.next();
-                    expect(TokKind::RParen, "expected ')' after if condition");
-                    auto then_branch = parse_stmt();
-                    std::unique_ptr<Stmt> else_branch;
-                    if (m_lex.peek().kind == TokKind::KwElse) {
-                        (void)m_lex.next();
-                        else_branch = parse_stmt();
-                    }
-                    if (take_then) {
-                        return then_branch;
-                    }
-                    if (else_branch) {
-                        return else_branch;
-                    }
-                    return std::make_unique<BlockStmt>();
-                }
-                if (def->kind == DefKind::number) {
-                    fail("if condition cannot be a number def");
-                }
-                // string def → image path via parse_image_ref
+        // A literal or a bool def decides the branch while parsing, so nothing of
+        // this `if` reaches the AST. The tail is still parsed, so a syntax error
+        // inside it is still reported; it is then dropped, or returned as the
+        // branch taken.
+        //
+        // The literal case is new: `true` / `false` used to be rejected here,
+        // because a condition had to be a template. They are folded rather than
+        // run, exactly like a bool def, so `if (true)` and `while (true)` read
+        // alike.
+        const Token cond = m_lex.peek();
+        std::optional<bool> known;
+        if (cond.kind == TokKind::KwTrue || cond.kind == TokKind::KwFalse) {
+            known = cond.kind == TokKind::KwTrue;
+            (void)m_lex.next();
+        } else if (cond.kind == TokKind::Ident) {
+            const DefValue *def = find_def(cond.text);
+            if (!def) {
+                fail("if condition is not a known def; a template needs has(a)");
+            }
+            if (def->kind == DefKind::boolean) {
+                known = def->boolean;
+                (void)m_lex.next();
+            } else if (def->kind == DefKind::number) {
+                fail("if condition cannot be a number def");
+            } else {
+                // A string def is a template, and a template has to be spelled
+                // `has(a)`: a bare def would not say which of the two it is.
+                fail("if condition cannot be a template def; write has(a)");
             }
         }
-
-        std::string img = parse_image_ref();
-        expect(TokKind::RParen, "expected ')' after condition image");
-        auto node = std::make_unique<IfStmt>();
-        node->image_path = std::move(img);
-        node->then_branch = parse_stmt();
-        if (m_lex.peek().kind == TokKind::KwElse) {
-            (void)m_lex.next();
-            node->else_branch = parse_stmt();
+        if (known.has_value()) {
+            const bool take_then = *known;
+            expect(TokKind::RParen, "expected ')' after if condition");
+            auto then_branch = parse_stmt();
+            auto else_branch = parse_else_tail();
+            if (take_then) {
+                return then_branch;
+            }
+            // An `elif` tail is a real `IfStmt` -- its own condition may be an
+            // action -- so returning it keeps it alive instead of folding it away.
+            if (else_branch) {
+                return else_branch;
+            }
+            return std::make_unique<BlockStmt>();
         }
+
+        auto node = std::make_unique<IfStmt>();
+        if (is_cond_action(m_lex.peek().kind)) {
+            node->action = parse_cond_action();
+        } else {
+            fail("if (...) takes has(\"a.png\") or a statement that reports a "
+                 "result (tap, tap_offset, swipe, tap_at, swipe_at, wait_until, "
+                 "run)");
+        }
+        expect(TokKind::RParen, "expected ')' after condition");
+        node->then_branch = parse_stmt();
+        node->else_branch = parse_else_tail();
         return node;
     }
 
@@ -514,27 +569,44 @@ private:
         return node;
     }
 
-    std::unique_ptr<RetryStmt> parse_retry() {
-        expect(TokKind::KwRetry, "expected retry");
-        expect(TokKind::LParen, "expected '(' after retry");
-        const int n = parse_non_negative_int("retry count");
-        if (n <= 0) {
-            fail("retry(n): n must be positive");
-        }
-        expect(TokKind::RParen, "expected ')' after retry count");
-        auto node = std::make_unique<RetryStmt>();
-        node->attempts = n;
-        node->body = parse_stmt();
-        return node;
-    }
-
     std::unique_ptr<DoWhileStmt> parse_do_while() {
         expect(TokKind::KwDo, "expected do");
         auto node = std::make_unique<DoWhileStmt>();
         node->body = parse_block();
         expect(TokKind::KwWhile, "expected while after do block");
         expect(TokKind::LParen, "expected '(' after while");
-        node->condition_image_path = parse_image_ref();
+
+        // The same shapes `if` takes -- `has`, a result action, a bool def, and
+        // the spelled-out `true` / `false` -- written out instead of shared with
+        // `parse_if`, which folds instead of building a node.
+        const Token t = m_lex.peek();
+        if (t.kind == TokKind::KwTrue || t.kind == TokKind::KwFalse) {
+            node->condition_literal = t.kind == TokKind::KwTrue;
+            (void)m_lex.next();
+        } else if (t.kind == TokKind::Ident) {
+            const DefValue *def = find_def(t.text);
+            if (!def) {
+                fail("while condition is not a known def; a template needs "
+                     "has(a)");
+            }
+            if (def->kind == DefKind::boolean) {
+                node->condition_literal = def->boolean;
+                (void)m_lex.next();
+            } else if (def->kind == DefKind::number) {
+                fail("while condition cannot be a number def");
+            } else {
+                // Same rule as `if`: a template def is a template, so it has to
+                // say so through `has(a)`.
+                fail("while condition cannot be a template def; write has(a)");
+            }
+        } else if (is_cond_action(t.kind)) {
+            node->condition_action = parse_cond_action();
+        } else {
+            fail("while (...) takes has(\"a.png\") or a statement that reports "
+                 "a result (tap, tap_offset, swipe, tap_at, swipe_at, "
+                 "wait_until, run)");
+        }
+
         expect(TokKind::RParen, "expected ')' after while condition");
         return node;
     }
@@ -557,7 +629,25 @@ private:
 
     std::unique_ptr<ReturnStmt> parse_return() {
         expect(TokKind::KwReturn, "expected return");
-        return std::make_unique<ReturnStmt>();
+        auto node = std::make_unique<ReturnStmt>();
+        // A bare `return` stays exactly what it was -- end the script, result
+        // true -- so every existing script keeps its meaning.
+        const Token t = m_lex.peek();
+        if (t.kind == TokKind::KwTrue || t.kind == TokKind::KwFalse) {
+            (void)m_lex.next();
+            node->value = t.kind == TokKind::KwTrue;
+            return node;
+        }
+        if (t.kind == TokKind::Ident) {
+            if (const DefValue *def = find_def(t.text)) {
+                if (def->kind != DefKind::boolean) {
+                    fail("return: def `" + t.text + "` is not a boolean");
+                }
+                (void)m_lex.next();
+                node->value = def->boolean;
+            }
+        }
+        return node;
     }
 
     std::unique_ptr<HomeStmt> parse_home() {
@@ -573,6 +663,62 @@ private:
         auto node = std::make_unique<RunStmt>();
         node->script_rel = std::move(path);
         return node;
+    }
+
+    /// One of `is_cond_action`'s statements, as a condition. The concrete type is
+    /// kept (`unique_ptr<TapStmt>` widens to `unique_ptr<Stmt>`), which is what
+    /// the template and run-target walks rely on to still find it.
+    std::unique_ptr<Stmt> parse_cond_action() {
+        switch (m_lex.peek().kind) {
+        case TokKind::KwHas:
+            return parse_has();
+        case TokKind::KwTap:
+            return parse_tap();
+        case TokKind::KwTapOffset:
+            return parse_tap_offset();
+        case TokKind::KwSwipe:
+            return parse_swipe_templates();
+        case TokKind::KwTapAt:
+            return parse_tap_at();
+        case TokKind::KwSwipeAt:
+            return parse_swipe_at();
+        case TokKind::KwWaitUntil:
+            return parse_wait_until();
+        case TokKind::KwRun:
+            return parse_run();
+        default:
+            // Unreachable through `parse_if` / `parse_do_while`, which only call
+            // this when `is_cond_action` said yes; `[[noreturn]]` keeps the
+            // switch total.
+            fail("expected a statement that reports a result");
+        }
+    }
+
+    /// `has("a.png")`: one screenshot, `true` when the template is on screen.
+    /// This is what the bare-string condition used to mean. Condition-only:
+    /// `parse_stmt` rejects it anywhere else.
+    std::unique_ptr<HasStmt> parse_has() {
+        expect(TokKind::KwHas, "expected has");
+        expect(TokKind::LParen, "expected '(' after has");
+        auto node = std::make_unique<HasStmt>();
+        node->image_path = parse_image_ref();
+        expect(TokKind::RParen, "expected ')' after has template");
+        return node;
+    }
+
+    /// The tail of an `if` / `elif` chain: `else <stmt>`, `elif (...) <tail>`, or
+    /// nothing. `elif` parses through `parse_if`, which takes either keyword, so
+    /// a chain nests exactly the way `else if` already did -- and `else` stays
+    /// last for free, because nothing comes back here after one.
+    std::unique_ptr<Stmt> parse_else_tail() {
+        if (m_lex.peek().kind == TokKind::KwElif) {
+            return parse_if();
+        }
+        if (m_lex.peek().kind == TokKind::KwElse) {
+            (void)m_lex.next();
+            return parse_stmt();
+        }
+        return nullptr;
     }
 
     std::unique_ptr<DebugStmt> parse_debug_directive() {
