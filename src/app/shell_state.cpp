@@ -489,8 +489,18 @@ shell_state::mumu_launch_sequence(const campcat::app_config &shell,
         // launch, so the answer is only good for as long as it is used.
         const std::string addr =
             campcat::mumu_adb_address(tool, index);
-        campcat::adb_client conn(shell.adb.path,
-                                 addr.empty() ? shell.adb.serial : addr);
+        const std::string target = addr.empty() ? shell.adb.serial : addr;
+        if (target.empty()) {
+            // With no `-s` the probes below read whatever device adb happens to
+            // have: a stale `offline` entry makes them fail forever, and a lone
+            // other device would have its boot state answer for ours.
+            st.state = campcat::mumu_state::failed;
+            st.message = "mumutool named no adb port and no serial is set, so "
+                         "the device could not be confirmed ready";
+            append_log("[mumu] " + st.message);
+            return st;
+        }
+        campcat::adb_client conn(shell.adb.path, target);
         std::string co;
         std::string ce;
         conn.connect_remote(addr, 15000, &co, &ce);
@@ -499,6 +509,7 @@ shell_state::mumu_launch_sequence(const campcat::app_config &shell,
                                _should_stop, &why)) {
             st.state = campcat::mumu_state::failed;
             st.message = why;
+            append_log("[mumu] launch failed: " + why);
             return st;
         }
     }
@@ -570,19 +581,33 @@ void shell_state::start_device_poll() {
         while (!device_poll_stop.load()) {
             std::string adb_path;
             std::string serial;
+            std::string tool;
+            int index = 0;
             {
                 // The UI pushes this snapshot every frame, so it already
                 // carries what the Settings fields say.
                 std::lock_guard<std::mutex> lk(m_cfg_mu);
                 adb_path = m_cfg.adb.path;
                 serial = m_cfg.adb.serial;
+                tool = m_cfg.mumu.tool_path;
+                index = m_cfg.mumu.device_index;
             }
             bool online = false;
             if (!adb_path.empty()) {
+                // The instance is a TCP device: adb lists it as `device` only
+                // after somebody connects, and it picks a new port every
+                // launch. Asking mumutool and connecting here is what keeps the
+                // chip honest -- reading `adb devices` alone reports "not
+                // connected" for an instance that is up and usable.
+                const std::string addr =
+                    campcat::mumu_adb_address(tool, index);
+                const std::string target = addr.empty() ? serial : addr;
+                campcat::adb_client adb(adb_path, target);
+                if (!addr.empty()) {
+                    adb.connect_remote(addr, k_poll_adb_timeout_ms);
+                }
                 online = campcat::device_online(
-                    campcat::adb_client(adb_path, serial)
-                        .list_devices(k_poll_adb_timeout_ms),
-                    serial);
+                    adb.list_devices(k_poll_adb_timeout_ms), target);
             }
             device_online.store(online);
             for (int waited = 0;

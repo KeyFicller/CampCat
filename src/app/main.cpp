@@ -317,13 +317,17 @@ int main(int argc, char **argv) {
         const bool show_page_chip = page != shell_page::Settings;
 
         campcat::activity_status device_status{};
-        if (st.mumu_launching.load() || campcat::llm::emulator_starting()) {
-            // Outranks the poll: while the instance comes up the poll can only
-            // report "not there yet", which would read as a failure for minutes
-            // on end.
-            device_status = {campcat::activity_level::waiting, "Booting"};
-        } else if (st.device_online.load()) {
+        if (st.device_online.load()) {
+            // The poll connects before it reads, so this is ground truth: a
+            // launch still in flight must not hide a device that already
+            // answers, which is what read as "should be connected" while the
+            // instance was up.
             device_status = {campcat::activity_level::ok, "Connected"};
+        } else if (st.mumu_launching.load() || campcat::llm::emulator_starting()) {
+            // Only reached before the device answers: while the instance comes
+            // up the poll can only report "not there yet", which would read as
+            // a failure for minutes on end.
+            device_status = {campcat::activity_level::waiting, "Booting"};
         } else {
             device_status = {campcat::activity_level::idle, "No device"};
         }
