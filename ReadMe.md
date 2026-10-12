@@ -12,11 +12,10 @@ Mac 上跑 Android 模拟器的挂机壳子：ADB 截图 + OpenCV 模板匹配�
 
 ## 能干什么
 
-- **脚本自动化**：`.ccat` 脚本放 `config/` 下（一般 `config/scripts/`），模板 PNG 放**同一目录**；语法见 [CCAT.md](CCAT.md)。
-  `config/scripts/<id>.json` 的 `source` 指向脚本（相对 `config/`）；`config/default.json` 的 `scripts` 登记有哪些 id、`active_script` 选当前跑哪个。
-  模型自己存的脚本另在 `config/scripts/llm/<功能名>/` 下：一个 `main.ccat` 加它用的模板 PNG（`save_script` / `save_template` 写，见 [CCAT.md](CCAT.md)）。
+- **脚本自动化**：所有 `.ccat` 都以 bundle 形式放在 `ccat_library/<功能名>/` 下：一个 `main.ccat` 加它用的模板 PNG（**同一目录**）；语法见 [CCAT.md](ccat_library/CCAT.md)。
+  `config.json` 的 `script_bundle` 记录 Script 页选中的 bundle；模型自己存的脚本也落在这里（`save_script` / `save_template` 写，见 [CCAT.md](ccat_library/CCAT.md)）。
 - **定时调度**：间隔 + 抖动，周期跑当前脚本。
-- **LLM**：把截图（模拟器 ADB 截图或本地图片）发给 OpenAI 兼容的 `deepseek-flash`，拿回文字描述；API key 优先读环境变量 `DEEPSEEK_API_KEY`，没有则读 `llm/.env`（dotenv 格式，已 gitignore）。
+- **LLM**：把截图（模拟器 ADB 截图或本地图片）发给 OpenAI 兼容的 `deepseek-flash`，拿回文字描述；API key 优先读环境变量 `DEEPSEEK_API_KEY`，没有则读 `.env`（dotenv 格式，已 gitignore）。
 - **Console**：ImGui 内交互输入 `.ccat` 片段（`>>>` / `...` 多行），真机执行；与 cycle 互斥。
 - **ImGui 壳**：Script / LLM / Console / Settings + 底部常驻 Log；调 ADB、匹配参数、脚本路径；截图裁 ROI 存成与脚本同目录的 PNG。
 

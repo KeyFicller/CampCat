@@ -16,6 +16,11 @@ set(CMAKE_C_COMPILER "${LLVM_ROOT}/bin/clang" CACHE FILEPATH "" FORCE)
 
 project(campcat LANGUAGES CXX)
 
+# This file stays at the repo root with the other dependency declarations
+# (`requirements.txt`, `.python-version`); everything else lives under
+# `campcat/sources/`, split by language, and `config.json` is root-level too.
+# So `CMAKE_CURRENT_SOURCE_DIR` is the repo root throughout.
+
 if(APPLE)
   # A source-built clang has no default sysroot, so it cannot even find the
   # macOS SDK headers without this. Linux has no xcrun and an empty -isysroot
@@ -43,6 +48,20 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 # freetype draws the CJK label `mark` paints onto a screenshot; cv::putText
 # itself only knows ASCII.
 find_package(OpenCV REQUIRED COMPONENTS core imgproc imgcodecs freetype)
+
+# misc/scripts/prime_deps.sh pre-clones every dependency into this cache. When
+# it is present, configure from it offline instead of re-cloning (minutes ->
+# seconds); the script must be re-run after a new dependency is declared. Absent
+# (fresh machine, CI) leaves the normal download path untouched.
+#
+# This must come before include(FetchContent): that module sets both variables
+# itself, and `set(... CACHE ...)` / option() never override a value already set.
+if(NOT FETCHCONTENT_BASE_DIR AND EXISTS "$ENV{HOME}/.cache/campcat-deps/glfw-src")
+  set(FETCHCONTENT_BASE_DIR "$ENV{HOME}/.cache/campcat-deps" CACHE PATH
+    "Primed dependency cache filled by misc/scripts/prime_deps.sh")
+  set(FETCHCONTENT_FULLY_DISCONNECTED ON CACHE BOOL
+    "Reuse the primed cache and keep FetchContent off the network")
+endif()
 
 include(FetchContent)
 
@@ -179,44 +198,44 @@ target_link_libraries(imgui_lib PUBLIC glfw OpenGL::GL)
 
 add_library(imgui_colortextedit_lib STATIC
   ${imgui_colortextedit_SOURCE_DIR}/TextEditor.cpp
-  src/app/ui/ccat_highlight.cpp
+  campcat/sources/cpp/src/app/ui/ccat_highlight.cpp
 )
 target_include_directories(imgui_colortextedit_lib PUBLIC
   ${imgui_colortextedit_SOURCE_DIR}
 )
 target_include_directories(imgui_colortextedit_lib PRIVATE
-  ${CMAKE_CURRENT_SOURCE_DIR}/include
+  ${CMAKE_CURRENT_SOURCE_DIR}/campcat/sources/cpp/include
 )
 target_link_libraries(imgui_colortextedit_lib PUBLIC imgui_lib)
 
 # Core framework + Dear ImGui shell + the ccat driver
 add_library(campcat_core STATIC
-  src/core/adb/adb_client.cpp
-  src/core/mumu/mumu_launcher.cpp
-  src/core/vision/template_matcher.cpp
-  src/core/vision/screen_template_ops.cpp
-  src/core/vision/box_snap.cpp
-  src/core/config/app_config.cpp
-  src/core/automation/automation_factory.cpp
-  src/core/app/scheduler.cpp
-  src/core/app/log_buffer.cpp
-  src/core/app/automation_log.cpp
-  src/core/script/ccat_lexer.cpp
-  src/core/script/ccat_bundle.cpp
-  src/core/script/ccat_parser.cpp
-  src/core/script/ccat_interpreter.cpp
-  src/core/script/ccat_repl.cpp
-  src/core/process.cpp
-  src/core/llm/llm_protocol.cpp
-  src/core/llm/llm_memory.cpp
-  src/core/llm/llm_tools.cpp
-  src/core/llm/llm_host.cpp
-  src/ccat_driver/ccat_script_profile.cpp
-  src/ccat_driver/ccat_script_automation.cpp
-  src/ccat_driver/ccat_program_runner.cpp
+  campcat/sources/cpp/src/core/adb/adb_client.cpp
+  campcat/sources/cpp/src/core/mumu/mumu_launcher.cpp
+  campcat/sources/cpp/src/core/vision/template_matcher.cpp
+  campcat/sources/cpp/src/core/vision/screen_template_ops.cpp
+  campcat/sources/cpp/src/core/vision/box_snap.cpp
+  campcat/sources/cpp/src/core/config/app_config.cpp
+  campcat/sources/cpp/src/core/automation/automation_factory.cpp
+  campcat/sources/cpp/src/core/app/scheduler.cpp
+  campcat/sources/cpp/src/core/app/log_buffer.cpp
+  campcat/sources/cpp/src/core/app/automation_log.cpp
+  campcat/sources/cpp/src/core/script/ccat_lexer.cpp
+  campcat/sources/cpp/src/core/script/ccat_bundle.cpp
+  campcat/sources/cpp/src/core/script/ccat_parser.cpp
+  campcat/sources/cpp/src/core/script/ccat_interpreter.cpp
+  campcat/sources/cpp/src/core/script/ccat_repl.cpp
+  campcat/sources/cpp/src/core/process.cpp
+  campcat/sources/cpp/src/core/llm/llm_protocol.cpp
+  campcat/sources/cpp/src/core/llm/llm_memory.cpp
+  campcat/sources/cpp/src/core/llm/llm_tools.cpp
+  campcat/sources/cpp/src/core/llm/llm_host.cpp
+  campcat/sources/cpp/src/ccat_driver/ccat_script_profile.cpp
+  campcat/sources/cpp/src/ccat_driver/ccat_script_automation.cpp
+  campcat/sources/cpp/src/ccat_driver/ccat_program_runner.cpp
 )
 target_include_directories(campcat_core PUBLIC
-  ${CMAKE_CURRENT_SOURCE_DIR}/include
+  ${CMAKE_CURRENT_SOURCE_DIR}/campcat/sources/cpp/include
   ${OpenCV_INCLUDE_DIRS}
 )
 target_link_libraries(campcat_core PUBLIC
@@ -228,28 +247,27 @@ target_link_libraries(campcat_core PUBLIC
 # The IME candidate-window fix is Objective-C++, so it stays Apple-only.
 set(campcat_platform_sources)
 if(APPLE)
-  list(APPEND campcat_platform_sources src/app/ui/macos_ime.mm)
+  list(APPEND campcat_platform_sources campcat/sources/cpp/src/app/ui/macos_ime.mm)
 endif()
 
 add_executable(campcat
-  src/app/main.cpp
-  src/app/shell_state.cpp
-  src/app/ui/llm_panel.cpp
-  src/app/ui/log_panel.cpp
-  src/app/ui/console_panel.cpp
-  src/app/ui/script_panel.cpp
-  src/app/ui/settings_panel.cpp
-  src/app/ui/script_editor_panel.cpp
-  src/app/ui/template_capture_panel.cpp
-  src/app/ui/prompt_input.cpp
-  src/app/ui/fonts.cpp
-  src/app/ui/gl_texture.cpp
-  src/app/ui/icon_texture.cpp
-  src/app/ui/native_file_dialog.cpp
+  campcat/sources/cpp/src/app/main.cpp
+  campcat/sources/cpp/src/app/shell_state.cpp
+  campcat/sources/cpp/src/app/ui/llm_panel.cpp
+  campcat/sources/cpp/src/app/ui/log_panel.cpp
+  campcat/sources/cpp/src/app/ui/console_panel.cpp
+  campcat/sources/cpp/src/app/ui/script_panel.cpp
+  campcat/sources/cpp/src/app/ui/settings_panel.cpp
+  campcat/sources/cpp/src/app/ui/script_editor_panel.cpp
+  campcat/sources/cpp/src/app/ui/template_capture_panel.cpp
+  campcat/sources/cpp/src/app/ui/prompt_input.cpp
+  campcat/sources/cpp/src/app/ui/fonts.cpp
+  campcat/sources/cpp/src/app/ui/gl_texture.cpp
+  campcat/sources/cpp/src/app/ui/icon_texture.cpp
   ${campcat_platform_sources}
 )
 target_include_directories(campcat PRIVATE
-  ${CMAKE_CURRENT_SOURCE_DIR}/include
+  ${CMAKE_CURRENT_SOURCE_DIR}/campcat/sources/cpp/include
   ${portable_file_dialogs_SOURCE_DIR}
 )
 target_link_libraries(campcat PRIVATE campcat_core imgui_lib glfw OpenGL::GL
@@ -278,5 +296,8 @@ if(BUILD_TESTING)
   )
   set(INSTALL_GTEST OFF CACHE BOOL "" FORCE)
   FetchContent_MakeAvailable(googletest)
-  add_subdirectory(tests)
+  # The second argument matters: without it the binary dir would mirror the
+  # source path and create `build/campcat/`, which collides with the `campcat`
+  # executable the linker writes at `build/campcat`.
+  add_subdirectory(campcat/tests tests)
 endif()

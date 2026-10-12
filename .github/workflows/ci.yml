@@ -61,4 +61,4 @@ jobs:
         run: pip install -r requirements.txt
 
       - name: Python tests
-        run: python -m pytest tests/py -q
+        run: python -m pytest campcat/tests/py -q
