@@ -3,6 +3,7 @@
 #include "ccat_driver/ccat_program_runner.h" // run_ccat_program
 #include "core/adb_client.h"
 #include "core/app_config.h"
+#include "core/automation_log.h"
 #include "core/box_snap.h"
 #include "core/script/ccat_bundle.h" // bundle_main / bundle_names / ...
 #include "core/script/ccat_parser.h" // parse_program / parse_error
@@ -741,6 +742,15 @@ CPP_REFLECT_TOOL(start_emulator)
         throw js::bind_error("no shell config for the script tools");
     }
     script_run_guard guard;
+    // Declared before `capture` on purpose: locals die in reverse order, and
+    // this is what keeps the vector alive for the sink's last call.
+    std::vector<std::string> script_logs;
+    [[maybe_unused]] const automation_log::handle capture =
+        automation_log::add_sink([&script_logs](const std::string &_line) {
+            if (std::optional<std::string> text = script_log_text(_line)) {
+                script_logs.push_back(std::move(*text));
+            }
+        });
     const auto res =
         run_ccat_program(&adb, g_ctx.cfg, g_ctx.script_dir, {}, *prog,
                          [] { return g_script_stop.load(); });
@@ -753,10 +763,10 @@ CPP_REFLECT_TOOL(start_emulator)
             msg.find("adb tap failed") != std::string::npos) {
             msg += k_device_hint;
         }
-        throw js::bind_error(msg);
+        throw js::bind_error(msg + script_log_suffix(script_logs));
     }
     return "script ran ok (" + std::to_string(prog->stmts.size()) +
-           " statements)";
+           " statements)" + script_log_suffix(script_logs);
 }
 CPP_REFLECT_TOOL(run_script)
 

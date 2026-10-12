@@ -586,7 +586,7 @@ WaitStmt::exec(CcatInterpreter &_interp,
 stmt_exec_outcome
 LogStmt::exec(CcatInterpreter &_interp,
               const std::function<bool()> & /*_should_stop*/) const {
-    automation_log::emit(std::string("[ccat] ") + message);
+    automation_log::emit(std::string(automation_log::k_script_log_tag) + message);
     return stmt_exec_outcome::make_ok();
 }
 
