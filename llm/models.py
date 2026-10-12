@@ -110,23 +110,13 @@ RULES = {
     "script_rules": (
         "  * A failing statement stops the script. That error is what you get back -- not a "
         "screen that looks wrong.\n"
-        "    tap(\"login.png\")\n"
-        "    wait_until(\"feed.png\", 8000)\n"
-        "    // -> wait_until: timeout after 8000 ms for feed.png; nothing after it ran\n"
         "  * Anchor every action. After a tap, swipe or `run(...)`, assert the screen it "
         "should have produced with `wait_until(\"expected.png\", ms)`. A step that did not "
         "land then fails there, naming the file, instead of the next statement acting on a "
         "stale screen. Save the anchor's template with the script.\n"
-        "    tap(\"login.png\")\n"
-        "    wait_until(\"inbox.png\", 8000)\n"
-        "    tap(\"message.png\")\n"
-        "    wait_until(\"thread.png\", 8000)\n"
         "  * Ground every `log(...)` in an anchor: never print \"task complete\" on its own. "
         "A `log(...)` that declares a state sits right after the `wait_until` or `if` on a "
         "template that confirms that state.\n"
-        "    tap(\"claim.png\")\n"
-        "    wait_until(\"claim_taken.png\", 8000)\n"
-        "    log(\"reward collected\")\n"
         "  * Size that `ms` from the screenshots, not from a guess. Each caption says when it "
         "was taken and, within a turn, how long passed since the one before; a change that "
         "took +3.2s gets about twice that. `wait_until` stops as soon as the anchor appears, "
@@ -135,12 +125,9 @@ RULES = {
         "number silently becomes the cap and you get less time than you asked for; "
         "`wait_until(\"a.png\", 0)` is a parse error. A timeout is an error that stops the "
         "script.\n"
-        "    wait_until(\"feed.png\", 6000)   // that screen took +3.2s; wait(8000) caps at 5000\n"
         "  * Reuse before you write, and `update_script` before you duplicate: `save_script` "
         "refuses a name that already exists, and the answer is never a second bundle under a "
         "new name.\n"
-        "    // list_scripts showed: claim_reward -- collects the daily reward, so use it\n"
-        "    run_script with the source run(\"claim_reward/main.ccat\")\n"
     ),
     "script_failure_workflow": (
         "A script that fails stops at the statement that failed, and that error comes "
@@ -164,6 +151,29 @@ RULES = {
         "instead of changing another template."
     ),
 }
+
+
+def _read_gold_script() -> str:
+    """The worked example, read from the repo root rather than copied here.
+
+    One example in one file, edited in one place -- `ccat_help` reads `CCAT.md`
+    the same way. A missing file is not fatal, since the rules above stand on
+    their own, so an empty string is the answer and the block is left out.
+    """
+    path = Path(__file__).resolve().parents[1] / "gold_script.ccat"
+    try:
+        return path.read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
+
+
+_example = _read_gold_script()
+if _example:
+    RULES["example_script"] = (
+        "A whole script that follows every rule above: reuse through `run`, an anchor "
+        "after each action, each `log` on its anchor, and every `ms` sized from the "
+        "screenshots. Copy this shape:\n\n" + _example
+    )
 
 # Each rule becomes a `##` heading plus its body; PERSONA stays one plain block.
 DEFAULT_SYSTEM_PROMPT = PERSONA + "\n\n" + "\n\n".join(

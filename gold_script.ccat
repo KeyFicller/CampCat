@@ -1,0 +1,70 @@
+// Collects the daily reward: signs in through the saved skill, claims it, and says what it found.
+// Reference example -- every template name here stands for a real app's control.
+
+defs {
+  sign_in = "../sign_in/main.ccat"   // the saved sign-in skill: reuse it, never re-write those steps
+  feed    = "feed.png"               // home feed tab bar, up only once sign-in finished
+  claim   = "claim.png"              // the claim button, present only while the reward is unclaimed
+  taken   = "claimed.png"            // the same button, greyed out once it is collected
+  popup   = "reward_popup.png"       // the receipt sheet that shows only after a claim lands
+  close_x = "popup_close.png"        // its top-right X
+}
+
+// Ask the saved skill to sign in; it answers whether it reached the feed. A
+// failed sign-in is a `false` here, so the script stops instead of tapping into
+// whatever stale screen is behind it.
+if (run(sign_in)) {
+  log("signed in")                   // the callee anchored the feed itself
+} else {
+  log("sign-in did not reach the feed")
+  return false                       // our call failed: say so rather than press on
+}
+
+// Anchor the screen that step promised, as a condition this time: a
+// `wait_until` that times out is `false` here instead of an error, so the
+// script can say what it saw rather than stopping at the anchor. The captions
+// put the feed about +2s after the sign-in tap, so ask for twice that; it stops
+// the moment the template matches.
+if (wait_until(feed, 4000)) {
+  log("feed is up")                  // grounded in the anchor just matched
+  // other action in this condition
+} else {
+  log("sign-in returned, but the feed never appeared")
+  return false
+}
+
+// "Already claimed" is a normal screen, not a failure, so it is a branch rather
+// than a wait_until that would have to time out.
+if (has(claim)) {
+  tap(claim)
+  wait_until(popup, 8000)            // the receipt shows only if the tap landed
+  log("reward collected")
+} elif (has(taken)) {
+  log("already claimed today")
+  return false                       // done, not failed -- the caller can tell the two apart
+} else {
+  log("neither the claim button nor its claimed state is on screen")
+  return false                       // not the screen we expected; do not guess
+}
+
+// Close the receipt, bounded so a sheet that will not go away stops instead of
+// spinning. Each close should land back on the feed.
+loop(3) {
+  if (has(popup)) {
+    tap(close_x)
+    wait_until(feed, 4000)
+    log("closed the receipt")
+  } else {
+    break
+  }
+}
+
+// The button is greyed only once the reward is ours -- the anchor for the answer,
+// and the last gate on it: no confirmation, no `true`.
+if (wait_until(taken, 4000)) {
+  log("daily claim done")            // grounded in the anchor just matched
+  return true                        // confirmed: the reward is taken
+} else {
+  log("the claim never registered")
+  return false
+}
