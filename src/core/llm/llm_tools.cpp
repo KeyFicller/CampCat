@@ -55,6 +55,13 @@ int g_next_shot = 0;
 /// one call's number can never be reported for the next.
 int g_last_shot = 0;
 
+/// The box the human drew, the last time a rejection handed one out. The
+/// human's box comes back as a fresh `tap` / `save_template` the model relays
+/// (see the box-correction spec, §9-1), so this is the only way the tools can
+/// tell it from one the model guessed -- and it must not be snapped. Cleared at
+/// session reset, with the frames it was measured on.
+std::optional<rect> g_human_box;
+
 /// A script is executing (the UI polls this) and it has been asked to stop (the
 /// UI writes it, the interpreter reads it). Both cross threads, hence atomics.
 std::atomic<bool> g_script_running{false};
@@ -362,6 +369,13 @@ rect snap_model_box(const cv::Mat &_frame, const rect &_box,
                 snapped.box.height};
 }
 
+/// The four ints, all of them. The codebase spells this comparison out inline
+/// (twice already); it earns a name here because it guards the "never snap a
+/// human's box" rule.
+bool same_box(const rect &_a, const rect &_b) {
+    return _a.x == _b.x && _a.y == _b.y && _a.w == _b.w && _a.h == _b.h;
+}
+
 /// Appended to a tool's success sentence when the snap moved the box, so the
 /// model learns its own numbers were adjusted instead of believing the tool used
 /// them. Empty when the box came through unchanged, which keeps that wording
@@ -589,8 +603,11 @@ CPP_REFLECT_TOOL(mark)
     const rect given{x, y, w, h};
     const box_snap_config snap =
         g_ctx.cfg != nullptr ? g_ctx.cfg->box_snap : box_snap_config{};
-    const rect use =
-        snap.enabled ? snap_model_box(current_screen_mat(), given, snap) : given;
+    // A box the human drew is the answer, not a guess: the CV must not move it.
+    const bool human = g_human_box && same_box(*g_human_box, given);
+    const rect use = (snap.enabled && !human)
+                         ? snap_model_box(current_screen_mat(), given, snap)
+                         : given;
     if (needs_approval("tap")) {
         if (!g_ctx.request_approval) {
             throw js::bind_error("no human available to approve the tap");
@@ -619,6 +636,8 @@ CPP_REFLECT_TOOL(mark)
                     ? std::string("user rejected the tap")
                     : "user rejected the tap: " + decision.guidance;
             msg += corrected_box_note(decision, "tap", g_next_shot);
+            // The call relaying this box is the human's, not the model's.
+            g_human_box = decision.box;
             throw js::bind_error(msg);
         }
     }
@@ -835,7 +854,10 @@ CPP_REFLECT_TOOL(save_script)
     // and reports `use`, so what the human approves is what lands on disk.
     const box_snap_config snap =
         g_ctx.cfg != nullptr ? g_ctx.cfg->box_snap : box_snap_config{};
-    const rect use = snap.enabled ? snap_model_box(img, box, snap) : box;
+    // A box the human drew is the answer, not a guess: the CV must not move it.
+    const bool human = g_human_box && same_box(*g_human_box, box);
+    const rect use =
+        (snap.enabled && !human) ? snap_model_box(img, box, snap) : box;
     if (needs_approval("save_template")) {
         if (!g_ctx.request_approval) {
             throw js::bind_error(
@@ -865,6 +887,8 @@ CPP_REFLECT_TOOL(save_script)
                     : "user rejected saving the template: " + decision.guidance;
             msg += corrected_box_note(decision, "save_template",
                                       shot.value_or(g_next_shot));
+            // The call relaying this box is the human's, not the model's.
+            g_human_box = decision.box;
             throw js::bind_error(msg);
         }
     }
@@ -1381,6 +1405,7 @@ void request_emulator_stop() { g_emulator_stop.store(true); }
 void forget_frames() {
     g_frames.clear();
     g_next_shot = 0;
+    g_human_box.reset();
 }
 
 /// Fills a quiet note's `{param}` names from the call's arguments. Which names
