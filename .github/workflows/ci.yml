@@ -12,6 +12,9 @@ concurrency:
 
 permissions:
   contents: read
+  # The cpp job pulls its image from GHCR with GITHUB_TOKEN, and a GHCR package
+  # starts private: without this the pull is denied at "Initialize containers".
+  packages: read
 
 jobs:
   cpp:
