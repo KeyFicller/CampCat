@@ -1,9 +1,12 @@
 #include <core/llm/llm_host.h>
 #include <gtest/gtest.h>
 #include <string>
+#include <vector>
 
 namespace {
 
+using campcat::llm_event;
+using campcat::llm_events_append_text;
 using campcat::tool_note;
 
 TEST(ToolNote, StatusAndBodyAreSeparateParagraphs) {
@@ -48,6 +51,53 @@ TEST(ToolNote, ASingleBlankLineSurvives) {
 TEST(ToolNote, NoBlankLineMeansNoChange) {
     EXPECT_EQ(tool_note("list_scripts", "ok", "a -- one\nb -- two"),
               "**list_scripts** ok\n\na -- one\nb -- two");
+}
+
+TEST(LlmEvents, TextDeltasGrowOneStep) {
+    std::vector<llm_event> events;
+    llm_events_append_text(events, "tap ");
+    llm_events_append_text(events, "512,1024");
+    ASSERT_EQ(events.size(), 1U);
+    EXPECT_EQ(events[0].type, llm_event::kind::text);
+    EXPECT_EQ(events[0].text, "tap 512,1024");
+}
+
+TEST(LlmEvents, AnEmptyDeltaAddsNothing) {
+    // A chunk carries `thinking` and no text; without this the timeline would
+    // grow an empty step per heartbeat.
+    std::vector<llm_event> events;
+    llm_events_append_text(events, "");
+    EXPECT_TRUE(events.empty());
+}
+
+TEST(LlmEvents, AToolStepStartsANewTextStep) {
+    // The boundary is the point: text before a tool call and text after it are
+    // two steps, so the tool lands between them where it happened.
+    std::vector<llm_event> events;
+    llm_events_append_text(events, "let me look");
+    events.push_back(llm_event{llm_event::kind::tool, "**screenshot** ok"});
+    llm_events_append_text(events, "I see the button");
+
+    ASSERT_EQ(events.size(), 3U);
+    EXPECT_EQ(events[0].type, llm_event::kind::text);
+    EXPECT_EQ(events[1].type, llm_event::kind::tool);
+    EXPECT_EQ(events[2].type, llm_event::kind::text);
+    EXPECT_EQ(events[2].text, "I see the button");
+}
+
+TEST(LlmEvents, AnImageStepStartsANewTextStep) {
+    std::vector<llm_event> events;
+    llm_events_append_text(events, "look");
+    llm_event image;
+    image.type = llm_event::kind::image;
+    image.image_id = 7;
+    events.push_back(image);
+    llm_events_append_text(events, "now");
+
+    ASSERT_EQ(events.size(), 3U);
+    EXPECT_EQ(events[1].type, llm_event::kind::image);
+    EXPECT_EQ(events[1].image_id, 7);
+    EXPECT_EQ(events[2].type, llm_event::kind::text);
 }
 
 } // namespace

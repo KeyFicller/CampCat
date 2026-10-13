@@ -2,11 +2,14 @@
 
 #include <chrono>
 #include <condition_variable>
+#include <deque>
 #include <filesystem>
 #include <mutex>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <thread>
+#include <utility>
 #include <vector>
 
 #include "core/llm/llm_protocol.h"
@@ -24,6 +27,27 @@ struct llm_result {
     std::string error; ///< human-readable failure detail
     int turns = -1;    ///< turns the sidecar retains; 0 after a reset
 };
+
+/// @brief One step of the turn in flight, in the order it happened.
+struct llm_event {
+    enum class kind { text, tool, image };
+    kind type = kind::text;
+    /// `text`: the model's words so far. `tool`: its Markdown note, which is
+    /// also where the host puts a line of its own that belongs in the timeline.
+    std::string text;
+    bool ok = true;    ///< `tool`: whether the call succeeded
+    long image_id = 0; ///< `image`: key for `event_image_png`
+};
+
+/**
+ * @brief Append one streamed delta to a timeline.
+ *
+ * Grows the trailing `text` step, or starts a new one when the step before it
+ * was a tool or an image: that boundary is the whole point of the timeline. An
+ * empty delta adds nothing, so a thinking-only chunk leaves no empty step.
+ */
+void llm_events_append_text(std::vector<llm_event> &_events,
+                            std::string_view _delta);
 
 /// One question waiting on the human, as the UI needs to see it. Deliberately
 /// without the screenshot: the UI polls this every frame and the image is a
@@ -118,19 +142,23 @@ public:
     void set_tool_context(const llm::tool_context &_ctx);
 
     /**
-     * @brief One line per tool call in the turn in flight, in call order.
+     * @brief The turn in flight as an ordered timeline; empty when idle.
      *
-     * Polled by the UI to show what the model actually did. Cleared when the
-     * next request starts.
+     * Polled by the UI every frame for what the model said and did, in the
+     * order it happened. Carries no image bytes: those come from
+     * `event_image_png`, once per image event.
      */
-    std::vector<std::string> tool_notes() const;
+    std::vector<llm_event> events() const;
 
     /**
-     * @brief Answer text streamed so far for the in-flight request.
+     * @brief Raw PNG of one image event, or empty once the host dropped it.
      *
-     * Empty when idle. The UI polls this each frame to make the reply grow.
+     * Only the newest screenshots of a turn keep their bytes; a turn can take
+     * hundreds, and a user may be looking at another page for all of them.
+     *
+     * @param[in] _image_id `llm_event::image_id` of the event to fetch.
      */
-    std::string streaming_text() const;
+    std::string event_image_png(long _image_id) const;
 
     /// True once the sidecar reported the model is reasoning.
     bool is_thinking() const;
@@ -155,19 +183,6 @@ public:
      * `approval_screen_png()`, only when `id` changes.
      */
     llm_approval pending_approval() const;
-
-    /**
-     * @brief Raw PNG bytes of the last image a tool returned this turn.
-     *
-     * The UI draws it in the reply bubble; the model already got its own copy
-     * through the tool result. Empty when no tool returned an image. Cleared
-     * when the next turn starts, which is also when `tool_image_id()` moves on.
-     */
-    std::string tool_image_png() const;
-
-    /// Bumped once per image a tool returns. The UI uses it to notice a new
-    /// image without comparing a megabyte of pixels every frame.
-    long tool_image_id() const;
 
     /// Raw PNG bytes of the pending question's screenshot; empty if there is
     /// none.
@@ -250,16 +265,16 @@ private:
     llm_protocol::message m_tool_call;
     bool m_has_tool = false;
 
-    /// Tool activity for the turn in flight; `m_notes` is read by the UI
-    /// thread.
+    /// Tool activity for the turn in flight, read by the UI thread.
     int m_tool_calls = 0;
-    std::vector<std::string> m_notes;
-    /// Last tool image of the turn, raw PNG, kept for the UI to draw.
-    std::string m_tool_png;
+    /// Steps of the turn in flight, in order, guarded by `m_mu`.
+    std::vector<llm_event> m_events;
+    /// PNG bytes of the newest image events, oldest first. Bounded: a turn can
+    /// take hundreds of screenshots and nobody may be watching the page.
+    std::deque<std::pair<long, std::string>> m_event_images;
+    /// Bumped once per image a tool returns; the UI uses it as the image's key.
     long m_tool_image_id = 0;
 
-    /// Streamed deltas for the in-flight request, read by the UI every frame.
-    std::string m_stream;
     bool m_thinking = false;
 
     // Human approval. A separate mutex/cv from `m_mu`/`m_cv`: that pair is the
@@ -284,7 +299,8 @@ private:
 };
 
 /**
- * @brief One entry of `llm_host::tool_notes`, as Markdown.
+ * @brief One entry of the turn's timeline that is not the model's own words,
+ * as Markdown.
  *
  * The status is a bold line and `_body` a paragraph of its own below it; the
  * blank line between them is what keeps a multi-line payload (`list_scripts`

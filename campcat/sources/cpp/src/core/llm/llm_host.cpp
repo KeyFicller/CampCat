@@ -33,6 +33,10 @@ constexpr int k_request_timeout_ms = 86400000;
 /// still considers legal. The deadline above is what bounds total time.
 constexpr int k_max_tool_calls = 1000000;
 
+/// How many of the turn's newest screenshots keep their bytes. Past this the
+/// oldest is dropped and its timeline step renders as unavailable.
+constexpr int k_event_image_stash = 32;
+
 /// The interpreter and script are found by convention, never configured.
 void resolve_sidecar_paths(const std::filesystem::path &_repo_root,
                            std::filesystem::path *_python,
@@ -125,7 +129,7 @@ void llm_host::handle_line(const std::string &_line) {
         // on every delta would only churn.
         std::lock_guard<std::mutex> lk(m_mu);
         if (msg.id == m_pending_id) {
-            m_stream += msg.text;
+            llm_events_append_text(m_events, msg.text);
             m_thinking = m_thinking || msg.thinking;
         }
     } break;
@@ -147,9 +151,32 @@ void llm_host::handle_line(const std::string &_line) {
     }
 }
 
-std::string llm_host::streaming_text() const {
+void llm_events_append_text(std::vector<llm_event> &_events,
+                            std::string_view _delta) {
+    if (_delta.empty()) {
+        return;
+    }
+    if (_events.empty() || _events.back().type != llm_event::kind::text) {
+        llm_event e;
+        e.type = llm_event::kind::text;
+        _events.push_back(std::move(e));
+    }
+    _events.back().text.append(_delta);
+}
+
+std::vector<llm_event> llm_host::events() const {
     std::lock_guard<std::mutex> lk(m_mu);
-    return m_stream;
+    return m_events;
+}
+
+std::string llm_host::event_image_png(long _image_id) const {
+    std::lock_guard<std::mutex> lk(m_mu);
+    for (const auto &entry : m_event_images) {
+        if (entry.first == _image_id) {
+            return entry.second;
+        }
+    }
+    return {};
 }
 
 bool llm_host::is_thinking() const {
@@ -159,7 +186,8 @@ bool llm_host::is_thinking() const {
 
 void llm_host::clear_stream() {
     std::lock_guard<std::mutex> lk(m_mu);
-    m_stream.clear();
+    m_events.clear();
+    m_event_images.clear();
     m_thinking = false;
 }
 
@@ -322,12 +350,11 @@ long llm_host::next_request_id() {
     m_pending_id = id;
     m_has_result = false;
     m_result = llm_result{};
-    m_stream.clear();
     m_thinking = false;
     m_has_tool = false;
     m_tool_calls = 0;
-    m_notes.clear();
-    m_tool_png.clear();
+    m_events.clear();
+    m_event_images.clear();
     return id;
 }
 
@@ -335,24 +362,14 @@ void llm_host::set_tool_context(const llm::tool_context &_ctx) {
     m_tool_ctx = _ctx;
 }
 
-std::vector<std::string> llm_host::tool_notes() const {
-    std::lock_guard<std::mutex> lk(m_mu);
-    return m_notes;
-}
-
-std::string llm_host::tool_image_png() const {
-    std::lock_guard<std::mutex> lk(m_mu);
-    return m_tool_png;
-}
-
-long llm_host::tool_image_id() const {
-    std::lock_guard<std::mutex> lk(m_mu);
-    return m_tool_image_id;
-}
-
+/// A step in the timeline that is not the model's own words: a tool call's
+/// note, or a line the host itself wants shown.
 void llm_host::record_note(const std::string &_note) {
     std::lock_guard<std::mutex> lk(m_mu);
-    m_notes.push_back(_note);
+    llm_event e;
+    e.type = llm_event::kind::tool;
+    e.text = _note;
+    m_events.push_back(std::move(e));
 }
 
 std::string llm_host::run_tool(const llm_protocol::message &_call) {
@@ -381,10 +398,19 @@ std::string llm_host::run_tool(const llm_protocol::message &_call) {
     }
     if (!reply.image_png.empty()) {
         std::lock_guard<std::mutex> lk(m_mu);
+        llm_event e;
+        e.type = llm_event::kind::image;
+        e.image_id = ++m_tool_image_id;
+        m_events.push_back(std::move(e));
         // Kept raw for the UI to draw; the wire is the only place base64
-        // happens.
-        m_tool_png = reply.image_png;
-        ++m_tool_image_id;
+        // happens. Bounded, and dropped oldest first, because the UI may not be
+        // looking at the page while the model takes screenshot after
+        // screenshot.
+        m_event_images.emplace_back(m_tool_image_id, reply.image_png);
+        while (static_cast<int>(m_event_images.size()) >
+               k_event_image_stash) {
+            m_event_images.pop_front();
+        }
     }
     const std::string image_b64 =
         reply.image_png.empty() ? std::string()
@@ -594,7 +620,8 @@ void llm_host::teardown() {
     m_has_result = false;
     m_has_tool = false;
     m_protocol_mismatch.clear();
-    m_stream.clear();
+    m_events.clear();
+    m_event_images.clear();
     m_thinking = false;
 }
 
@@ -603,7 +630,10 @@ void llm_host::teardown() {
 void llm_host::handle_line(const std::string &) {}
 void llm_host::pump(int, bool) {}
 
-std::string llm_host::streaming_text() const { return std::string(); }
+std::vector<llm_event> llm_host::events() const { return {}; }
+
+std::string llm_host::event_image_png(long) const { return {}; }
+
 bool llm_host::is_thinking() const { return false; }
 void llm_host::clear_stream() {}
 
@@ -614,12 +644,6 @@ std::string llm_host::run_tool(const llm_protocol::message &) {
 }
 
 void llm_host::set_tool_context(const llm::tool_context &) {}
-
-std::vector<std::string> llm_host::tool_notes() const { return {}; }
-
-std::string llm_host::tool_image_png() const { return {}; }
-
-long llm_host::tool_image_id() const { return 0; }
 
 void llm_host::record_note(const std::string &) {}
 

@@ -34,6 +34,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cctype>
+#include <deque>
 #include <filesystem>
 #include <mutex>
 #include <optional>
@@ -62,22 +63,26 @@ constexpr float k_gear_side = 20.0F;
 /// footnote on the conversation rather than another control.
 constexpr float k_stat_indent = 12.0F;
 
+/// One step of a turn's timeline, mirrored from the host while the turn runs.
+struct llm_item {
+    campcat::llm_event::kind type = campcat::llm_event::kind::text;
+    std::string text;  ///< text: the model's words; tool: the dimmed note
+    bool ok = true;    ///< tool
+    long image_id = 0; ///< image: host key, and this item's identity
+    /// Bytes until the texture is uploaded, freed right after: a conversation
+    /// of screenshots does not fit in memory, let alone in VRAM.
+    std::string png;
+    GLuint tex = 0;
+    int tex_w = 0;
+    int tex_h = 0;
+    bool tex_tried = false;   ///< upload attempted; 0 `tex` after this failed
+    bool tex_dropped = false; ///< bytes never arrived, or the cap released it
+};
+
 /// One exchange in the conversation: what was sent and what came back.
 struct llm_turn {
     std::string user_text;
-    std::string reply;
-    std::vector<std::string> tool_notes; ///< what the model did, in call order
-    /// Last tool image of the turn, raw PNG, copied from the host once. The
-    /// model already saw this image through the tool result; this copy is for
-    /// the human.
-    std::string image_png;
-    long image_id =
-        0;          ///< which host image `image_png` holds; see tool_image_id()
-    GLuint tex = 0; ///< decoded lazily on the UI thread, needs the GL context
-    int tex_w = 0;
-    int tex_h = 0;
-    bool tex_tried =
-        false; ///< decode attempted; a 0 `tex` after this means failed
+    std::vector<llm_item> items; ///< what happened, in the order it happened
     bool pending = false; ///< sent but unanswered; drives the waiting bubble
     bool ok = false;
     std::string error;
@@ -285,31 +290,60 @@ constexpr float k_stage_thumb_side = 96.0F;
 /// fit in VRAM. The bubble draws it far smaller than this anyway.
 constexpr int k_turn_img_max_w = 640;
 
-/// Upload `_bgr` as a texture. Returns 0 on failure.
-/// Take the host's latest tool image into the turn, if a new one appeared.
-/// Compares ids, not pixels, so the per-frame cost does not include a megabyte
-/// of PNG. A turn that arrives after the image was produced still gets it.
-void adopt_tool_image(llm_turn &_t) {
-    const long id = g_host.tool_image_id();
-    if (_t.image_id == id) {
-        return;
+/// Image textures kept alive at once, oldest released first past this. The
+/// conversation's steps stay, so a released image keeps its row and says so.
+constexpr size_t k_tex_cap = 24;
+
+/// Images whose texture is live, oldest first, by `llm_item::image_id`. Ids and
+/// not pointers: turns are erased from the front as the cap is reached, so an
+/// item can move while the queue still refers to it.
+std::deque<long> g_tex_order;
+
+/// The item holding `_id`'s texture, if the turn is still in the log.
+llm_item *find_item(long _id) {
+    for (llm_turn &t : g_turns) {
+        for (llm_item &it : t.items) {
+            if (it.image_id == _id) {
+                return &it;
+            }
+        }
     }
-    _t.image_id = id;
-    _t.image_png = g_host.tool_image_png();
-    campcat::app::delete_tex(&_t.tex, &_t.tex_w, &_t.tex_h);
-    _t.tex_tried = false; // the next draw decodes the new bytes
+    return nullptr;
 }
 
-/// Decode the turn's image once and upload it. UI thread, and the caller must
-/// hold the GL context.
-void ensure_turn_texture(llm_turn &_t) {
-    if (_t.tex_tried || _t.image_png.empty()) {
+/// Forget the queue's claim on `_id`, releasing its texture.
+void release_item_tex(long _id) {
+    const auto end = std::remove(g_tex_order.begin(), g_tex_order.end(), _id);
+    g_tex_order.erase(end, g_tex_order.end());
+    if (llm_item *it = find_item(_id)) {
+        campcat::app::delete_tex(&it->tex, &it->tex_w, &it->tex_h);
+    }
+}
+
+/// Release the oldest textures until the cap is met again.
+void evict_over_cap() {
+    while (g_tex_order.size() > k_tex_cap) {
+        const long id = g_tex_order.front();
+        if (llm_item *it = find_item(id)) {
+            campcat::app::delete_tex(&it->tex, &it->tex_w, &it->tex_h);
+            it->tex_dropped = true;
+        }
+        g_tex_order.pop_front();
+    }
+}
+
+/// Upload an item's image once and release its bytes. UI thread, and the caller
+/// must hold the GL context.
+void ensure_texture(llm_item &_it) {
+    if (_it.tex_tried || _it.png.empty()) {
         return;
     }
-    _t.tex_tried = true;
-    const cv::Mat buf(1, static_cast<int>(_t.image_png.size()), CV_8UC1,
-                      const_cast<char *>(_t.image_png.data()));
+    _it.tex_tried = true;
+    const cv::Mat buf(1, static_cast<int>(_it.png.size()), CV_8UC1,
+                      _it.png.data());
     const cv::Mat bgr = cv::imdecode(buf, cv::IMREAD_COLOR);
+    _it.png.clear();
+    _it.png.shrink_to_fit();
     if (bgr.empty()) {
         return;
     }
@@ -317,19 +351,62 @@ void ensure_turn_texture(llm_turn &_t) {
         const double scale = static_cast<double>(k_turn_img_max_w) / bgr.cols;
         cv::Mat small;
         cv::resize(bgr, small, cv::Size(), scale, scale, cv::INTER_AREA);
-        _t.tex = campcat::app::upload_bgr(small, &_t.tex_w, &_t.tex_h);
+        _it.tex = campcat::app::upload_bgr(small, &_it.tex_w, &_it.tex_h);
+    } else {
+        _it.tex = campcat::app::upload_bgr(bgr, &_it.tex_w, &_it.tex_h);
+    }
+    if (_it.tex == 0) {
+        _it.tex_dropped = true;
         return;
     }
-    _t.tex = campcat::app::upload_bgr(bgr, &_t.tex_w, &_t.tex_h);
+    g_tex_order.push_back(_it.image_id);
+    evict_over_cap();
+}
+
+/// Release every texture `_t`'s steps own, and the queue's claim on them.
+void release_turn(llm_turn &_t) {
+    for (llm_item &it : _t.items) {
+        if (it.image_id != 0) {
+            release_item_tex(it.image_id);
+        }
+    }
 }
 
 /// Drop every turn, releasing the textures they own. The GL context must be
 /// live.
 void drop_all_turns() {
     for (llm_turn &t : g_turns) {
-        campcat::app::delete_tex(&t.tex, &t.tex_w, &t.tex_h);
+        release_turn(t);
     }
     g_turns.clear();
+    g_tex_order.clear();
+}
+
+/// Mirror the host's timeline into the waiting turn: a text step grows in
+/// place, a new step appends, and an image's bytes are taken the moment it
+/// appears -- the host drops them when the next request starts.
+void sync_items(llm_turn &_t) {
+    const std::vector<campcat::llm_event> events = g_host.events();
+    for (size_t i = 0; i < events.size(); ++i) {
+        const campcat::llm_event &e = events[i];
+        if (i < _t.items.size()) {
+            if (e.type == campcat::llm_event::kind::text &&
+                _t.items[i].text != e.text) {
+                _t.items[i].text = e.text;
+            }
+            continue;
+        }
+        llm_item it;
+        it.type = e.type;
+        it.text = e.text;
+        it.ok = e.ok;
+        it.image_id = e.image_id;
+        if (e.type == campcat::llm_event::kind::image) {
+            it.png = g_host.event_image_png(e.image_id);
+            it.tex_dropped = it.png.empty();
+        }
+        _t.items.push_back(std::move(it));
+    }
 }
 
 /// Fit `_w x _h` into `_max_w`, preserving aspect.
@@ -364,14 +441,10 @@ void append_user_turn(std::string _prompt) {
     llm_turn t;
     t.user_text = std::move(_prompt);
     t.pending = true;
-    // Start level with the host, so the previous turn's image is not mistaken
-    // for a new one on the first frame.
-    t.image_id = g_host.tool_image_id();
 
     g_turns.push_back(std::move(t));
     while (static_cast<int>(g_turns.size()) > k_turn_cap) {
-        campcat::app::delete_tex(&g_turns.front().tex, &g_turns.front().tex_w,
-                                 &g_turns.front().tex_h);
+        release_turn(g_turns.front());
         g_turns.erase(g_turns.begin());
     }
     g_pin_bottom = true;
@@ -390,17 +463,29 @@ llm_turn *pending_turn() {
 /// Fill the waiting turn with the reply. UI thread only.
 void fill_reply(const campcat::llm_result &_res) {
     llm_turn *t = pending_turn();
-    if (t != nullptr) {
-        t->pending = false;
-        t->ok = _res.ok;
-        if (_res.ok) {
-            t->reply = _res.text;
-        } else {
-            t->error = _res.error;
+    if (t == nullptr) {
+        return;
+    }
+    // Once more, because a tool image can arrive in the same frame the turn
+    // finished, which the per-frame pump would have missed.
+    sync_items(*t);
+    t->pending = false;
+    t->ok = _res.ok;
+    if (!_res.ok) {
+        t->error = _res.error;
+    } else if (!_res.text.empty()) {
+        // The timeline is what was streamed, and it normally ends with the
+        // reply. An empty one means the stream never reached us; keeping the
+        // result here is what stops the answer going missing.
+        const bool has_text =
+            !t->items.empty() &&
+            t->items.back().type == campcat::llm_event::kind::text;
+        if (!has_text) {
+            llm_item it;
+            it.type = campcat::llm_event::kind::text;
+            it.text = _res.text;
+            t->items.push_back(std::move(it));
         }
-        // A tool image may have arrived in the same frame the turn finished,
-        // which pump_stream would have missed.
-        adopt_tool_image(*t);
     }
     g_pin_bottom = true;
 }
@@ -411,9 +496,7 @@ void pump_stream() {
     if (t == nullptr) {
         return;
     }
-    t->reply = g_host.streaming_text();
-    t->tool_notes = g_host.tool_notes();
-    adopt_tool_image(*t);
+    sync_items(*t);
     g_thinking = g_host.is_thinking();
 }
 
@@ -656,16 +739,14 @@ void draw_turn(llm_turn &_t, int _index) {
     // A markdown reply cannot be measured from the raw text (`**` would be
     // counted), so the bubble goes full width once there is real text; the
     // placeholder stays tight because a wide box holding "..." looks broken. It
-    // is measured at its widest so the ticking dots do not resize it. Tool notes
-    // and a tool image need the full width too, or the notes would be wrapped
-    // into a narrow column and the image clipped into a narrow strip.
-    const bool placeholder =
-        _t.pending && _t.reply.empty() && _t.tool_notes.empty();
-    const bool has_image = !_t.image_png.empty();
-    const float aw =
-        (placeholder && !has_image)
-            ? bubble_width(g_thinking ? "Thinking..." : "...", max_w, 0.0F, pad)
-            : max_w;
+    // is measured at its widest so the ticking dots do not resize it. Steps and
+    // images need the full width too, or a note would be wrapped into a narrow
+    // column and an image clipped into a narrow strip.
+    const bool placeholder = _t.pending && _t.items.empty();
+    const float aw = placeholder
+                         ? bubble_width(g_thinking ? "Thinking..." : "...",
+                                        max_w, 0.0F, pad)
+                         : max_w;
     const bool failed = !_t.pending && !_t.ok;
     ImGui::PushStyleColor(ImGuiCol_ChildBg, failed ? k_err_bg : k_bot_bg);
     ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, k_bubble_rounding);
@@ -673,37 +754,45 @@ void draw_turn(llm_turn &_t, int _index) {
                       ImGuiChildFlags_AutoResizeY |
                           ImGuiChildFlags_AlwaysUseWindowPadding,
                       ImGuiWindowFlags_NoScrollbar);
-    // Shown above the reply so the model's device actions are visible even
-    // while the answer is still streaming. Without them a tap that changed the
-    // screen would look like nothing happened.
-    //
-    // Markdown rather than plain text: a note carries a whole tool result, and
-    // the renderer is what wraps it to the bubble width -- plain text is simply
-    // clipped at the edge once the line runs long. The disabled colour is pushed
-    // back by hand so the notes still read as quieter than the reply below them.
-    for (const std::string &note : _t.tool_notes) {
-        ImGui::PushStyleColor(ImGuiCol_Text,
-                              ImGui::GetStyle().Colors[ImGuiCol_TextDisabled]);
-        ImGui::Markdown(note.c_str(), note.size(), md_config());
-        ImGui::PopStyleColor();
+    // The turn as it happened, step by step: the model's words in the normal
+    // colour, what it did dimmed, and each image where it appeared. Markdown
+    // rather than plain text for a note, because a note carries a whole tool
+    // result and the renderer is what wraps it to the bubble width -- plain
+    // text is simply clipped at the edge once the line runs long. The disabled
+    // colour is pushed back by hand so the notes still read as quieter than the
+    // replies between them.
+    for (llm_item &it : _t.items) {
+        if (it.type == campcat::llm_event::kind::image) {
+            ensure_texture(it);
+            if (it.tex != 0 && it.tex_w > 0) {
+                const ImVec2 img = fit_image(it.tex_w, it.tex_h,
+                                             ImGui::GetContentRegionAvail().x);
+                ImGui::Image(
+                    static_cast<ImTextureID>(static_cast<uintptr_t>(it.tex)),
+                    img, ImVec2(0.0F, 0.0F), ImVec2(1.0F, 1.0F));
+            } else if (it.tex_dropped) {
+                ImGui::TextDisabled("(screenshot dropped)");
+            }
+            continue;
+        }
+        if (it.type == campcat::llm_event::kind::tool) {
+            ImGui::PushStyleColor(
+                ImGuiCol_Text, ImGui::GetStyle().Colors[ImGuiCol_TextDisabled]);
+            ImGui::Markdown(it.text.c_str(), it.text.size(), md_config());
+            ImGui::PopStyleColor();
+            continue;
+        }
+        ImGui::Markdown(it.text.c_str(), it.text.size(), md_config());
     }
-    // What the model was looking at when it wrote the reply below: a tool image
-    // (a screenshot, or a box `mark` drew) that would otherwise be invisible
-    // here.
-    ensure_turn_texture(_t);
-    if (_t.tex != 0 && _t.tex_w > 0) {
-        const ImVec2 img =
-            fit_image(_t.tex_w, _t.tex_h, ImGui::GetContentRegionAvail().x);
-        ImGui::Image(static_cast<ImTextureID>(static_cast<uintptr_t>(_t.tex)),
-                     img, ImVec2(0.0F, 0.0F), ImVec2(1.0F, 1.0F));
-    }
-    if (_t.pending && !_t.reply.empty()) {
-        ImGui::Markdown(_t.reply.c_str(), _t.reply.size(), md_config());
-    } else if (_t.pending) {
+    // Only while the reply is still to come: a growing text step is its own
+    // sign that the model is working, and a label under it would just be a
+    // second one.
+    const bool has_text =
+        !_t.items.empty() &&
+        _t.items.back().type == campcat::llm_event::kind::text;
+    if (_t.pending && !has_text) {
         ImGui::TextDisabled("%s", waiting_label().c_str());
-    } else if (_t.ok) {
-        ImGui::Markdown(_t.reply.c_str(), _t.reply.size(), md_config());
-    } else {
+    } else if (failed) {
         WITH_FONT(bold, { ImGui::TextColored(k_err_col, "Request failed"); });
         ImGui::TextWrapped("%s", _t.error.c_str());
     }
