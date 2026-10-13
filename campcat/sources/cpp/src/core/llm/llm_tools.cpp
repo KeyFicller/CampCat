@@ -1064,7 +1064,7 @@ CPP_REFLECT_TOOL(save_template)
 }
 CPP_REFLECT_TOOL(ccat_help)
 
-[[= js::doc{
+[[= js::quiet{.text = js::str("List scripts")}]][[= js::doc{
     .text = js::str(
         "Lists the saved .ccat skill bundles, one \"name -- description\" "
         "line each. Call this before writing a new skill: if a bundle "
