@@ -1,6 +1,5 @@
 #include "app/ui/template_capture_panel.h"
 
-#include "app/ui/activity_status.h"
 #include "app/ui/fonts.h"
 #include "ccat_driver/ccat_script_profile.h"
 #include "core/adb_client.h"
@@ -193,9 +192,7 @@ void template_capture_panel_draw(campcat::app_config &_cfg,
                                  const campcat::ccat_script_profile *_ccat_ui,
                                  bool _disable_capture) {
     if (!_ccat_ui) {
-        ImGui::TextColored(
-            campcat::activity_color(campcat::activity_level::waiting),
-            "(CampCat bundle missing)");
+        ImGui::TextDisabled("(CampCat bundle missing)");
         return;
     }
 
@@ -243,9 +240,7 @@ void template_capture_panel_draw(campcat::app_config &_cfg,
     help_marker("Template File Name");
 
     if (g_tex == 0 || g_bgr.empty()) {
-        ImGui::TextColored(
-            campcat::activity_color(campcat::activity_level::waiting),
-            "(no screenshot)");
+        ImGui::TextDisabled("(no screenshot)");
         return;
     }
 

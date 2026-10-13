@@ -1,6 +1,7 @@
 #include "app/ui/console_panel.h"
 
 #include "app/shell_state.h"
+#include "app/ui/activity_status.h"
 #include "app/ui/fonts.h"
 #include "app/ui/prompt_input.h"
 #include "core/script/ccat_parser.h"
@@ -19,13 +20,20 @@ void console_panel_draw(campcat::shell_state &_st,
     static campcat::ccat_lang::CcatRepl console_repl;
     static std::string console_input;
 
+    ImGui::PushStyleColor(ImGuiCol_Text,
+                          ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
     ImGui::TextWrapped(
         "Interactive .ccat console. Multiline uses ... until braces/parens "
         "balance. Disabled while a cycle is running.");
+    ImGui::PopStyleColor();
     ImGui::Spacing();
 
-    ImGui::BeginChild("console_history",
-                      ImVec2(0.0F, -ImGui::GetFrameHeightWithSpacing() * 2.5F),
+    // Room for exactly the rows drawn below it, so the prompt sits at the
+    // bottom the way the LLM page's input does.
+    const float below =
+        ImGui::GetFrameHeightWithSpacing() +
+        (_busy_now ? ImGui::GetTextLineHeightWithSpacing() : 0.0F);
+    ImGui::BeginChild("console_history", ImVec2(0.0F, -below),
                       ImGuiChildFlags_Borders);
     // The same affordance as the log and the LLM panes: right-click the output
     // rather than a button beside the prompt. Clearing brings back the empty
@@ -67,11 +75,13 @@ void console_panel_draw(campcat::shell_state &_st,
     ImGui::EndChild();
 
     if (_busy_now) {
-        ImGui::TextColored(ImVec4(0.9F, 0.6F, 0.2F, 1.0F),
-                           "cycle running - console locked");
+        ImGui::TextColored(
+            campcat::activity_color(campcat::activity_level::waiting),
+            "cycle running - console locked");
         ImGui::BeginDisabled();
     }
 
+    ImGui::AlignTextToFramePadding();
     ImGui::TextUnformatted(console_repl.prompt());
     ImGui::SameLine();
     // The whole width now: the Clear button that used to sit here is the

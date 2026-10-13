@@ -49,6 +49,11 @@ constexpr float k_chip_dot_gap = 6.0F;
 /// answers instead of one long one.
 constexpr float k_chip_gap = 16.0F;
 
+/// Shared by the palette and the nav's selected item, so the shell has one blue.
+const ImVec4 k_accent{0.243F, 0.400F, 0.529F, 1.00F};
+const ImVec4 k_accent_hi{0.302F, 0.478F, 0.616F, 1.00F};
+const ImVec4 k_accent_lo{0.200F, 0.341F, 0.463F, 1.00F};
+
 /// One chip's width: the dot, its gap, then the word.
 float chip_width(const campcat::activity_status &_status) {
     return ImGui::GetTextLineHeight() * k_chip_dot_ems + k_chip_dot_gap +
@@ -158,9 +163,9 @@ int main(int argc, char **argv) {
         const ImVec4 line_hi{0.278F, 0.302F, 0.337F, 1.00F};
         const ImVec4 ink{0.847F, 0.871F, 0.898F, 1.00F};
         const ImVec4 ink_dim{0.478F, 0.510F, 0.549F, 1.00F};
-        const ImVec4 accent{0.243F, 0.400F, 0.529F, 1.00F};
-        const ImVec4 accent_hi{0.302F, 0.478F, 0.616F, 1.00F};
-        const ImVec4 accent_lo{0.200F, 0.341F, 0.463F, 1.00F};
+        const ImVec4 &accent = k_accent;
+        const ImVec4 &accent_hi = k_accent_hi;
+        const ImVec4 &accent_lo = k_accent_lo;
         // Headers and rows get a wash of the accent, not a solid fill, so an
         // expanded section reads as a group instead of a second toolbar.
         const ImVec4 wash{0.243F, 0.400F, 0.529F, 0.28F};
@@ -325,26 +330,18 @@ int main(int argc, char **argv) {
         auto nav_item = [&](const char *label, shell_page target) {
             const bool selected = (page == target);
             if (selected) {
-                ImGui::PushStyleColor(ImGuiCol_Button,
-                                      ImVec4(0.28F, 0.45F, 0.58F, 1.0F));
-                ImGui::PushStyleColor(ImGuiCol_ButtonHovered,
-                                      ImVec4(0.32F, 0.50F, 0.64F, 1.0F));
-                ImGui::PushStyleColor(ImGuiCol_ButtonActive,
-                                      ImVec4(0.24F, 0.40F, 0.52F, 1.0F));
-            } else {
-                ImGui::PushStyleColor(ImGuiCol_Button,
-                                      ImVec4(0.16F, 0.17F, 0.19F, 1.0F));
-                ImGui::PushStyleColor(ImGuiCol_ButtonHovered,
-                                      ImVec4(0.22F, 0.24F, 0.27F, 1.0F));
-                ImGui::PushStyleColor(ImGuiCol_ButtonActive,
-                                      ImVec4(0.20F, 0.22F, 0.25F, 1.0F));
+                ImGui::PushStyleColor(ImGuiCol_Button, k_accent);
+                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, k_accent_hi);
+                ImGui::PushStyleColor(ImGuiCol_ButtonActive, k_accent_lo);
             }
             WITH_FONT(bold, {
                 if (ImGui::Button(label, ImVec2(-1.0F, 0.0F))) {
                     page = target;
                 }
             });
-            ImGui::PopStyleColor(3);
+            if (selected) {
+                ImGui::PopStyleColor(3);
+            }
         };
 
         constexpr float k_left_w = 320.0F;
