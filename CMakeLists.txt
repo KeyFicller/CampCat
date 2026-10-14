@@ -221,6 +221,7 @@ add_library(campcat_core STATIC
   campcat/sources/cpp/src/core/app/automation_log.cpp
   campcat/sources/cpp/src/core/script/ccat_lexer.cpp
   campcat/sources/cpp/src/core/script/ccat_bundle.cpp
+  campcat/sources/cpp/src/core/script/ccat_graph.cpp
   campcat/sources/cpp/src/core/script/ccat_parser.cpp
   campcat/sources/cpp/src/core/script/ccat_interpreter.cpp
   campcat/sources/cpp/src/core/script/ccat_repl.cpp

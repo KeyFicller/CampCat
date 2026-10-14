@@ -148,6 +148,12 @@ Token Lexer::lex_ident_or_kw() {
     if (buf == "has") {
         return Token{TokKind::KwHas, std::move(buf), line, col};
     }
+    if (buf == "goto") {
+        return Token{TokKind::KwGoto, std::move(buf), line, col};
+    }
+    if (buf == "at") {
+        return Token{TokKind::KwAt, std::move(buf), line, col};
+    }
     if (buf == "defs") {
         return Token{TokKind::KwDefs, std::move(buf), line, col};
     }

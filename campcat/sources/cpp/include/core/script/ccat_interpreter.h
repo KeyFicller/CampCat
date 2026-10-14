@@ -2,8 +2,11 @@
 
 #include "core/automation/game_automation.h"
 #include "core/script/ccat_ast.h"
+#include "core/script/ccat_graph.h"
 
 #include "core/template_matcher.h"
+
+#include <unordered_map>
 
 #include <opencv2/core.hpp>
 
@@ -37,6 +40,8 @@ class CcatInterpreter {
     friend struct SwipeAtStmt;
     friend struct WaitUntilStmt;
     friend struct HasStmt;
+    friend struct GotoStmt;
+    friend struct AtStmt;
     friend struct DoWhileStmt;
     friend struct LoopStmt;
     friend struct HomeStmt;
@@ -175,6 +180,17 @@ private:
                     const std::function<bool()> &_should_stop,
                     bool *_value_out);
 
+    /**
+     * @brief The graph named `_name`, loaded once per run.
+     * @return null and an error in `_err` when the graph is missing or invalid.
+     */
+    const screen_graph *cached_graph(const std::string &_name,
+                                     std::string *_err);
+
+    /// Run `<config_home>/<_bundle>/main.ccat` with graph-script re-entry blocked.
+    bundle_run run_graph_bundle(const std::string &_bundle,
+                                const std::function<bool()> &_should_stop);
+
     stmt_exec_outcome
     exec_program_stmts(const Program &_program,
                        const std::function<bool()> &_should_stop);
@@ -190,6 +206,10 @@ private:
     std::vector<std::filesystem::path> m_run_stack;
     int m_match_debug_seq = 0;
     bool m_match_debug_enabled = false;
+    /// Set while an edge, popup or recover bundle is running, so it cannot
+    /// call `goto` and re-enter the navigator.
+    bool m_in_graph_script = false;
+    std::unordered_map<std::string, screen_graph> m_graphs;
 };
 
 } // namespace ccat_lang

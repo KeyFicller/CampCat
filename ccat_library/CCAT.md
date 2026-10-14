@@ -52,6 +52,8 @@ if (has(claim)) { tap(claim) } else { log("no claim") }
 | `log("msg")` | one log line | nothing |
 | `home` | HOME + force-stop recents | adb failure |
 | `run("other.ccat")` | another script, relative to this file | unreadable; cyclic; deeper than 16; callee error |
+| `goto("g:a")` | walk graph `g` to anchor `a` | graph invalid; `a` is not a place to stay; still not there after replan and one recover; adb failure |
+| `at("g:a")` | condition only: one screenshot, true when that anchor matches | not a statement; an invalid graph is an error, not `false` |
 
 **A named file that is missing fails the statement**, which is why `tap`, `tap_offset`, `swipe`, `wait_until` and
 `run` need their files to exist first. `has(...)` is the exception (below): a template that is not there is exactly
@@ -131,14 +133,15 @@ wherever it happens.
 Two kinds of statement may stand as an `if` / `elif` / `while` condition.
 
 `has("a.png")` answers whether that template is on screen **right now** -- one screenshot, `true` or `false`, never
-an error:
+an error. `at("g:a")` is the same kind of condition for a graph anchor (see **Graphs**); an invalid graph is an
+error, not `false`:
 
 ```ccat
 if (has("a.png")) { log("here") } else { log("not here") }
 ```
 
 Any statement in the table above that can report a result also works: `tap`, `tap_offset`, `swipe`, `tap_at`,
-`swipe_at`, `wait_until`, `run`. It runs, and its result picks the branch: a failure is `false`, so it does not stop
+`swipe_at`, `wait_until`, `run`, `goto`. It runs, and its result picks the branch: a failure is `false`, so it does not stop
 the script.
 
 ```ccat
@@ -196,6 +199,60 @@ Normalized `[0,1]` against the current screenshot, never pixels: `tap_at(0.5, 0.
 `lround(n x (dim - 1))`, and a value outside `[0,1]` is an error rather than a clamp. `tap_offset` scales `dx` / `dy`
 by the full screen and errors if the result is off screen, so keep offsets small and signed. The match threshold and
 the swipe duration come from config; a script cannot change them.
+
+## Graphs
+
+A graph is a bundle that holds `graph.json` next to `main.ccat`. Its name is the bundle
+name. Anchors are screens. Edges are other bundles that only perform the action between
+two anchors; `goto` checks the screen before and after, so the edge does not.
+
+```json
+{
+  "root": "desktop",
+  "recover": "shuaitu.recover",
+  "anchors": {
+    "desktop": { "must": ["desktop_folder.png"] },
+    "main_city": { "must": ["recruit_button.png"] }
+  },
+  "edges": [
+    { "from": "desktop", "to": "main_city", "script": "shuaitu.desktop-main", "timeout_ms": 60000 }
+  ],
+  "interrupts": [
+    { "anchor": "notice", "script": "shuaitu.close-notice" }
+  ]
+}
+```
+
+- `must` is the templates that all have to match. `must_not` is the ones that must not.
+  An entry is a file name, or `{"png", "roi"}` with `roi` normalized `[x, y, w, h]`.
+- `transient: true` is a loading screen. `goto` waits it out. It is not a destination.
+- An interrupt anchor is a popup. `goto` closes it before planning. It is not a destination.
+- `timeout_ms` is how long to wait for the edge's `to` after the edge script returns.
+  Default 20000, at most 600000. This is not the `wait_until` cap.
+- `recover` runs once, after three failed attempts, then `goto` tries again. No `recover`
+  means the third failure is the error.
+- Every stable anchor must be reachable from `root`. A bad `graph.json` names every
+  problem and does not run.
+
+`goto("g:a")` takes one screenshot, decides where it is, and runs the next edge on the
+shortest path. Landing on a different anchor replans without counting a failure. Three
+failures, then one recover. The error lists the hops. `if (goto("g:a"))` is false when
+it cannot get there; a dead device is still an error. `at("g:a")` is the same locate,
+as a condition, and does not walk.
+
+An edge, a popup script and the recover script must not call `goto`. That is
+`goto inside a graph script`.
+
+Rules for a graph that stays reliable:
+
+1. One edge, one bundle, named `<graph>.<from>-<to>`. Actions only. No "where am I".
+2. An edge must be safe to run again. Spending or claiming goes in the task, after `goto`.
+3. Do not `tap_at` when a `tap` missed. Let it fail.
+4. Do not `loop` + `has` + `wait` for a screen. Wait with the edge's `timeout_ms`, and
+   mark a loading screen `transient`.
+5. A task is `goto` to the start, the action, then a result anchor (`wait_until` or `at`).
+6. Two anchors that match the same screenshot need a `must_not` or a `roi`.
+7. `run` the recover bundle, then `goto` each anchor, to recheck the whole graph.
 
 ## `$Debug`
 

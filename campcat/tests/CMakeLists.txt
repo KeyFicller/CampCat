@@ -5,6 +5,7 @@ add_executable(test_campcat_core cpp/test_approval_gate.cpp
                                  cpp/test_box_snap.cpp
                                  cpp/test_ccat_cond_action.cpp
                                  cpp/test_ccat_condition_walks.cpp
+                                 cpp/test_ccat_graph.cpp
                                  cpp/test_ccat_return.cpp
                                  cpp/test_ccat_script_profile.cpp
                                  cpp/test_llm_host.cpp
@@ -15,6 +16,8 @@ add_executable(test_campcat_core cpp/test_approval_gate.cpp
 # them, and that header is deliberately not public.
 target_include_directories(test_campcat_core
                            PRIVATE ${CMAKE_SOURCE_DIR}/campcat/sources/cpp/src)
+target_compile_definitions(test_campcat_core PRIVATE
+                           CAMPCAT_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
 target_link_libraries(test_campcat_core PRIVATE campcat_core GTest::gtest_main)
 
 # Each TEST becomes its own ctest entry, so a failure names the case that broke

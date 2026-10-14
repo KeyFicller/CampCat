@@ -315,6 +315,32 @@ struct HasStmt final : Stmt {
 };
 
 /**
+ * @brief Walk the named screen graph to an anchor (`goto("graph:anchor")`).
+ */
+struct GotoStmt final : Stmt {
+    /** @brief `graph:anchor`, defs already substituted. */
+    std::string target;
+
+    stmt_exec_outcome
+    exec(CcatInterpreter &_interp,
+         const std::function<bool()> &_should_stop) const override;
+};
+
+/**
+ * @brief Whether the screen is that anchor right now (`at("graph:anchor")`).
+ *
+ * Condition-only, like `has`. One screenshot.
+ */
+struct AtStmt final : Stmt {
+    /** @brief `graph:anchor`, defs already substituted. */
+    std::string target;
+
+    stmt_exec_outcome
+    exec(CcatInterpreter &_interp,
+         const std::function<bool()> &_should_stop) const override;
+};
+
+/**
  * @brief Run `body` once then repeat while the condition holds.
  */
 struct DoWhileStmt final : Stmt {

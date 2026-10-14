@@ -795,4 +795,130 @@ CcatInterpreter::run(const Program &_program,
     return r;
 }
 
+const screen_graph *CcatInterpreter::cached_graph(const std::string &_name,
+                                                  std::string *_err) {
+    const auto found = m_graphs.find(_name);
+    if (found != m_graphs.end()) {
+        return &found->second;
+    }
+    const loaded_graph loaded =
+        load_graph(std::filesystem::path(m_cfg->config_home), _name);
+    if (!loaded.ok) {
+        *_err = loaded.error;
+        return nullptr;
+    }
+    const auto [it, _] = m_graphs.emplace(_name, loaded.graph);
+    return &it->second;
+}
+
+bundle_run
+CcatInterpreter::run_graph_bundle(const std::string &_bundle,
+                                  const std::function<bool()> &_should_stop) {
+    bundle_run ran;
+    if (_should_stop()) {
+        ran.stopped = true;
+        return ran;
+    }
+    if (!safe_leaf_name(_bundle)) {
+        ran.failed = true;
+        ran.message = "\"" + _bundle + "\" is not a bundle name";
+        return ran;
+    }
+    const std::filesystem::path main = std::filesystem::path(m_cfg->config_home) /
+                                       _bundle / "main.ccat";
+    bool value = true;
+    // Held for the whole callee, including anything it `run()`s, so none of
+    // them can start a second navigation.
+    m_in_graph_script = true;
+    const std::optional<action_failure> err =
+        run_script_impl(main.string(), _should_stop, &value);
+    m_in_graph_script = false;
+    if (err) {
+        if (err->message == "stopped") {
+            ran.stopped = true;
+        } else {
+            ran.failed = true;
+            ran.message = err->message;
+        }
+        return ran;
+    }
+    if (!value) {
+        ran.failed = true;
+        ran.message = "returned false";
+    }
+    return ran;
+}
+
+stmt_exec_outcome
+GotoStmt::exec(CcatInterpreter &_interp,
+               const std::function<bool()> &_should_stop) const {
+    if (_interp.m_in_graph_script) {
+        return stmt_exec_outcome::make_error("goto inside a graph script");
+    }
+    std::string graph_name;
+    std::string anchor;
+    if (!split_anchor_ref(target, &graph_name, &anchor)) {
+        return stmt_exec_outcome::make_error(
+            "goto target must be \"graph:anchor\"");
+    }
+    std::string err;
+    const screen_graph *graph = _interp.cached_graph(graph_name, &err);
+    if (graph == nullptr) {
+        return stmt_exec_outcome::make_error(err);
+    }
+    nav_io io;
+    io.capture = [&](cv::Mat *_out) {
+        return _interp.capture_screen(_out, _should_stop);
+    };
+    io.should_stop = _should_stop;
+    io.log = [](const std::string &_line) {
+        automation_log::emit(std::string(automation_log::k_script_log_tag) +
+                             _line);
+    };
+    io.run_bundle = [&](const std::string &_bundle) {
+        return _interp.run_graph_bundle(_bundle, _should_stop);
+    };
+    const nav_result got =
+        navigate(*graph, anchor, _interp.m_matcher, io);
+    if (got.stopped) {
+        return stmt_exec_outcome::make_stopped();
+    }
+    if (!got.ok) {
+        return stmt_exec_outcome::make_error(got.message, got.device);
+    }
+    return stmt_exec_outcome::make_ok();
+}
+
+stmt_exec_outcome
+AtStmt::exec(CcatInterpreter &_interp,
+             const std::function<bool()> &_should_stop) const {
+    std::string graph_name;
+    std::string anchor;
+    if (!split_anchor_ref(target, &graph_name, &anchor)) {
+        return stmt_exec_outcome::make_error(
+            "at target must be \"graph:anchor\"");
+    }
+    std::string err;
+    const screen_graph *graph = _interp.cached_graph(graph_name, &err);
+    if (graph == nullptr) {
+        return stmt_exec_outcome::make_error(err);
+    }
+    cv::Mat frame;
+    if (!_interp.capture_screen(&frame, _should_stop)) {
+        if (_should_stop()) {
+            return stmt_exec_outcome::make_stopped();
+        }
+        return stmt_exec_outcome::make_error("at: screencap failed",
+                                             /*_device=*/true);
+    }
+    const locate_hit hit = locate(*graph, _interp.m_matcher, frame);
+    if (hit.kind == locate_kind::error || hit.kind == locate_kind::ambiguous) {
+        return stmt_exec_outcome::make_error("at " + target + " " + hit.detail);
+    }
+    const bool here = hit.id == anchor && (hit.kind == locate_kind::page ||
+                                           hit.kind == locate_kind::transient ||
+                                           hit.kind == locate_kind::interrupt);
+    return stmt_exec_outcome::make_ok(here);
+}
+
 } // namespace campcat::ccat_lang
