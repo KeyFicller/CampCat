@@ -254,6 +254,22 @@ Rules for a graph that stays reliable:
 6. Two anchors that match the same screenshot need a `must_not` or a `roi`.
 7. `run` the recover bundle, then `goto` each anchor, to recheck the whole graph.
 
+### Golden shots
+
+`<graph>/golden/<anchor>/<n>.png` plus `<n>.json` records a screen that anchor was seen
+on. The PNG is a crop, and the sidecar says where on the screen it was cut from:
+
+```json
+{ "screen_w": 2560, "screen_h": 1440, "x": 0, "y": 0, "w": 2560, "h": 1440 }
+```
+
+Checking it pastes the crop back at `(x, y)` on a frame of `screen_w x screen_h` and runs
+the same locate `goto` does. The crop must come out as its own anchor and no other: two
+anchors matching one screen is a graph that cannot navigate, which is what a golden shot
+is for. Everything outside the crop is a flat fill, so a crop smaller than the screen has
+a blind spot -- cut the whole screen when you can. A missing or unreadable sidecar, and a
+crop whose size disagrees with it, are reported too.
+
 ## `$Debug`
 
 `$Debug On` / `$Debug Off` (`on` / `off` too) toggles the per-match debug dumps regardless of the `match_debug`

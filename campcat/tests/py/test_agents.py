@@ -11,7 +11,8 @@ HOST_NAMES = (
     "screenshot view_shot view_template view_crop_box view_crop_circle mark "
     "mark_circle tap tap_circle start_emulator run_script save_script "
     "save_template_box save_template_circle ccat_help list_scripts read_script "
-    "update_script delete_script rename_script"
+    "update_script read_graph update_graph save_golden delete_script "
+    "rename_script"
 ).split()
 
 # Host order, not the grouped order in the spec table: `run_script` is
@@ -37,7 +38,7 @@ def test_operator_and_scripter_split_the_host_table():
 
     assert _names(operator_table) == OPERATOR_NAMES
     assert "view_template" not in _names(operator_table)
-    assert len(scripter_table) == 15
+    assert len(scripter_table) == 18
     assert _names(scripter_table) == [
         name for name in HOST_NAMES
         if name in scripter.SCRIPTER_ONLY | scripter.SHARED

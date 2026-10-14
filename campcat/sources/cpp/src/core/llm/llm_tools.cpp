@@ -6,6 +6,7 @@
 #include "core/automation_log.h"
 #include "core/box_snap.h"
 #include "core/script/ccat_bundle.h" // bundle_main / bundle_names / ...
+#include "core/script/ccat_graph.h"  // graph.json: load / summary / templates
 #include "core/script/ccat_parser.h" // parse_program / parse_error
 
 // Private: <meta> and the consteval cost stay out of include/.
@@ -266,6 +267,18 @@ std::string joined(const std::vector<std::string> &_items, const char *_none) {
     return out.empty() ? _none : out;
 }
 
+/// The bundles that hold a graph, for an error message that offers the model
+/// somewhere else to look: "none yet" when the library has no graph at all.
+std::string existing_graphs() {
+    std::vector<std::string> names;
+    for (const std::string &name : ccat_lang::bundle_names(g_ctx.script_dir)) {
+        if (ccat_lang::bundle_tags(g_ctx.script_dir, name).graph) {
+            names.push_back(name);
+        }
+    }
+    return joined(names, "none yet");
+}
+
 /// `"ok"` -> `"ok.png"`; unchanged when it already ends in `.png`.
 std::string with_png_ext(const std::string &_s) {
     return _s.size() >= 4 && _s.compare(_s.size() - 4, 4, ".png") == 0
@@ -476,6 +489,31 @@ cv::Mat crop_region(const cv::Mat &_img, const llm::region &_region) {
         }
     }
     return out;
+}
+
+/// A template of one flat colour has no variance, and normalized correlation is
+/// undefined without it: OpenCV scores such a template 1.0 everywhere, so it
+/// would match every screen and its anchor would be useless. Refused at the
+/// cut, where the model can still aim somewhere else.
+///
+/// `_what` names the file for the message, since both cut paths call this.
+void require_textured(const cv::Mat &_crop, const std::string &_what) {
+    cv::Scalar mean;
+    cv::Scalar sd;
+    cv::meanStdDev(_crop, mean, sd);
+    // One channel varying is enough -- a solid red control leaves green and
+    // blue flat -- and a disc's alpha is its shape, not its content.
+    double most = 0;
+    for (int c = 0; c < std::min(3, _crop.channels()); ++c) {
+        most = std::max(most, sd[c]);
+    }
+    if (most >= 1.0) {
+        return;
+    }
+    throw js::bind_error(
+        _what + " is a patch of one flat colour, so it would match every "
+                "screen; cut a control with an edge in it -- a button, a label, "
+                "a border");
 }
 
 /// Appended to a tool's success sentence when the snap moved the box, so the
@@ -1174,6 +1212,10 @@ std::string save_template_region(std::string bundle, std::string name,
             snap_note = snapped_box_note(*given, std::get<llm::box>(use));
         }
     }
+    // Before the approval gate: a flat patch is refused on the model's own
+    // numbers, and bothering the human to reject it would be a wasted round.
+    const cv::Mat crop = crop_region(img, use);
+    require_textured(crop, "template \"" + bundle + "/" + file + "\"");
     if (needs_approval("save_template")) {
         if (!g_ctx.request_approval) {
             throw js::bind_error(
@@ -1213,7 +1255,7 @@ std::string save_template_region(std::string bundle, std::string name,
         // times before it is tight, and refusing would push the model to invent
         // new names and rewrite the script, costing another approval of the
         // whole script.
-        if (!cv::imwrite(path.string(), crop_region(img, use))) {
+        if (!cv::imwrite(path.string(), crop)) {
             throw js::bind_error("could not write " + bundle + "/" + file);
         }
     } catch (const cv::Exception &e) {
@@ -1325,9 +1367,21 @@ CPP_REFLECT_TOOL(ccat_help)
         if (!out.empty()) {
             out += "\n";
         }
+        // A graph and an edge are not skills to run on their own: the tag says
+        // so, and it is where the model learns a graph exists at all.
+        const ccat_lang::bundle_tag tag =
+            ccat_lang::bundle_tags(g_ctx.script_dir, name);
+        std::string suffix;
+        if (tag.graph) {
+            suffix = " [graph, " + std::to_string(tag.anchors) + " anchors, " +
+                     std::to_string(tag.edges) + " edges]";
+        } else if (!tag.edge_of.empty()) {
+            suffix = " [edge of " + tag.edge_of + "]";
+        }
         out += name + " -- " +
                (description.empty() ? std::string("(no description)")
-                                    : description);
+                                    : description) +
+               suffix;
     }
     return out;
 }
@@ -1370,6 +1424,51 @@ CPP_REFLECT_TOOL(list_scripts)
 }
 CPP_REFLECT_TOOL(read_script)
 
+/// `<script_dir>/<name>/graph.json`, whether or not it exists.
+std::filesystem::path graph_json_path(const std::string &_name) {
+    return g_ctx.script_dir / _name / "graph.json";
+}
+
+/// The bundle `_name` must be, in the words a wrong name always gets.
+void require_bundle(const std::string &_name) {
+    if (!ccat_lang::safe_leaf_name(_name)) {
+        throw js::bind_error("name \"" + _name +
+                             "\" is not a plain file name");
+    }
+    std::error_code ec;
+    if (!std::filesystem::is_regular_file(
+            ccat_lang::bundle_main(g_ctx.script_dir, _name), ec)) {
+        throw js::bind_error("unknown script bundle \"" + _name +
+                             "\"; save_script creates one (existing: " +
+                             existing_bundles() + ")");
+    }
+}
+
+/// The `graph.json` it must have, and where else to look when it has none.
+void require_graph_json(const std::string &_name) {
+    std::error_code ec;
+    if (!std::filesystem::is_regular_file(graph_json_path(_name), ec)) {
+        throw js::bind_error("\"" + _name +
+                             "\" has no graph.json; write one with "
+                             "update_graph, or read a graph that exists (" +
+                             existing_graphs() + ")");
+    }
+}
+
+/// A graph bundle that also loads: what `save_golden` needs before it can write
+/// anything into it.
+ccat_lang::loaded_graph require_graph(const std::string &_name) {
+    require_bundle(_name);
+    require_graph_json(_name);
+    const ccat_lang::loaded_graph loaded =
+        ccat_lang::load_graph(g_ctx.script_dir, _name);
+    if (!loaded.ok) {
+        throw js::bind_error("graph.json in \"" + _name +
+                             "\" does not load: " + loaded.error);
+    }
+    return loaded;
+}
+
 /// One entry of the template set an update declares: a name, either a shape to
 /// cut that name from or nothing to keep the PNG already in the bundle, and
 /// which screenshot to cut from. "Keep" needs the optional because one update
@@ -1396,7 +1495,9 @@ struct template_cut {
         "that "
         "screenshot, an entry with just a name keeps the PNG already there, "
         "and "
-        "PNGs you do not declare are deleted. Prefer this over saving a new "
+        "PNGs you do not declare are deleted -- except the ones the bundle's "
+        "graph.json declares as anchors, which the graph keeps. Prefer this "
+        "over saving a new "
         "name when changing a skill you already have; save_script is for a new "
         "one, and save_template_box for adjusting a single template while you work "
         "out its box.")}]]
@@ -1496,11 +1597,25 @@ struct template_cut {
         cut.shot = entry.shot.value_or(g_next_shot);
         cut.region = region;
         cut.crop = crop_region(frame, region);
+        require_textured(cut.crop,
+                         "template \"" + name + "/" + cut.file + "\"");
         cuts.push_back(std::move(cut));
     }
 
     // Everything left in the bundle that is not declared goes, which is what
-    // makes the declared set the bundle's template set.
+    // makes the declared set the bundle's template set. A graph's own anchors
+    // are declared in its graph.json rather than in the script, so they count
+    // as declared too: without that, one update would delete the anchors.
+    std::string graph_err;
+    const auto graph_pngs =
+        ccat_lang::graph_template_names(graph_json_path(name), &graph_err);
+    if (!graph_pngs.has_value()) {
+        throw js::bind_error("cannot tell which templates \"" + name +
+                             "\"'s graph.json declares (" + graph_err +
+                             "), so an update would delete its anchors; fix "
+                             "graph.json first");
+    }
+    declared.insert(declared.end(), graph_pngs->begin(), graph_pngs->end());
     std::vector<std::string> to_delete;
     for (const std::string &file :
          ccat_lang::bundle_templates(g_ctx.script_dir, name)) {
@@ -1526,6 +1641,9 @@ struct template_cut {
                            region_phrase(cut.region) + "\n";
         }
         req.summary += "keep: " + joined(kept, "none") + "\n";
+        if (!graph_pngs->empty()) {
+            req.summary += "graph keeps: " + joined(*graph_pngs, "none") + "\n";
+        }
         req.summary += "delete: " + joined(to_delete, "none") + "\n\n";
         req.summary += source;
         // One picture fits in the bubble, so it is the frame the first cut
@@ -1589,6 +1707,237 @@ struct template_cut {
            name + "/main.ccat\")";
 }
 CPP_REFLECT_TOOL(update_script)
+
+[[= js::quiet{.text = js::str("Read graph {name}")}]][[= js::doc{
+    .text = js::str(
+        "Returns a graph's graph.json exactly as written, prefixed by a header: "
+        "what the graph holds, which of its templates are on disk, and how many "
+        "golden shots each anchor has. The JSON is what you pass back as "
+        "update_graph's graph_json, so edit it from what this returns rather "
+        "than from memory: change one anchor or one edge by editing that text "
+        "and submitting the whole thing. A graph.json that does not load comes "
+        "back the same way, with its problems listed in place of the header, so "
+        "a broken file can still be read and fixed.")}]]
+    [[= js::param_docs(
+        js::str("Graph bundle name, as list_scripts showed it (a bundle with a "
+                "graph.json is marked [graph])."))]] std::string
+        read_graph(std::string name) {
+    require_bundle(name);
+    require_graph_json(name);
+    std::ifstream in(graph_json_path(name), std::ios::binary);
+    if (!in) {
+        throw js::bind_error("could not read " +
+                             graph_json_path(name).string());
+    }
+    const std::string text{std::istreambuf_iterator<char>(in),
+                           std::istreambuf_iterator<char>()};
+    const ccat_lang::loaded_graph loaded =
+        ccat_lang::load_graph(g_ctx.script_dir, name);
+    if (!loaded.ok) {
+        return "graph.json in \"" + name + "\" does not load:\n" +
+               loaded.error + "\n---\n" + text;
+    }
+    return ccat_lang::graph_summary(loaded) + "\n---\n" + text;
+}
+CPP_REFLECT_TOOL(read_graph)
+
+[[= js::quiet{.text = js::str("Update graph {name}")}]][[= js::doc{
+    .text = js::str(
+        "Writes a graph bundle's graph.json, replacing whatever was there, "
+        "under one approval. The whole file is checked before anything is "
+        "written: every anchor template must be a PNG in that bundle already "
+        "(save_template_box cuts one), every edge's script bundle must exist and "
+        "parse (save_script), root must name an anchor, and every anchor must be "
+        "reachable. A file that fails is not written at all and the whole list "
+        "of problems comes back, so fix them and submit again. This does not "
+        "touch main.ccat or any template.")}]]
+    [[= js::param_docs(
+        js::str("Graph bundle name; it must already exist (see save_script), and "
+                "its graph.json is replaced or created."),
+        js::str("The complete graph.json text, normally read_graph's text with "
+                "your edit in it."))]] std::string
+        update_graph(std::string name, std::string graph_json) {
+    if (!ccat_lang::safe_leaf_name(name)) {
+        throw js::bind_error("name \"" + name +
+                             "\" is not a plain file name");
+    }
+    std::error_code ec;
+    if (!std::filesystem::is_regular_file(
+            ccat_lang::bundle_main(g_ctx.script_dir, name), ec)) {
+        throw js::bind_error("unknown script bundle \"" + name +
+                             "\"; save_script creates a new one (existing: " +
+                             existing_bundles() + ")");
+    }
+    // Checked first, and against the disk the edges and templates live on: a
+    // submission refused here leaves graph.json byte for byte as it was.
+    const ccat_lang::loaded_graph checked =
+        ccat_lang::load_graph_text(g_ctx.script_dir, name, graph_json);
+    if (!checked.ok) {
+        throw js::bind_error("graph.json not written: " + checked.error);
+    }
+    if (needs_approval("update_graph")) {
+        if (!g_ctx.request_approval) {
+            throw js::bind_error(
+                "no human available to approve updating the graph");
+        }
+        llm::approval_request req;
+        req.tool = "update_graph";
+        req.summary = "Write \"" + name + "/graph.json\":\n\n" + graph_json;
+        const llm::approval_decision decision = g_ctx.request_approval(req);
+        if (!decision.approved) {
+            throw js::bind_error(decision.guidance.empty()
+                                     ? "user rejected updating the graph"
+                                     : "user rejected updating the graph: " +
+                                           decision.guidance);
+        }
+    }
+    const std::filesystem::path path = graph_json_path(name);
+    std::filesystem::create_directories(path.parent_path(), ec);
+    std::ofstream out(path, std::ios::binary | std::ios::trunc);
+    out.write(graph_json.data(), static_cast<std::streamsize>(graph_json.size()));
+    out.close();
+    if (!out) {
+        throw js::bind_error("could not write " + name + "/graph.json");
+    }
+    return "updated \"" + name + "/graph.json\" (" +
+           std::to_string(checked.graph.anchors.size()) + " anchors, " +
+           std::to_string(checked.graph.edges.size()) + " edges, " +
+           std::to_string(checked.graph.interrupts.size()) +
+           " interrupts); root=" + checked.graph.root +
+           "; run it with run_script(\"goto(\\\"" + name + ":" +
+           checked.graph.root + "\\\")\")";
+}
+CPP_REFLECT_TOOL(update_graph)
+
+[[= js::quiet{.text = js::str("Save golden for {anchor}")}]][[= js::doc{
+    .text = js::str(
+        "Saves a golden shot for an anchor: a crop of one of your screenshots, "
+        "showing the screen that anchor is, which is later checked to locate as "
+        "that anchor and no other. Save one per anchor once the graph walks "
+        "around it, and cut the box as wide as you can -- the part you leave out "
+        "is a part a conflicting anchor could hide in, and a whole-screen box "
+        "leaves nothing out. The crop and a small sidecar saying where on the "
+        "screen it came from go in <graph>/golden/<anchor>/; an existing shot is "
+        "never overwritten, so saving the same number twice keeps both. While "
+        "human approval is on, the box is shown to the user and nothing is "
+        "written unless they approve it.")}]]
+    [[= js::param_docs(
+        js::str("Graph bundle name; it must already have a graph.json and the "
+                "anchor in it (see update_graph)."),
+        js::str("Anchor to save for, as graph.json spelled it."),
+        js::str("Which screenshot to cut from: the number its caption showed. "
+                "Omit for the most recent one."),
+        js::str("The box to cut, in that screenshot's pixels. The widest you "
+                "can make it."))]] std::string
+        save_golden(std::string name, std::string anchor,
+                    std::optional<int> shot, box box) {
+    const ccat_lang::loaded_graph loaded = require_graph(name);
+    if (!ccat_lang::safe_leaf_name(anchor) ||
+        anchor.find(':') != std::string::npos) {
+        throw js::bind_error("anchor \"" + anchor +
+                             "\" is not a plain name");
+    }
+    const auto declared = std::find_if(
+        loaded.graph.anchors.begin(), loaded.graph.anchors.end(),
+        [&](const ccat_lang::anchor_def &_a) { return _a.id == anchor; });
+    if (declared == loaded.graph.anchors.end()) {
+        std::vector<std::string> ids;
+        for (const ccat_lang::anchor_def &a : loaded.graph.anchors) {
+            ids.push_back(a.id);
+        }
+        throw js::bind_error(
+            "graph \"" + name + "\" has no anchor \"" + anchor + "\" (it has: " +
+            join_names(ids) + "); declare it with update_graph first");
+    }
+    std::string error;
+    const screen_state *frame = frame_for(shot, &error);
+    if (frame == nullptr) {
+        throw js::bind_error(error);
+    }
+    const cv::Mat buf(1, static_cast<int>(frame->png.size()), CV_8UC1,
+                      const_cast<char *>(frame->png.data()));
+    const cv::Mat img = cv::imdecode(buf, cv::IMREAD_COLOR);
+    if (img.empty()) {
+        // Only reachable if a stored PNG got corrupted, which no tool can do.
+        throw js::bind_error("the stored screenshot is not a decodable picture");
+    }
+    const llm::region region = to_region(box);
+    if (!region_on_screen(img.cols, img.rows, region, &error)) {
+        throw js::bind_error(error);
+    }
+    const llm::box px = region_bounds(region);
+    if (needs_approval("save_golden")) {
+        if (!g_ctx.request_approval) {
+            throw js::bind_error(
+                "no human available to approve saving the golden shot");
+        }
+        llm::approval_request req;
+        req.tool = "save_golden";
+        req.summary = "Save golden shot for anchor \"" + anchor + "\" in \"" +
+                      name + "\" from " + shot_phrase(shot) + " at " +
+                      region_phrase(region);
+        req.highlight.push_back(region);
+        req.screen_png = frame->png;
+        const llm::approval_decision decision = g_ctx.request_approval(req);
+        if (!decision.approved) {
+            throw js::bind_error(
+                decision.guidance.empty()
+                    ? "user rejected saving the golden shot"
+                    : "user rejected saving the golden shot: " +
+                          decision.guidance);
+        }
+    }
+    const std::filesystem::path dir =
+        g_ctx.script_dir / name / "golden" / anchor;
+    std::error_code ec;
+    std::filesystem::create_directories(dir, ec);
+    // Never over an existing shot: a bad one is worth deleting by hand rather
+    // than losing a screen that cannot be reached again today.
+    const std::string base = std::to_string(shot.value_or(g_next_shot));
+    std::string file = base + ".png";
+    for (int n = 2; std::filesystem::is_regular_file(dir / file, ec); ++n) {
+        file = base + "-" + std::to_string(n) + ".png";
+    }
+    ccat_lang::golden_meta meta;
+    meta.screen_w = img.cols;
+    meta.screen_h = img.rows;
+    meta.x = px.x;
+    meta.y = px.y;
+    meta.w = px.w;
+    meta.h = px.h;
+    try {
+        if (!cv::imwrite((dir / file).string(), crop_region(img, region))) {
+            throw js::bind_error("could not write " + anchor + "/" + file);
+        }
+    } catch (const cv::Exception &e) {
+        throw js::bind_error("could not write " + anchor + "/" + file + ": " +
+                             e.what());
+    }
+    std::filesystem::path meta_path = dir / file;
+    meta_path.replace_extension(".json");
+    {
+        const std::string text = ccat_lang::golden_meta_to_text(meta);
+        std::ofstream out(meta_path, std::ios::binary | std::ios::trunc);
+        out.write(text.data(), static_cast<std::streamsize>(text.size()));
+        out.close();
+        if (!out) {
+            throw js::bind_error("could not write " + anchor + "/" +
+                                 meta_path.filename().string());
+        }
+    }
+    int shots = 0;
+    for (const auto &entry : std::filesystem::directory_iterator(dir, ec)) {
+        if (entry.is_regular_file(ec) && entry.path().extension() == ".png") {
+            ++shots;
+        }
+    }
+    return "saved golden shot \"" + anchor + "/" + file + "\" (" +
+           std::to_string(shots) +
+           " for this anchor); a golden must locate as its own anchor -- two "
+           "anchors matching one screen is a graph bug, and an anchor whose "
+           "shots stop locating is one that moved";
+}
+CPP_REFLECT_TOOL(save_golden)
 
 [[= js::doc{.text = js::str("Deletes a saved script bundle: its main.ccat and "
                             "every template in the "
@@ -1753,6 +2102,15 @@ bool approval_gate_required(const approval_config &_gates,
     }
     if (_tool == "update_script") {
         return _gates.gates.update_script;
+    }
+    // A graph.json rewrite and a golden shot are the same acts as an update and
+    // a template cut, so they ride the same two flags rather than adding their
+    // own fields to every config file.
+    if (_tool == "update_graph") {
+        return _gates.gates.update_script;
+    }
+    if (_tool == "save_golden") {
+        return _gates.gates.save_template;
     }
     if (_tool == "delete_script") {
         return _gates.gates.delete_script;

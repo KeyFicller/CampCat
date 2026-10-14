@@ -387,6 +387,59 @@ void collect_script_fields(const json &_j, std::vector<std::string> *_out) {
     }
 }
 
+/// The `png` of every `must` / `must_not` entry, wherever they sit.
+void collect_template_fields(const json &_j, std::vector<std::string> *_out) {
+    if (_j.is_object()) {
+        for (auto it = _j.begin(); it != _j.end(); ++it) {
+            if ((it.key() == "must" || it.key() == "must_not") &&
+                it->is_array()) {
+                for (const json &el : *it) {
+                    if (el.is_string()) {
+                        _out->push_back(el.get<std::string>());
+                    } else if (el.is_object() && el.contains("png") &&
+                               el["png"].is_string()) {
+                        _out->push_back(el["png"].get<std::string>());
+                    }
+                }
+            } else {
+                collect_template_fields(*it, _out);
+            }
+        }
+    } else if (_j.is_array()) {
+        for (const json &el : _j) {
+            collect_template_fields(el, _out);
+        }
+    }
+}
+
+/// Reads a file whole; false when it is not there. `*_out` is cleared first.
+bool read_text_file(const std::filesystem::path &_path, std::string *_out) {
+    std::error_code ec;
+    if (!std::filesystem::is_regular_file(_path, ec)) {
+        return false;
+    }
+    std::ifstream in(_path, std::ios::binary);
+    if (!in) {
+        return false;
+    }
+    *_out = std::string{std::istreambuf_iterator<char>(in),
+                        std::istreambuf_iterator<char>()};
+    return true;
+}
+
+/// Parses `graph.json`, or nullopt when it is not there or not JSON.
+std::optional<json> read_graph_json(const std::filesystem::path &_graph_json) {
+    std::string text;
+    if (!read_text_file(_graph_json, &text)) {
+        return std::nullopt;
+    }
+    try {
+        return json::parse(text);
+    } catch (const json::exception &) {
+        return std::nullopt;
+    }
+}
+
 json replace_script_fields(json _j, std::string_view _from,
                            std::string_view _to, int *_n) {
     if (_j.is_object()) {
@@ -428,6 +481,26 @@ bool split_anchor_ref(std::string_view _ref, std::string *_graph,
 
 loaded_graph load_graph(const std::filesystem::path &_library,
                         std::string_view _name) {
+    const std::string name(_name);
+    if (!safe_leaf_name(name) || name.find(':') != std::string::npos) {
+        loaded_graph out;
+        out.error = "graph name \"" + name + "\" is not usable";
+        return out;
+    }
+    const std::filesystem::path path = _library / name / "graph.json";
+    std::ifstream in(path, std::ios::binary);
+    if (!in) {
+        loaded_graph out;
+        out.error = "cannot read " + path.string();
+        return out;
+    }
+    const std::string text{std::istreambuf_iterator<char>(in),
+                           std::istreambuf_iterator<char>()};
+    return load_graph_text(_library, name, text);
+}
+
+loaded_graph load_graph_text(const std::filesystem::path &_library,
+                             std::string_view _name, std::string_view _text) {
     loaded_graph out;
     const std::string name(_name);
     std::vector<std::string> errs;
@@ -437,20 +510,13 @@ loaded_graph load_graph(const std::filesystem::path &_library,
     }
     out.graph.name = name;
     out.graph.dir = _library / name;
-    const std::filesystem::path path = out.graph.dir / "graph.json";
 
-    std::ifstream in(path, std::ios::binary);
-    if (!in) {
-        out.error = "cannot read " + path.string();
-        return out;
-    }
-    const std::string text{std::istreambuf_iterator<char>(in),
-                           std::istreambuf_iterator<char>()};
     json doc;
     try {
-        doc = json::parse(text);
+        doc = json::parse(_text);
     } catch (const json::exception &_e) {
-        out.error = path.string() + ": " + _e.what();
+        out.error =
+            (out.graph.dir / "graph.json").string() + ": " + _e.what();
         return out;
     }
     if (!known_keys(doc, {"root", "recover", "anchors", "edges", "interrupts"},
@@ -1016,6 +1082,206 @@ graph_script_names(const std::filesystem::path &_graph_json,
     return names;
 }
 
+std::optional<std::vector<std::string>>
+graph_template_names(const std::filesystem::path &_graph_json,
+                     std::string *_err) {
+    std::error_code ec;
+    if (!std::filesystem::is_regular_file(_graph_json, ec)) {
+        return std::vector<std::string>{};
+    }
+    std::ifstream in(_graph_json, std::ios::binary);
+    if (!in) {
+        if (_err != nullptr) {
+            *_err = "cannot read " + _graph_json.string();
+        }
+        return std::nullopt;
+    }
+    const std::string text{std::istreambuf_iterator<char>(in),
+                           std::istreambuf_iterator<char>()};
+    json doc;
+    try {
+        doc = json::parse(text);
+    } catch (const json::exception &_e) {
+        if (_err != nullptr) {
+            *_err = _graph_json.string() + ": " + _e.what();
+        }
+        return std::nullopt;
+    }
+    std::vector<std::string> names;
+    collect_template_fields(doc, &names);
+    std::sort(names.begin(), names.end());
+    names.erase(std::unique(names.begin(), names.end()), names.end());
+    return names;
+}
+
+bundle_tag bundle_tags(const std::filesystem::path &_library,
+                       std::string_view _name) {
+    bundle_tag tag;
+    const std::string name(_name);
+    const std::optional<json> own = read_graph_json(_library / name / "graph.json");
+    if (own.has_value()) {
+        tag.graph = true;
+        if (own->is_object()) {
+            if (own->contains("anchors") && (*own)["anchors"].is_object()) {
+                tag.anchors = static_cast<int>((*own)["anchors"].size());
+            }
+            if (own->contains("edges") && (*own)["edges"].is_array()) {
+                tag.edges = static_cast<int>((*own)["edges"].size());
+            }
+        }
+        return tag;
+    }
+    // Which graph names this bundle as an edge, if any. Read the graphs rather
+    // than the name: `shuaitu.recover` carries the prefix and is not an edge.
+    for (const std::string &owner : bundle_names(_library)) {
+        if (owner == name) {
+            continue;
+        }
+        const std::optional<json> doc =
+            read_graph_json(_library / owner / "graph.json");
+        if (!doc.has_value() || !doc->is_object() ||
+            !doc->contains("edges") || !(*doc)["edges"].is_array()) {
+            continue;
+        }
+        for (const json &el : (*doc)["edges"]) {
+            if (el.is_object() && el.contains("script") &&
+                el["script"].is_string() &&
+                el["script"].get<std::string>() == name) {
+                tag.edge_of = owner;
+                return tag;
+            }
+        }
+    }
+    return tag;
+}
+
+namespace {
+
+/// The graph's own PNGs, sorted and without duplicates.
+std::vector<std::string> declared_templates(const screen_graph &_graph) {
+    std::vector<std::string> out;
+    const auto add_templates = [&out](const std::vector<anchor_template> &_ts) {
+        for (const anchor_template &t : _ts) {
+            out.push_back(t.png);
+        }
+    };
+    for (const anchor_def &a : _graph.anchors) {
+        add_templates(a.must);
+        add_templates(a.must_not);
+    }
+    std::sort(out.begin(), out.end());
+    out.erase(std::unique(out.begin(), out.end()), out.end());
+    return out;
+}
+
+int count_pngs(const std::filesystem::path &_dir) {
+    std::error_code ec;
+    int n = 0;
+    if (!std::filesystem::is_directory(_dir, ec)) {
+        return n;
+    }
+    for (const auto &entry : std::filesystem::directory_iterator(_dir, ec)) {
+        if (entry.is_regular_file(ec) &&
+            entry.path().extension() == ".png") {
+            ++n;
+        }
+    }
+    return n;
+}
+
+} // namespace
+
+std::string graph_summary(const loaded_graph &_loaded) {
+    const screen_graph &g = _loaded.graph;
+    std::string out = "graph: " + g.name + "\nanchors: " +
+                      std::to_string(g.anchors.size()) + " (";
+    for (std::size_t i = 0; i < g.anchors.size(); ++i) {
+        out += (i == 0 ? "" : ", ") + g.anchors[i].id;
+    }
+    out += ")\nedges: " + std::to_string(g.edges.size()) + "  interrupts: " +
+           std::to_string(g.interrupts.size()) + "  recover: " +
+           (g.recover.empty() ? std::string("(none)") : g.recover) +
+           "  root: " + g.root + "\n";
+
+    std::string templates;
+    for (const std::string &png : declared_templates(g)) {
+        if (!templates.empty()) {
+            templates += ", ";
+        }
+        std::error_code ec;
+        templates += png;
+        templates += std::filesystem::is_regular_file(g.dir / png, ec)
+                         ? " ok"
+                         : " missing";
+    }
+    out += "templates: " + (templates.empty() ? std::string("(none)") : templates) +
+           "\n";
+
+    std::string golden;
+    for (const anchor_def &a : g.anchors) {
+        if (!golden.empty()) {
+            golden += ", ";
+        }
+        golden += a.id + " " +
+                  std::to_string(count_pngs(g.dir / "golden" / a.id));
+    }
+    out += "golden: " + (golden.empty() ? std::string("(none)") : golden);
+    return out;
+}
+
+std::string golden_meta_to_text(const golden_meta &_meta) {
+    const json doc{{"screen_w", _meta.screen_w}, {"screen_h", _meta.screen_h},
+                   {"x", _meta.x},                     {"y", _meta.y},
+                   {"w", _meta.w},                     {"h", _meta.h}};
+    return doc.dump(2) + "\n";
+}
+
+std::optional<golden_meta> golden_meta_from_text(std::string_view _text,
+                                                 std::string *_err) {
+    json doc;
+    try {
+        doc = json::parse(_text);
+    } catch (const json::exception &_e) {
+        if (_err != nullptr) {
+            *_err = _e.what();
+        }
+        return std::nullopt;
+    }
+    std::vector<std::string> errs;
+    known_keys(doc, {"screen_w", "screen_h", "x", "y", "w", "h"},
+               "golden sidecar", &errs);
+    golden_meta meta;
+    const char *names[] = {"screen_w", "screen_h", "x", "y", "w", "h"};
+    int *fields[] = {&meta.screen_w, &meta.screen_h, &meta.x,
+                     &meta.y,       &meta.w,        &meta.h};
+    for (std::size_t i = 0; i < 6; ++i) {
+        if (!doc.is_object() || !doc.contains(names[i]) ||
+            !doc[names[i]].is_number_integer()) {
+            add(&errs, std::string("golden sidecar needs an integer ") +
+                           names[i]);
+            continue;
+        }
+        *fields[i] = doc[names[i]].get<int>();
+    }
+    if (!errs.empty()) {
+        if (_err != nullptr) {
+            *_err = join_semi(errs);
+        }
+        return std::nullopt;
+    }
+    // A crop that does not fit the screen it claims is a bad sidecar, not a
+    // mismatch to report: nothing downstream can place it.
+    if (meta.screen_w <= 0 || meta.screen_h <= 0 || meta.w <= 0 ||
+        meta.h <= 0 || meta.x < 0 || meta.y < 0 ||
+        meta.x + meta.w > meta.screen_w || meta.y + meta.h > meta.screen_h) {
+        if (_err != nullptr) {
+            *_err = "golden sidecar crop is not inside its screen";
+        }
+        return std::nullopt;
+    }
+    return meta;
+}
+
 std::optional<std::string> rewrite_graph_scripts(std::string_view _text,
                                                  std::string_view _from,
                                                  std::string_view _to,
@@ -1053,15 +1319,46 @@ std::vector<std::string> golden_mismatches(const screen_graph &_graph,
         const std::string id = anchor_dir.path().filename().string();
         for (const auto &shot :
              std::filesystem::directory_iterator(anchor_dir.path(), ec)) {
-            if (!shot.is_regular_file(ec)) {
+            if (!shot.is_regular_file(ec) ||
+                shot.path().extension() != ".png") {
                 continue;
             }
-            const cv::Mat frame =
+            const std::string file = shot.path().filename().string();
+            std::filesystem::path meta_path = shot.path();
+            meta_path.replace_extension(".json");
+            std::string sidecar;
+            if (!read_text_file(meta_path, &sidecar)) {
+                out.push_back(id + " " + file + " has no sidecar");
+                continue;
+            }
+            std::string why;
+            const std::optional<golden_meta> meta =
+                golden_meta_from_text(sidecar, &why);
+            if (!meta.has_value()) {
+                out.push_back(id + " " + file + " bad sidecar: " + why);
+                continue;
+            }
+            const cv::Mat crop =
                 cv::imread(shot.path().string(), cv::IMREAD_COLOR);
-            if (frame.empty()) {
+            if (crop.empty()) {
                 out.push_back(id + " unreadable " + shot.path().string());
                 continue;
             }
+            if (crop.cols != meta->w || crop.rows != meta->h) {
+                out.push_back(id + " " + file + " is " +
+                              std::to_string(crop.cols) + "x" +
+                              std::to_string(crop.rows) +
+                              ", the sidecar says " + std::to_string(meta->w) +
+                              "x" + std::to_string(meta->h));
+                continue;
+            }
+            // The crop goes back at the pixel it came from, so a normalized
+            // `roi` keeps meaning the region it meant on the real screen. The
+            // rest of the frame is a flat fill, which no anchor's template
+            // should match: a conflict out there is invisible by design.
+            cv::Mat frame(meta->screen_h, meta->screen_w, CV_8UC3,
+                          cv::Scalar(128, 128, 128));
+            crop.copyTo(frame(cv::Rect(meta->x, meta->y, meta->w, meta->h)));
             const locate_hit hit = locate(_graph, _matcher, frame);
             const bool same =
                 (hit.kind == locate_kind::page ||

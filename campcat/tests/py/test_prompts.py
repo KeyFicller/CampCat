@@ -16,6 +16,10 @@ def test_scripter_prompt_keeps_the_cheatsheet():
     text = scripter.scripter_prompt()
     assert "wait_until" in text
     assert "saved" in text
+    # The graph half: the workflow that builds one, and the language it uses.
+    assert "update_graph" in text
+    assert "save_golden" in text
+    assert "goto(" in text
 
 
 def test_prompt_override_covers_only_the_operator(monkeypatch):

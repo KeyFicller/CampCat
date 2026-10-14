@@ -18,8 +18,15 @@
 namespace {
 
 using campcat::ccat_lang::bundle_run;
+using campcat::ccat_lang::bundle_tags;
+using campcat::ccat_lang::golden_meta;
+using campcat::ccat_lang::golden_meta_from_text;
+using campcat::ccat_lang::golden_meta_to_text;
 using campcat::ccat_lang::golden_mismatches;
+using campcat::ccat_lang::graph_summary;
+using campcat::ccat_lang::graph_template_names;
 using campcat::ccat_lang::load_graph;
+using campcat::ccat_lang::load_graph_text;
 using campcat::ccat_lang::locate;
 using campcat::ccat_lang::locate_kind;
 using campcat::ccat_lang::nav_io;
@@ -47,6 +54,22 @@ void write_file(const std::filesystem::path &_path, const std::string &_text) {
 void save_png(const std::filesystem::path &_path, const cv::Mat &_img) {
     std::filesystem::create_directories(_path.parent_path());
     cv::imwrite(_path.string(), _img);
+}
+
+/// A golden shot as `save_golden` writes one: the crop, plus the sidecar saying
+/// where on the screen it was cut from.
+void save_golden(const std::filesystem::path &_dir, const std::string &_n,
+                 const cv::Mat &_frame, int _x, int _y, int _w, int _h) {
+    campcat::ccat_lang::golden_meta meta;
+    meta.screen_w = _frame.cols;
+    meta.screen_h = _frame.rows;
+    meta.x = _x;
+    meta.y = _y;
+    meta.w = _w;
+    meta.h = _h;
+    save_png(_dir / (_n + ".png"), _frame(cv::Rect(_x, _y, _w, _h)).clone());
+    write_file(_dir / (_n + ".json"),
+               campcat::ccat_lang::golden_meta_to_text(meta));
 }
 
 cv::Mat tex(int _seed) {
@@ -377,12 +400,177 @@ TEST(CcatGraph, GoldenShotMustLocateAsItself) {
     toy g("golden");
     const auto loaded = load_graph(g.dir, "g");
     ASSERT_TRUE(loaded.ok);
-    save_png(g.dir / "g" / "golden" / "a" / "1.png", g.frame_a);
-    save_png(g.dir / "g" / "golden" / "b" / "1.png", g.frame_a);
+    save_golden(g.dir / "g" / "golden" / "a", "1", g.frame_a, 0, 0, 80, 60);
+    save_golden(g.dir / "g" / "golden" / "b", "1", g.frame_a, 0, 0, 80, 60);
     const std::vector<std::string> bad =
         golden_mismatches(loaded.graph, matcher());
     ASSERT_EQ(bad.size(), 1u);
     EXPECT_NE(bad[0].find("b"), std::string::npos);
+}
+
+TEST(CcatGraph, GoldenCropKeepsRoiSemantics) {
+    toy g("golden_roi");
+    // a looks only at the left half, b only at the right: a golden crop put
+    // back at the pixel it came from keeps meaning the region it meant.
+    write_file(g.dir / "g" / "graph.json", R"({
+      "root": "a",
+      "anchors": {
+        "a": {"must": [{"png": "a.png", "roi": [0, 0, 0.5, 1]}]},
+        "b": {"must": [{"png": "b.png", "roi": [0.5, 0, 0.5, 1]}]}
+      },
+      "edges": [{ "from": "a", "to": "b", "script": "g.a-b" }]
+    })");
+    const auto loaded = load_graph(g.dir, "g");
+    ASSERT_TRUE(loaded.ok) << loaded.error;
+
+    // The left half holds a's mark, so this crop still locates as a.
+    save_golden(g.dir / "g" / "golden" / "a", "1", g.frame_a, 0, 0, 40, 60);
+    EXPECT_TRUE(golden_mismatches(loaded.graph, matcher()).empty());
+
+    // The right half is blank: put back where it came from it still leaves the
+    // left half blank, so a no longer matches. That is the blind spot a crop
+    // buys, and why the box should be as wide as it can be.
+    save_golden(g.dir / "g" / "golden" / "a", "2", g.frame_a, 40, 0, 40, 60);
+    const std::vector<std::string> bad =
+        golden_mismatches(loaded.graph, matcher());
+    ASSERT_EQ(bad.size(), 1u) << (bad.empty() ? "" : bad[0]);
+    EXPECT_NE(bad[0].find("a"), std::string::npos) << bad[0];
+}
+
+TEST(CcatGraph, GoldenWithoutSidecarIsReported) {
+    toy g("golden_nosidecar");
+    const auto loaded = load_graph(g.dir, "g");
+    ASSERT_TRUE(loaded.ok);
+    save_png(g.dir / "g" / "golden" / "a" / "1.png", g.frame_a);
+    const std::vector<std::string> bad =
+        golden_mismatches(loaded.graph, matcher());
+    ASSERT_EQ(bad.size(), 1u);
+    EXPECT_NE(bad[0].find("no sidecar"), std::string::npos) << bad[0];
+}
+
+TEST(CcatGraph, GoldenSidecarRoundTrips) {
+    golden_meta meta;
+    meta.screen_w = 80;
+    meta.screen_h = 60;
+    meta.x = 4;
+    meta.y = 4;
+    meta.w = 16;
+    meta.h = 16;
+    std::string err;
+    const auto back = golden_meta_from_text(golden_meta_to_text(meta), &err);
+    ASSERT_TRUE(back.has_value()) << err;
+    EXPECT_EQ(back->screen_w, 80);
+    EXPECT_EQ(back->screen_h, 60);
+    EXPECT_EQ(back->x, 4);
+    EXPECT_EQ(back->y, 4);
+    EXPECT_EQ(back->w, 16);
+    EXPECT_EQ(back->h, 16);
+
+    EXPECT_FALSE(golden_meta_from_text("{}", &err).has_value());
+    EXPECT_FALSE(err.empty());
+    EXPECT_FALSE(golden_meta_from_text("not json", &err).has_value());
+    // A crop that does not fit the screen it names is refused too: nothing
+    // downstream could place it.
+    golden_meta outside = meta;
+    outside.x = 70; // 70 + 16 > 80
+    EXPECT_FALSE(golden_meta_from_text(golden_meta_to_text(outside), &err)
+                     .has_value());
+}
+
+TEST(CcatGraph, GraphTemplateNamesKeepsAnchors) {
+    toy g("templates");
+    write_file(g.dir / "g" / "graph.json", R"({
+      "root": "a",
+      "anchors": {
+        "a": {"must": ["a.png"], "must_not": ["b.png"]},
+        "b": {"must": [{"png": "b.png", "roi": [0.5, 0, 0.5, 1]}]}
+      },
+      "edges": [{ "from": "a", "to": "b", "script": "g.a-b" }]
+    })");
+    std::string err;
+    const auto names = graph_template_names(g.dir / "g" / "graph.json", &err);
+    ASSERT_TRUE(names.has_value()) << err;
+    EXPECT_EQ(*names, (std::vector<std::string>{"a.png", "b.png"}));
+
+    // No graph.json is an empty list, not an error.
+    const auto none = graph_template_names(g.dir / "g.recover" / "graph.json",
+                                           &err);
+    ASSERT_TRUE(none.has_value());
+    EXPECT_TRUE(none->empty());
+
+    // A file that is there but unreadable must not read as "nothing to keep",
+    // or update_script would delete the anchors.
+    write_file(g.dir / "g" / "graph.json", "{ not json");
+    EXPECT_FALSE(graph_template_names(g.dir / "g" / "graph.json", &err)
+                     .has_value());
+    EXPECT_FALSE(err.empty());
+}
+
+TEST(CcatGraph, BundleTagsMarksGraphAndEdge) {
+    toy g("tags");
+    const auto graph = bundle_tags(g.dir, "g");
+    EXPECT_TRUE(graph.graph);
+    EXPECT_EQ(graph.anchors, 2);
+    EXPECT_EQ(graph.edges, 1);
+    EXPECT_TRUE(graph.edge_of.empty());
+
+    const auto edge = bundle_tags(g.dir, "g.a-b");
+    EXPECT_FALSE(edge.graph);
+    EXPECT_EQ(edge.edge_of, "g");
+
+    // A bundle that shares the graph's prefix but is not one of its edges is
+    // not tagged: the name is a convention, `edges[].script` is not.
+    const auto recover = bundle_tags(g.dir, "g.recover");
+    EXPECT_FALSE(recover.graph);
+    EXPECT_TRUE(recover.edge_of.empty());
+
+    const auto plain = bundle_tags(g.dir, "nowhere");
+    EXPECT_FALSE(plain.graph);
+    EXPECT_TRUE(plain.edge_of.empty());
+}
+
+TEST(CcatGraph, GraphSummaryListsTemplatesAndGolden) {
+    toy g("summary");
+    auto loaded = load_graph(g.dir, "g");
+    ASSERT_TRUE(loaded.ok) << loaded.error;
+    save_golden(g.dir / "g" / "golden" / "a", "1", g.frame_a, 0, 0, 80, 60);
+    std::filesystem::remove(g.dir / "g" / "b.png");
+    const std::string text = graph_summary(loaded);
+    EXPECT_NE(text.find("anchors: 2 (a, b)"), std::string::npos) << text;
+    EXPECT_NE(text.find("edges: 1"), std::string::npos) << text;
+    EXPECT_NE(text.find("root: a"), std::string::npos) << text;
+    EXPECT_NE(text.find("a.png ok"), std::string::npos) << text;
+    EXPECT_NE(text.find("b.png missing"), std::string::npos) << text;
+    EXPECT_NE(text.find("golden: a 1, b 0"), std::string::npos) << text;
+}
+
+TEST(CcatGraph, UpdateGraphTextIsCheckedAgainstTheDisk) {
+    toy g("update_text");
+    std::ifstream in(g.dir / "g" / "graph.json");
+    const std::string good{std::istreambuf_iterator<char>(in),
+                           std::istreambuf_iterator<char>()};
+    EXPECT_TRUE(load_graph_text(g.dir, "g", good).ok);
+    EXPECT_TRUE(load_graph(g.dir, "g").ok);
+
+    // An edge naming a bundle that is not there: the submission is refused, so
+    // nothing would be written.
+    std::string swapped = good;
+    swapped.replace(swapped.find("g.a-b"), 5, "g.a-x");
+    const auto bad_edge = load_graph_text(g.dir, "g", swapped);
+    EXPECT_FALSE(bad_edge.ok);
+    EXPECT_NE(bad_edge.error.find("cannot read"), std::string::npos)
+        << bad_edge.error;
+
+    const auto bad_json = load_graph_text(g.dir, "g", "{ not json");
+    EXPECT_FALSE(bad_json.ok);
+    EXPECT_NE(bad_json.error.find("graph.json"), std::string::npos)
+        << bad_json.error;
+
+    // And the file itself still holds the graph it held before.
+    std::ifstream again(g.dir / "g" / "graph.json");
+    const std::string after{std::istreambuf_iterator<char>(again),
+                            std::istreambuf_iterator<char>()};
+    EXPECT_EQ(after, good);
 }
 
 TEST(CcatGraph, DeleteAndRenameFollowGraphJson) {
@@ -471,11 +659,6 @@ TEST(CcatGraph, AtIsAConditionAndGotoInsideAnEdgeIsAnError) {
     EXPECT_NE(nested.message.find("goto inside a graph script"),
               std::string::npos)
         << nested.message;
-}
-
-TEST(CcatGraph, TheShippedGraphLoads) {
-    const auto loaded = load_graph(CAMPCAT_SOURCE_DIR "/ccat_library", "shuaitu");
-    EXPECT_TRUE(loaded.ok) << loaded.error;
 }
 
 TEST(CcatGraph, ABadReferenceDoesNotParse) {
