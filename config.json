@@ -24,7 +24,7 @@
     "debug": false,
     "debug_dir": "match_debug",
     "multiscale": false,
-    "threshold": 0.7
+    "box_threshold": 0.7
   },
   "mumu": {
     "device_index": 0,

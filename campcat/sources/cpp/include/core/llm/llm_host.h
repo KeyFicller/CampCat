@@ -57,11 +57,11 @@ struct llm_approval {
     long id = 0; ///< Bumped per request; the UI caches its texture against it
     std::string tool;
     std::string summary;
-    std::vector<llm::rect> highlight;
-    bool box_editable = false; ///< Whether the human may redraw this box
-    /// The box the model gave, when the snap moved it: a second, thinner frame
-    /// so the human can compare the two. Empty when they are the same box.
-    std::optional<llm::rect> given_box;
+    std::vector<llm::region> highlight;
+    bool editable = false; ///< Whether the human may redraw this region
+    /// The region the model gave, when the snap moved it: a second, thinner
+    /// frame so the human can compare the two. Empty when they are the same.
+    std::optional<llm::region> given_region;
 };
 
 /// How long an idle consolidation may take. One model call and a file write, so
@@ -192,7 +192,7 @@ public:
     /// `_guidance` and `_box` are corrections for the model and are kept only
     /// on a rejection.
     void answer_approval(bool _approved, std::string _guidance = {},
-                         std::optional<llm::rect> _box = std::nullopt);
+                         std::optional<llm::region> _redrawn = std::nullopt);
 
     /**
      * @brief Resolve the hanging question as rejected, and refuse later ones,
@@ -288,8 +288,8 @@ private:
     bool m_approval_cancelled = false;
     /// Correction typed by the human; only read when the question is rejected.
     std::string m_approval_guidance;
-    /// Box the human redrew; same lifetime and same rule as the guidance.
-    std::optional<llm::rect> m_approval_box;
+    /// Region the human redrew; same lifetime and same rule as the guidance.
+    std::optional<llm::region> m_approval_region;
     /// Set once the host is going away; no question is answered after that.
     bool m_approval_abort = false;
     long m_next_approval_id = 0;

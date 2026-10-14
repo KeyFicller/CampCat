@@ -1,0 +1,385 @@
+// Circle support fails at three independent seams: region geometry at the screen
+// edge, reflection binding one region out of either shape, and masked disc
+// correlation. The first two are only reachable through `dispatch`, so those
+// cases call tools by name -- the same seat the model sits in. A disc on a real
+// screencap is not covered: that is calibration, not a unit test.
+
+#include <core/adb_client.h>
+#include <core/llm/llm_tool_schema.h>
+#include <core/llm/llm_tools.h>
+#include <core/template_matcher.h>
+
+#include <opencv2/core.hpp>
+#include <opencv2/imgcodecs.hpp>
+#include <opencv2/imgproc.hpp>
+
+#include <gtest/gtest.h>
+
+#include <chrono>
+#include <string>
+#include <string_view>
+#include <vector>
+
+namespace {
+
+constexpr int kScreenW = 100;
+constexpr int kScreenH = 80;
+
+/// A device that answers everything with success and records nothing. `tap` is
+/// the only member any case here reaches; the rest are honest no-ops rather than
+/// a mock framework.
+class SilentAdb final : public campcat::adb_api {
+public:
+    std::vector<std::string> list_devices(int) override { return {}; }
+    void set_serial(const std::string &) override {}
+    bool run(const std::vector<std::string> &, std::string *, std::string *,
+             int) override {
+        return false;
+    }
+    bool connect_remote(std::string_view, int, std::string *,
+                        std::string *) override {
+        return false;
+    }
+    bool tap(int, int) override { return true; }
+    bool swipe(int, int, int, int, int) override { return false; }
+    bool keyevent(int) override { return false; }
+    bool home_and_kill_all(int) override { return false; }
+    bool screencap_bgr(cv::Mat *, int, std::string *) override { return false; }
+    bool delay_after_action(std::chrono::milliseconds) const override {
+        return true;
+    }
+};
+
+/// A grey screen with one bright disc, so a crop of it is distinguishable from a
+/// crop of anywhere else.
+cv::Mat test_screen() {
+    cv::Mat img(kScreenH, kScreenW, CV_8UC3, cv::Scalar(40, 40, 40));
+    cv::circle(img, cv::Point(50, 40), 12, cv::Scalar(220, 220, 220),
+               cv::FILLED);
+    return img;
+}
+
+/// Deterministic noise. A correlation assertion needs the same screen every run,
+/// and a flat one would leave nothing for a disc to be told apart from.
+cv::Mat noise(int _rows, int _cols, unsigned _seed) {
+    cv::Mat img(_rows, _cols, CV_8UC3);
+    cv::RNG rng(_seed);
+    rng.fill(img, cv::RNG::UNIFORM, 0, 256);
+    return img;
+}
+
+/// The alpha a circular template carries on disk: 255 inside the disc, 0
+/// outside. The same convention `load_template` reads back off a BGRA png.
+cv::Mat disc_mask(int _side, int _radius) {
+    cv::Mat mask(_side, _side, CV_8U, cv::Scalar(0));
+    cv::circle(mask, cv::Point(_side / 2, _side / 2), _radius,
+               cv::Scalar(255), cv::FILLED);
+    return mask;
+}
+
+/// Decodes a PNG the tools handed back, to read the size or the pixels of it.
+cv::Mat decode_png(const std::string &_bytes) {
+    const cv::Mat buf(1, static_cast<int>(_bytes.size()), CV_8UC1,
+                      const_cast<char *>(_bytes.data()));
+    return cv::imdecode(buf, cv::IMREAD_UNCHANGED);
+}
+
+/// Installs the screen and the device every tool reads. Without them a case
+/// reports "no screenshot yet" instead of the thing it meant to test.
+class ShapeTools : public ::testing::Test {
+protected:
+    void SetUp() override {
+        std::vector<unsigned char> png;
+        cv::imencode(".png", test_screen(), png);
+        campcat::llm::tool_context ctx;
+        ctx.screen.w = kScreenW;
+        ctx.screen.h = kScreenH;
+        ctx.screen.png.assign(png.begin(), png.end());
+        ctx.adb = &m_adb;
+        campcat::llm::set_context(ctx);
+    }
+
+    void TearDown() override { campcat::llm::set_context({}); }
+
+    /// Dispatches `_name` with `_args`, the same call and the same JSON string
+    /// the host passes. A refusal lands in `error`, so cases assert on which
+    /// field is filled rather than catching.
+    static campcat::llm::tool_reply call(const std::string &_name,
+                                         const std::string &_args) {
+        return campcat::llm::dispatch(_name, _args);
+    }
+
+private:
+    SilentAdb m_adb;
+};
+
+const campcat::llm::js::tool_entry *tool_named(const std::string &_name) {
+    for (const auto &entry : campcat::llm::js::tool_registry()) {
+        if (entry.name == _name) {
+            return &entry;
+        }
+    }
+    return nullptr;
+}
+
+// --- where a shape may sit --------------------------------------------------
+
+// A disc is refused, not moved, when any pixel it covers is off-screen: a
+// clamped tap would look like a success to the model. Its bounding box is 2r+1
+// wide, so the last covered pixel is cx+r -- the pair below sits exactly on it.
+TEST_F(ShapeTools, CircleStopsAtTheLastPixelItCanCover) {
+    const auto last = call("view_crop_circle",
+                           R"({"circle":{"cx":61,"cy":40,"r":38}})");
+    EXPECT_TRUE(last.ok) << last.error;
+
+    const auto past = call("view_crop_circle",
+                           R"({"circle":{"cx":62,"cy":40,"r":38}})");
+    EXPECT_FALSE(past.ok);
+    EXPECT_NE(past.error.find("out of range"), std::string::npos) << past.error;
+}
+
+TEST_F(ShapeTools, CircleStopsAtTheLastRowItCanCover) {
+    const auto last =
+        call("view_crop_circle", R"({"circle":{"cx":50,"cy":41,"r":38}})");
+    EXPECT_TRUE(last.ok) << last.error;
+
+    const auto past =
+        call("view_crop_circle", R"({"circle":{"cx":50,"cy":42,"r":38}})");
+    EXPECT_FALSE(past.ok);
+    EXPECT_NE(past.error.find("out of range"), std::string::npos) << past.error;
+}
+
+// A radius of zero covers one pixel and a negative one covers nothing; neither
+// is a shape anyone meant, so both are refused with a radius that cannot crop.
+TEST_F(ShapeTools, ANonPositiveRadiusIsRefused) {
+    for (const char *args : {R"({"circle":{"cx":50,"cy":40,"r":0}})",
+                             R"({"circle":{"cx":50,"cy":40,"r":-3}})"}) {
+        const auto reply = call("view_crop_circle", args);
+        EXPECT_FALSE(reply.ok) << args;
+        EXPECT_NE(reply.error.find("out of range"), std::string::npos)
+            << args << ": " << reply.error;
+    }
+}
+
+// A box is half-open -- x+w is one past its last pixel -- so it may sit flush
+// against the edge where a disc reaching the same distance may not. The two
+// cases above and this one together pin that difference, which is easy to get
+// wrong by copying one shape's test into the other.
+TEST_F(ShapeTools, BoxMaySitFlushAgainstTheEdge) {
+    const auto flush =
+        call("view_crop", R"({"box":{"x":90,"y":70,"w":10,"h":10}})");
+    EXPECT_TRUE(flush.ok) << flush.error;
+
+    const auto past =
+        call("view_crop", R"({"box":{"x":91,"y":70,"w":10,"h":10}})");
+    EXPECT_FALSE(past.ok);
+    EXPECT_NE(past.error.find("out of range"), std::string::npos) << past.error;
+}
+
+TEST_F(ShapeTools, AZeroSizedBoxIsRefused) {
+    const auto reply = call("view_crop", R"({"box":{"x":10,"y":10,"w":0,"h":10}})");
+    EXPECT_FALSE(reply.ok);
+    EXPECT_NE(reply.error.find("out of range"), std::string::npos)
+        << reply.error;
+}
+
+// --- where a region's bounds and centre land --------------------------------
+
+// A crop is the region's bounding box, so its size is what `region_bounds`
+// computed. A disc's is 2r+1 square: the disc plus the one-pixel rim that makes
+// its centre land on a pixel rather than between four.
+TEST_F(ShapeTools, ACropIsTheRegionsBoundingBox) {
+    const auto box = call("view_crop", R"({"box":{"x":10,"y":20,"w":30,"h":15}})");
+    ASSERT_TRUE(box.ok) << box.error;
+    EXPECT_EQ(decode_png(box.image_png).size(), cv::Size(30, 15));
+
+    const auto disc =
+        call("view_crop_circle", R"({"circle":{"cx":50,"cy":40,"r":12}})");
+    ASSERT_TRUE(disc.ok) << disc.error;
+    EXPECT_EQ(decode_png(disc.image_png).size(), cv::Size(25, 25));
+}
+
+// The tap sentence names the point `region_center` picked: a box acts at its
+// middle, a disc at its own centre. A tap on the wrong pixel is otherwise
+// silent, so the number is worth reading back.
+TEST_F(ShapeTools, TapLandsOnTheRegionsCentre) {
+    const auto box = call("tap", R"({"box":{"x":10,"y":20,"w":30,"h":15}})");
+    ASSERT_TRUE(box.ok) << box.error;
+    EXPECT_EQ(box.text, "tapped 25,27");
+
+    const auto disc = call("tap_circle", R"({"circle":{"cx":50,"cy":40,"r":12}})");
+    ASSERT_TRUE(disc.ok) << disc.error;
+    EXPECT_EQ(disc.text, "tapped 50,40");
+}
+
+// --- either shape into one parameter ----------------------------------------
+
+// `update_script` takes either shape in one parameter (`template_cut::cut`),
+// told apart structurally: each carries its own field names and none has a
+// default, so a bare circle fits `circle` alone. The bundle is deliberately
+// missing, so reaching "unknown script bundle" proves the variant bound.
+TEST_F(ShapeTools, UpdateScriptBindsEitherShapeIntoOneCut) {
+    const std::string circle = R"({
+        "name": "no_such_bundle",
+        "source": "log(\"hi\")\n",
+        "templates": [{"name": "a", "cut": {"cx": 5, "cy": 6, "r": 3}}]
+    })";
+    const auto with_circle = call("update_script", circle);
+    EXPECT_NE(with_circle.error.find("unknown script bundle"), std::string::npos)
+        << with_circle.error;
+
+    const std::string box = R"({
+        "name": "no_such_bundle",
+        "source": "log(\"hi\")\n",
+        "templates": [{"name": "a", "cut": {"x": 1, "y": 2, "w": 3, "h": 4}}]
+    })";
+    const auto with_box = call("update_script", box);
+    EXPECT_NE(with_box.error.find("unknown script bundle"), std::string::npos)
+        << with_box.error;
+}
+
+// An object with none of either shape's fields fits neither alternative. That
+// it is reported as matching nothing -- rather than silently binding the first
+// one -- is what a default member initializer would break: a defaulted struct
+// matches every object, and the pair would then be ambiguous.
+TEST_F(ShapeTools, AnEmptyCutMatchesNoShape) {
+    const std::string args = R"({
+        "name": "no_such_bundle",
+        "source": "log(\"hi\")\n",
+        "templates": [{"name": "a", "cut": {}}]
+    })";
+    const auto reply = call("update_script", args);
+    EXPECT_FALSE(reply.ok);
+    EXPECT_NE(reply.error.find("no variant alternative matched"),
+              std::string::npos)
+        << reply.error;
+}
+
+// The schema is where the model learns a circle is allowed at all. `anyOf` and
+// not `oneOf`: both OpenAI and Anthropic reject the exclusive form, and a
+// schema that offered only boxes would leave the disc tools unreachable.
+TEST(ShapeSchema, TheCutOffersBothShapesAsAlternatives) {
+    const campcat::llm::js::tool_entry *entry = tool_named("update_script");
+    ASSERT_NE(entry, nullptr);
+    const std::string_view schema = entry->schema;
+    EXPECT_NE(schema.find("\"anyOf\""), std::string_view::npos);
+    EXPECT_NE(schema.find("\"cx\""), std::string_view::npos); // circle
+    EXPECT_NE(schema.find("\"cy\""), std::string_view::npos);
+    EXPECT_NE(schema.find("\"w\""), std::string_view::npos); // box
+}
+
+// Each disc tool names its shape in the schema and no other, so the model cannot
+// be told a box is acceptable where only a disc is.
+TEST(ShapeSchema, ADiscToolOffersOnlyTheDisc) {
+    const campcat::llm::js::tool_entry *circle = tool_named("view_crop_circle");
+    ASSERT_NE(circle, nullptr);
+    EXPECT_NE(circle->schema.find("\"cx\""), std::string_view::npos);
+    EXPECT_EQ(circle->schema.find("\"x\""), std::string_view::npos);
+
+    const campcat::llm::js::tool_entry *box = tool_named("view_crop");
+    ASSERT_NE(box, nullptr);
+    EXPECT_NE(box->schema.find("\"x\""), std::string_view::npos);
+    EXPECT_EQ(box->schema.find("\"cx\""), std::string_view::npos);
+}
+
+// --- scoring a disc ---------------------------------------------------------
+
+// The masked path is the one that had to be replaced: scoring a disc with
+// TM_CCORR_NORMED gave any bright flat patch ~1.0, so a threshold that admitted
+// a real hit also admitted everything else. These cases hold the two properties
+// a usable threshold needs.
+class MaskedMatch : public ::testing::Test {
+protected:
+    static constexpr int kRadius = 12;
+    static constexpr int kSide = 2 * kRadius + 1;
+
+    static campcat::template_matcher matcher() {
+        return campcat::template_matcher(0.5, 0.5, false);
+    }
+};
+
+// Pixels outside the mask must not move the score at all, or a disc would be
+// dragged around by whatever sits in its corners -- which for a circular icon is
+// most of its bounding box. Painting those corners white changes nothing the
+// scorer may read, so the score has to come back bit for bit.
+TEST_F(MaskedMatch, PixelsOutsideTheMaskCannotMoveTheScore) {
+    const cv::Mat screen = noise(240, 320, 7);
+    const cv::Point at(100, 100);
+    const cv::Mat templ = screen(cv::Rect(at.x, at.y, kSide, kSide)).clone();
+    const cv::Mat mask = disc_mask(kSide, kRadius);
+    const campcat::template_matcher m = matcher();
+
+    const campcat::match_result before = m.match(screen, templ, 0.5, {}, mask);
+    EXPECT_TRUE(before.found) << before.confidence;
+
+    cv::Mat painted = screen.clone();
+    for (int y = 0; y < kSide; ++y) {
+        for (int x = 0; x < kSide; ++x) {
+            if (mask.at<unsigned char>(y, x) == 0) {
+                painted.at<cv::Vec3b>(at.y + y, at.x + x) =
+                    cv::Vec3b(255, 255, 255);
+            }
+        }
+    }
+    const campcat::match_result after = m.match(painted, templ, 0.5, {}, mask);
+
+    EXPECT_EQ(after.center, before.center);
+    EXPECT_NEAR(after.confidence, before.confidence, 1e-9)
+        << "corners the mask excludes changed the score";
+}
+
+// With the whole template taking part there is nothing to exclude, so the masked
+// path has to agree with the plain square one. This is the check that the mask
+// changes which pixels count and nothing else -- a mask accidentally applied as
+// a multiplier would drift here.
+TEST_F(MaskedMatch, AFullMaskScoresLikeTheUnmaskedSquare) {
+    const cv::Mat screen = noise(240, 320, 11);
+    const cv::Mat templ = screen(cv::Rect(40, 30, 32, 32)).clone();
+    const cv::Mat full(templ.size(), CV_8U, cv::Scalar(255));
+    const campcat::template_matcher m = matcher();
+
+    const campcat::match_result plain = m.match(screen, templ, 0.5);
+    const campcat::match_result masked = m.match(screen, templ, 0.5, {}, full);
+
+    ASSERT_TRUE(plain.found) << plain.confidence;
+    EXPECT_EQ(masked.center, plain.center);
+    EXPECT_NEAR(masked.confidence, plain.confidence, 1e-4);
+}
+
+// A screen of one flat colour is the extreme of the bright flat patch that broke
+// the old scorer. Nothing here resembles the disc, so nothing here may be scored
+// as one.
+TEST_F(MaskedMatch, ADiscIsNotFoundOnAFlatScreen) {
+    const cv::Mat screen = noise(240, 320, 7);
+    const cv::Mat templ =
+        screen(cv::Rect(100, 100, kSide, kSide)).clone();
+    const cv::Mat mask = disc_mask(kSide, kRadius);
+    const cv::Mat flat(240, 320, CV_8UC3, cv::Scalar(200, 200, 200));
+
+    const campcat::match_result r =
+        matcher().match(flat, templ, 0.5, {}, mask);
+    EXPECT_FALSE(r.found) << "scored " << r.confidence << " on a flat screen";
+}
+
+// The disc is on the screen once, and the same noise with its own pixels
+// replaced puts it nowhere. The gap between the two is the margin a threshold
+// works in, so it is asserted rather than left to a comment.
+TEST_F(MaskedMatch, ADiscScoresHigherWhereItIsThanWhereItIsNot) {
+    const cv::Mat screen = noise(240, 320, 7);
+    const cv::Rect at(100, 100, kSide, kSide);
+    const cv::Mat templ = screen(at).clone();
+    const cv::Mat mask = disc_mask(kSide, kRadius);
+    const campcat::template_matcher m = matcher();
+
+    cv::Mat without = screen.clone();
+    noise(kSide, kSide, 9999).copyTo(without(at));
+
+    const campcat::match_result hit = m.match(screen, templ, 0.5, {}, mask);
+    const campcat::match_result miss = m.match(without, templ, 0.5, {}, mask);
+
+    EXPECT_TRUE(hit.found) << hit.confidence;
+    EXPECT_GT(hit.confidence, miss.confidence + 0.2)
+        << "hit " << hit.confidence << " vs best elsewhere " << miss.confidence;
+}
+
+} // namespace

@@ -138,7 +138,9 @@ automation_cycle_result run_source(const std::filesystem::path &_dir,
     const auto prog = parse_program(_source);
     campcat::ccat_lang::CcatInterpreter interp(
         _adb != nullptr ? _adb : &s_idle, &cfg,
-        campcat::template_matcher(cfg.match.threshold, cfg.match.multiscale),
+        campcat::template_matcher(cfg.match.box_threshold,
+                                  cfg.match.circle_threshold,
+                                  cfg.match.multiscale),
         _dir, std::filesystem::path{});
     return interp.run(*prog, [] { return false; });
 }

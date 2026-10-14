@@ -55,11 +55,12 @@ detect_template_on_screen(adb_api &_adb,
         return r;
     }
 
-    template_matcher matcher(_shell_timing_only.match.threshold,
+    template_matcher matcher(_shell_timing_only.match.box_threshold,
+                             _shell_timing_only.match.circle_threshold,
                              _shell_timing_only.match.multiscale);
-    const auto mr =
-        matcher.match_file(scr, r.template_path.string(),
-                           _shell_timing_only.match.threshold, _opts.roi_px);
+    const auto mr = matcher.match_file(scr, r.template_path.string(),
+                                       _shell_timing_only.match.box_threshold,
+                                       _opts.roi_px);
     if (!mr) {
         r.error = screen_template_error::template_unreadable;
         return r;

@@ -120,8 +120,8 @@ bool CcatInterpreter::image_matches(const std::string &_rel_path,
     if (!capture_screen(&screen, _should_stop)) {
         return false;
     }
-    const auto opt =
-        m_matcher.match_file(screen, abs_path.string(), m_cfg->match.threshold);
+    const auto opt = m_matcher.match_file(screen, abs_path.string(),
+                                          m_cfg->match.box_threshold);
     if (!opt.has_value()) {
         *_found = false;
         return true;
@@ -195,8 +195,8 @@ CcatInterpreter::tap_image(const std::string &_rel_path,
         }
         return action_failure{"screencap failed before tap", true};
     }
-    const auto opt =
-        m_matcher.match_file(screen, abs_path.string(), m_cfg->match.threshold);
+    const auto opt = m_matcher.match_file(screen, abs_path.string(),
+                                          m_cfg->match.box_threshold);
     if (!opt.has_value()) {
         std::ostringstream oss;
         oss << "tap: unreadable template " << abs_path.string();
@@ -206,7 +206,7 @@ CcatInterpreter::tap_image(const std::string &_rel_path,
     if (!opt->found) {
         std::ostringstream oss;
         oss << "tap: image not found " << abs_path.string()
-            << match_verdict_text(*opt, m_cfg->match.threshold);
+            << match_verdict_text(*opt);
         return oss.str();
     }
 
@@ -243,10 +243,10 @@ std::optional<action_failure> CcatInterpreter::swipe_templates_impl(
         }
         return action_failure{"swipe: screencap failed", true};
     }
-    const auto m_from =
-        m_matcher.match_file(screen, abs_from.string(), m_cfg->match.threshold);
-    const auto m_to =
-        m_matcher.match_file(screen, abs_to.string(), m_cfg->match.threshold);
+    const auto m_from = m_matcher.match_file(screen, abs_from.string(),
+                                             m_cfg->match.box_threshold);
+    const auto m_to = m_matcher.match_file(screen, abs_to.string(),
+                                           m_cfg->match.box_threshold);
     if (!m_from.has_value() || !m_to.has_value()) {
         return std::string("swipe: template unreadable");
     }
@@ -256,12 +256,10 @@ std::optional<action_failure> CcatInterpreter::swipe_templates_impl(
         std::ostringstream oss;
         oss << "swipe: not found on the current screen:";
         if (!m_from->found) {
-            oss << ' ' << _from_rel
-                << match_verdict_text(*m_from, m_cfg->match.threshold);
+            oss << ' ' << _from_rel << match_verdict_text(*m_from);
         }
         if (!m_to->found) {
-            oss << ' ' << _to_rel
-                << match_verdict_text(*m_to, m_cfg->match.threshold);
+            oss << ' ' << _to_rel << match_verdict_text(*m_to);
         }
         return oss.str();
     }
@@ -319,8 +317,8 @@ CcatInterpreter::tap_offset_impl(const std::string &_rel_path, double _dx,
         }
         return action_failure{"tap_offset: screencap failed before match", true};
     }
-    const auto opt =
-        m_matcher.match_file(screen, abs_path.string(), m_cfg->match.threshold);
+    const auto opt = m_matcher.match_file(screen, abs_path.string(),
+                                          m_cfg->match.box_threshold);
     if (!opt.has_value()) {
         std::ostringstream oss;
         oss << "tap_offset: unreadable template " << abs_path.string();
@@ -330,7 +328,7 @@ CcatInterpreter::tap_offset_impl(const std::string &_rel_path, double _dx,
     if (!opt->found) {
         std::ostringstream oss;
         oss << "tap_offset: image not found " << abs_path.string()
-            << match_verdict_text(*opt, m_cfg->match.threshold);
+            << match_verdict_text(*opt);
         return oss.str();
     }
 
@@ -518,7 +516,7 @@ CcatInterpreter::wait_until_impl(const std::string &_rel_path, int _timeout_ms,
             dump_match_debug("wait_until", abs_path, screen, mr);
             std::ostringstream oss;
             oss << "wait_until: timeout after " << _timeout_ms << " ms for "
-                << _rel_path << match_verdict_text(mr, m_cfg->match.threshold);
+                << _rel_path << match_verdict_text(mr);
             return oss.str();
         }
         if (auto sl = cooperative_sleep_ms(50, _should_stop)) {

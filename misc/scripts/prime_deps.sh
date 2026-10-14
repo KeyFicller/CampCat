@@ -8,7 +8,10 @@
 # Each clone goes to a temp dir and is moved into place, so a failure can never
 # delete a cache entry that is already good.
 set -u
-M="${MIRROR:-https://ghfast.top/https://github.com}"
+# Straight to github.com. Override MIRROR only if a redirect is needed; note
+# that a prefix-style proxy (what the old default was) is not the same thing as
+# git's url.insteadOf, which the CMakeUserPresets.json "local" preset uses.
+M="${MIRROR:-https://github.com}"
 CACHE="${1:?cache dir}"
 mkdir -p "$CACHE"
 TMP="$CACHE/.tmp.$$"
@@ -60,7 +63,9 @@ tag_clone glfw       glfw/glfw.git         3.4
 tag_clone imgui      ocornut/imgui.git     v1.91.8
 tag_clone json       nlohmann/json.git     v3.11.3
 tag_clone googletest google/googletest.git v1.15.2
-sha_clone cppreflect26 KeyFicller/CppReflectKit.git        2cefea7672ec76e3de15c4ca505ee40b711ef2f7
+sha_clone cppreflect26 KeyFicller/CppReflectKit.git        1ac4c8b21624b401862cdde703e8478e86f9159d
+tag_clone cpp_httplib  yhirose/cpp-httplib.git v0.60.1
+tag_clone cppcodec     tplgy/cppcodec.git      v0.2
 sha_clone portable_file_dialogs samhocevar/portable-file-dialogs.git c12ea8c9a727f5320a2b4570aee863bbede2a204
 sha_clone imgui_markdown juliettef/imgui_markdown.git      4acbf80584753e15ea54eb271129995862daac8f
 sha_clone imgui_colortextedit KeyFicller/ImGuiColorTextEdit.git 14fdfd4c2f19846aac6c6f8010899021022a9c16

@@ -2,10 +2,10 @@
 
 #include "core/adb_client.h"
 #include "core/app_config.h"
-#include "core/mumu_launcher.h"
 #include "core/automation_log.h"
 #include "core/llm/llm_host.h"
 #include "core/llm/llm_memory.h"
+#include "core/mumu_launcher.h"
 
 #include "app/shell_state.h"
 
@@ -34,6 +34,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cctype>
+#include <cmath>
 #include <deque>
 #include <filesystem>
 #include <mutex>
@@ -341,20 +342,24 @@ void ensure_texture(llm_item &_it) {
     _it.tex_tried = true;
     const cv::Mat buf(1, static_cast<int>(_it.png.size()), CV_8UC1,
                       _it.png.data());
-    const cv::Mat bgr = cv::imdecode(buf, cv::IMREAD_COLOR);
+    cv::Mat img = cv::imdecode(buf, cv::IMREAD_UNCHANGED);
     _it.png.clear();
     _it.png.shrink_to_fit();
-    if (bgr.empty()) {
+    if (img.empty()) {
         return;
     }
-    if (bgr.cols > k_turn_img_max_w) {
-        const double scale = static_cast<double>(k_turn_img_max_w) / bgr.cols;
-        cv::Mat small;
-        cv::resize(bgr, small, cv::Size(), scale, scale, cv::INTER_AREA);
-        _it.tex = campcat::app::upload_bgr(small, &_it.tex_w, &_it.tex_h);
-    } else {
-        _it.tex = campcat::app::upload_bgr(bgr, &_it.tex_w, &_it.tex_h);
+    if (img.channels() == 1) {
+        cv::cvtColor(img, img, cv::COLOR_GRAY2BGR);
     }
+    if (img.cols > k_turn_img_max_w) {
+        const double scale = static_cast<double>(k_turn_img_max_w) / img.cols;
+        cv::Mat small;
+        cv::resize(img, small, cv::Size(), scale, scale, cv::INTER_AREA);
+        img = small;
+    }
+    _it.tex = img.channels() == 4
+                  ? campcat::app::upload_bgra(img, &_it.tex_w, &_it.tex_h)
+                  : campcat::app::upload_bgr(img, &_it.tex_w, &_it.tex_h);
     if (_it.tex == 0) {
         _it.tex_dropped = true;
         return;
@@ -542,9 +547,8 @@ void start_turn(campcat::shell_state &_st, const campcat::app_config &_cfg,
             return st->start_mumu_blocking(_should_stop);
         };
         g_host.set_tool_context(ctx);
-        campcat::llm_result res =
-            g_host.run_turn(cfg_snapshot.config_home, cfg_snapshot.llm.provider,
-                            prompt);
+        campcat::llm_result res = g_host.run_turn(
+            cfg_snapshot.config_home, cfg_snapshot.llm.provider, prompt);
         g_host.set_tool_context({}); // `adb` dies with this lambda
         {
             std::lock_guard<std::mutex> lk(g_done_mu);
@@ -565,8 +569,8 @@ void start_memorize(std::filesystem::path _config_home, std::string _provider) {
     g_memorizing.store(true);
     g_thread = std::thread([config_home = std::move(_config_home),
                             provider = std::move(_provider)]() {
-        campcat::llm_result res =
-            g_host.memorize(config_home, provider, campcat::k_memorize_timeout_ms);
+        campcat::llm_result res = g_host.memorize(
+            config_home, provider, campcat::k_memorize_timeout_ms);
         g_memorizing.store(false);
         {
             std::lock_guard<std::mutex> lk(g_done_mu);
@@ -591,8 +595,8 @@ void start_reset(std::filesystem::path _config_home, std::string _provider) {
         // point. A failed consolidation is not a reason to refuse the clear the
         // user asked for.
         g_memorizing.store(true);
-        campcat::llm_result kept =
-            g_host.memorize(config_home, provider, campcat::k_memorize_timeout_ms);
+        campcat::llm_result kept = g_host.memorize(
+            config_home, provider, campcat::k_memorize_timeout_ms);
         g_memorizing.store(false);
         if (!kept.ok) {
             campcat::automation_log::emit("[llm] memory not saved: " +
@@ -743,10 +747,10 @@ void draw_turn(llm_turn &_t, int _index) {
     // images need the full width too, or a note would be wrapped into a narrow
     // column and an image clipped into a narrow strip.
     const bool placeholder = _t.pending && _t.items.empty();
-    const float aw = placeholder
-                         ? bubble_width(g_thinking ? "Thinking..." : "...",
-                                        max_w, 0.0F, pad)
-                         : max_w;
+    const float aw =
+        placeholder
+            ? bubble_width(g_thinking ? "Thinking..." : "...", max_w, 0.0F, pad)
+            : max_w;
     const bool failed = !_t.pending && !_t.ok;
     ImGui::PushStyleColor(ImGuiCol_ChildBg, failed ? k_err_bg : k_bot_bg);
     ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, k_bubble_rounding);
@@ -837,10 +841,11 @@ bool sync_approval_texture(const campcat::llm_approval &_a) {
 /// The gear next to Send, and the approval gates behind it.
 ///
 /// The gear, relative to the working directory the app is started from (the
-/// same base `fonts.cpp` resolves `campcat/sources/cpp/assets/fonts/` against). Drawn rather than
-/// designed: a white disc at radius 0.63 of the half-size, eight teeth out to
-/// 0.875, a hub punched back out at 0.22, all 8x supersampled and INTER_AREA'd
-/// down. White on an alpha channel is the shape `load_icon` uploads.
+/// same base `fonts.cpp` resolves `campcat/sources/cpp/assets/fonts/` against).
+/// Drawn rather than designed: a white disc at radius 0.63 of the half-size,
+/// eight teeth out to 0.875, a hub punched back out at 0.22, all 8x
+/// supersampled and INTER_AREA'd down. White on an alpha channel is the shape
+/// `load_icon` uploads.
 constexpr char k_gear_path[] = "campcat/sources/cpp/assets/icons/gear.png";
 
 /// The paper plane on Send. White on purpose, like the gear: `load_icon` hands
@@ -921,12 +926,12 @@ void draw_approval_settings(campcat::app_config &_c) {
     }
     ImGui::Separator();
     // Not an approval gate: the snap is something the tool does on the way to
-    // acting. It sits here because this is where a human comes when a tap landed
-    // wrong, and it needs the same kind of kill switch. One control rather than
-    // a checkbox over a pair of radios: "off" is just the third mode, so the two
-    // answers cannot disagree.
-    // The list is the enum in declaration order, `none` first, so a mode index
-    // and a strategy are the same number.
+    // acting. It sits here because this is where a human comes when a tap
+    // landed wrong, and it needs the same kind of kill switch. One control
+    // rather than a checkbox over a pair of radios: "off" is just the third
+    // mode, so the two answers cannot disagree. The list is the enum in
+    // declaration order, `none` first, so a mode index and a strategy are the
+    // same number.
     const char *const k_snap_modes[] = {"None", "Otsu blobs", "Edge step"};
     int snap_mode = static_cast<int>(_c.box_snap.strategy);
     ImGui::SetNextItemWidth(k_snap_combo_w);
@@ -944,54 +949,127 @@ void draw_approval_settings(campcat::app_config &_c) {
     ImGui::EndPopup();
 }
 
-/// The box-annotation window, opened by double-clicking the preview. The box is
-/// the user's redraw, kept apart from the model's so Cancel costs nothing.
+/// Draw `_region` on a canvas whose top-left is `_mn` at scale `_s` (1.0 for
+/// the correction window, smaller for a thumbnail). A circle is drawn as a
+/// disc: the corners a box would add are exactly what the shape exists to
+/// exclude.
+/// `_fill` of 0 means no fill.
+void draw_region(ImDrawList *_dl, const ImVec2 &_mn, float _s,
+                 const campcat::llm::region &_region, ImU32 _fill,
+                 ImU32 _stroke, float _thickness) {
+    if (const auto *b = std::get_if<campcat::llm::box>(&_region)) {
+        const ImVec2 p0(_mn.x + static_cast<float>(b->x) * _s,
+                        _mn.y + static_cast<float>(b->y) * _s);
+        const ImVec2 p1(_mn.x + static_cast<float>(b->x + b->w) * _s,
+                        _mn.y + static_cast<float>(b->y + b->h) * _s);
+        if (_fill != 0) {
+            _dl->AddRectFilled(p0, p1, _fill);
+        }
+        _dl->AddRect(p0, p1, _stroke, 0.0F, 0, _thickness);
+        return;
+    }
+    const auto &c = std::get<campcat::llm::circle>(_region);
+    const ImVec2 centre(_mn.x + static_cast<float>(c.cx) * _s,
+                        _mn.y + static_cast<float>(c.cy) * _s);
+    const float radius = static_cast<float>(c.r) * _s;
+    if (_fill != 0) {
+        _dl->AddCircleFilled(centre, radius, _fill);
+    }
+    _dl->AddCircle(centre, radius, _stroke, 0, _thickness);
+}
+
+/// A region's bounding box in image pixels: what the correction window's drag
+/// handles and its readout work in.
+campcat::llm::box region_bounds_ui(const campcat::llm::region &_region) {
+    if (const auto *b = std::get_if<campcat::llm::box>(&_region)) {
+        return *b;
+    }
+    const auto &c = std::get<campcat::llm::circle>(_region);
+    return campcat::llm::box{c.cx - c.r, c.cy - c.r, 2 * c.r + 1, 2 * c.r + 1};
+}
+
+/// The region-annotation window, opened by double-clicking the preview. What it
+/// holds is the user's redraw, kept apart from the model's so Cancel costs
+/// nothing.
 bool g_annot_open = false;
 long g_annot_id = -1; ///< which question this edit belongs to (`_a.id`)
 bool g_annot_dragging = false;
-bool g_annot_has_box = false;
+bool g_annot_has_region = false;
+/// Which shape the drag draws. Seeded from the region under correction, and
+/// switchable: a box the model got wrong may be a circle the user wants.
+enum class edit_shape { box, circle };
+edit_shape g_annot_shape = edit_shape::box;
 int g_annot_ax = 0; ///< drag anchor, image px
 int g_annot_ay = 0;
 int g_annot_cx = 0; ///< drag current point, image px
 int g_annot_cy = 0;
-int g_annot_x0 = 0; ///< committed box, inclusive image px
+int g_annot_x0 = 0; ///< committed box (x,y,w,h layout) or circle centre
 int g_annot_y0 = 0;
-int g_annot_x1 = 0;
+int g_annot_x1 = 0; ///< box far corner, inclusive image px
 int g_annot_y1 = 0;
+int g_annot_r = 0; ///< committed circle radius
 
-/// A redrawn box waiting to go with the reply. The send bar shows it, and Send
-/// and Reject carry it; it belongs to exactly one question.
-std::optional<campcat::llm::rect> g_staged_box;
+/// A redrawn region waiting to go with the reply. The send bar shows it, and
+/// Send and Reject carry it; it belongs to exactly one question.
+std::optional<campcat::llm::region> g_staged_region;
 long g_staged_id = -1;
 
 /// Drop the staged redraw, because the question it belonged to is gone.
 void clear_staged() {
-    g_staged_box.reset();
+    g_staged_region.reset();
     g_staged_id = -1;
 }
 
-/// Open the annotation window for `_a`. The box is seeded from a staged redraw
-/// when there is one (reopening must not lose the last edit), else from the
-/// model's.
+/// What the annotation drag currently stands for: the live drag while the mouse
+/// is down, the last committed one otherwise.
+campcat::llm::region annot_draft() {
+    if (g_annot_shape == edit_shape::circle) {
+        const int ax = g_annot_dragging ? g_annot_ax : g_annot_x0;
+        const int ay = g_annot_dragging ? g_annot_ay : g_annot_y0;
+        const int r = g_annot_dragging
+                          ? static_cast<int>(std::lround(std::hypot(
+                                static_cast<double>(g_annot_cx - ax),
+                                static_cast<double>(g_annot_cy - ay))))
+                          : g_annot_r;
+        return campcat::llm::circle{ax, ay, r};
+    }
+    const int x0 = g_annot_dragging ? g_annot_ax : g_annot_x0;
+    const int y0 = g_annot_dragging ? g_annot_ay : g_annot_y0;
+    const int x1 = g_annot_dragging ? g_annot_cx : g_annot_x1;
+    const int y1 = g_annot_dragging ? g_annot_cy : g_annot_y1;
+    return campcat::llm::box{std::min(x0, x1), std::min(y0, y1),
+                             std::abs(x1 - x0) + 1, std::abs(y1 - y0) + 1};
+}
+
+/// Open the annotation window for `_a`. The region is seeded from a staged
+/// redraw when there is one (reopening must not lose the last edit), else from
+/// the model's.
 void open_annotation(const campcat::llm_approval &_a) {
     g_annot_open = true;
     g_annot_id = _a.id;
     g_annot_dragging = false;
-    campcat::llm::rect seed;
-    bool has = false;
-    if (g_staged_box && g_staged_id == _a.id) {
-        seed = *g_staged_box;
-        has = true;
+    std::optional<campcat::llm::region> seed;
+    if (g_staged_region && g_staged_id == _a.id) {
+        seed = g_staged_region;
     } else if (!_a.highlight.empty()) {
         seed = _a.highlight[0];
-        has = true;
     }
-    g_annot_has_box = has;
-    if (has) {
-        g_annot_x0 = seed.x;
-        g_annot_y0 = seed.y;
-        g_annot_x1 = seed.x + seed.w - 1;
-        g_annot_y1 = seed.y + seed.h - 1;
+    g_annot_has_region = seed.has_value();
+    g_annot_shape = seed && std::holds_alternative<campcat::llm::circle>(*seed)
+                        ? edit_shape::circle
+                        : edit_shape::box;
+    if (seed) {
+        if (const auto *c = std::get_if<campcat::llm::circle>(&*seed)) {
+            g_annot_x0 = c->cx;
+            g_annot_y0 = c->cy;
+            g_annot_r = c->r;
+        } else {
+            const campcat::llm::box b = region_bounds_ui(*seed);
+            g_annot_x0 = b.x;
+            g_annot_y0 = b.y;
+            g_annot_x1 = b.x + b.w - 1;
+            g_annot_y1 = b.y + b.h - 1;
+        }
     }
 }
 
@@ -1009,11 +1087,12 @@ void draw_annotation_window() {
     }
     ImGui::SetNextWindowSize(ImVec2(560.0F, 520.0F), ImGuiCond_FirstUseEver);
     bool open = true;
-    if (ImGui::Begin("Correct the box", &open)) {
+    if (ImGui::Begin("Correct the region", &open)) {
         ImGui::TextDisabled(
-            a.given_box
-                ? "Drag a new box. Thin: the model's. Solid: after snapping."
-                : "Drag a new box on the image. The thin one is the model's.");
+            a.given_region
+                ? "Drag a new region. Thin: the model's. Solid: after snapping."
+                : "Drag a new region on the image. The thin one is the "
+                  "model's.");
         // Two rows below the canvas: the box readout and the button row.
         const float footer = ImGui::GetFrameHeightWithSpacing() * 2.0F;
         ImGui::BeginChild("annot_scroll", ImVec2(0.0F, -footer),
@@ -1050,72 +1129,93 @@ void draw_annotation_window() {
         if (g_annot_dragging) {
             to_px(io.MousePos, &g_annot_cx, &g_annot_cy);
             if (!held) {
+                // Read the live drag before clearing the flag: annot_draft()
+                // falls back to the committed region once dragging is false.
+                const campcat::llm::region draft = annot_draft();
                 g_annot_dragging = false;
-                // A click that never moved is a stray click, not a zero-size
-                // box.
-                if (g_annot_cx != g_annot_ax || g_annot_cy != g_annot_ay) {
+                // A drag that never moved is a stray click, not a zero-size box
+                // or a zero-radius circle.
+                if (g_annot_shape == edit_shape::circle) {
+                    const auto &c = std::get<campcat::llm::circle>(draft);
+                    if (c.r > 0) {
+                        g_annot_x0 = c.cx;
+                        g_annot_y0 = c.cy;
+                        g_annot_r = c.r;
+                        g_annot_has_region = true;
+                    }
+                } else if (g_annot_cx != g_annot_ax ||
+                           g_annot_cy != g_annot_ay) {
                     g_annot_x0 = std::min(g_annot_ax, g_annot_cx);
                     g_annot_y0 = std::min(g_annot_ay, g_annot_cy);
                     g_annot_x1 = std::max(g_annot_ax, g_annot_cx);
                     g_annot_y1 = std::max(g_annot_ay, g_annot_cy);
-                    g_annot_has_box = true;
+                    g_annot_has_region = true;
                 }
             }
         }
         ImDrawList *dl = ImGui::GetWindowDrawList();
-        // What the user is correcting, plus the box the model gave when the snap
-        // moved it: without the model's own box on screen there is nothing to
-        // judge the snap against. The model's is a different colour and a thinner
-        // line, the same encoding the approval bubble uses, so "which is which"
-        // does not depend on telling two offsets apart.
-        for (const campcat::llm::rect &r : a.highlight) {
-            dl->AddRect(ImVec2(mn.x + static_cast<float>(r.x),
-                               mn.y + static_cast<float>(r.y)),
-                        ImVec2(mn.x + static_cast<float>(r.x + r.w),
-                               mn.y + static_cast<float>(r.y + r.h)),
-                        a.given_box ? IM_COL32(255, 200, 60, 230)
-                                    : IM_COL32(255, 200, 60, 130),
-                        0.0F, 0, a.given_box ? 2.0F : 1.0F);
+        // What the user is correcting, plus the box the model gave when the
+        // snap moved it: without the model's own box on screen there is nothing
+        // to judge the snap against. The model's is a different colour and a
+        // thinner line, the same encoding the approval bubble uses, so "which
+        // is which" does not depend on telling two offsets apart.
+        for (const campcat::llm::region &r : a.highlight) {
+            draw_region(dl, mn, 1.0F, r,
+                        a.given_region ? IM_COL32(255, 200, 60, 230)
+                                       : IM_COL32(255, 200, 60, 130),
+                        a.given_region ? IM_COL32(255, 200, 60, 230)
+                                       : IM_COL32(255, 200, 60, 130),
+                        a.given_region ? 2.0F : 1.0F);
         }
-        if (a.given_box) {
-            const campcat::llm::rect &r = *a.given_box;
-            dl->AddRect(ImVec2(mn.x + static_cast<float>(r.x),
-                               mn.y + static_cast<float>(r.y)),
-                        ImVec2(mn.x + static_cast<float>(r.x + r.w),
-                               mn.y + static_cast<float>(r.y + r.h)),
-                        IM_COL32(200, 120, 255, 220), 0.0F, 0, 1.0F);
+        if (a.given_region) {
+            draw_region(dl, mn, 1.0F, *a.given_region, 0,
+                        IM_COL32(200, 120, 255, 220), 1.0F);
         }
-        if (g_annot_dragging || g_annot_has_box) {
-            const int x0 = g_annot_dragging ? g_annot_ax : g_annot_x0;
-            const int y0 = g_annot_dragging ? g_annot_ay : g_annot_y0;
-            const int x1 = g_annot_dragging ? g_annot_cx : g_annot_x1;
-            const int y1 = g_annot_dragging ? g_annot_cy : g_annot_y1;
-            const ImVec2 s0(mn.x + static_cast<float>(std::min(x0, x1)),
-                            mn.y + static_cast<float>(std::min(y0, y1)));
-            const ImVec2 s1(mn.x + static_cast<float>(std::max(x0, x1)),
-                            mn.y + static_cast<float>(std::max(y0, y1)));
-            dl->AddRectFilled(s0, s1, IM_COL32(80, 200, 255, 55));
-            dl->AddRect(s0, s1, IM_COL32(255, 220, 80, 255), 0.0F, 0, 2.0F);
+        if (g_annot_dragging || g_annot_has_region) {
+            draw_region(dl, mn, 1.0F, annot_draft(), IM_COL32(80, 200, 255, 55),
+                        IM_COL32(255, 220, 80, 255), 2.0F);
         }
         ImGui::EndChild();
-        if (g_annot_has_box) {
-            ImGui::TextDisabled("box %d,%d %dx%d px", g_annot_x0, g_annot_y0,
-                                g_annot_x1 - g_annot_x0 + 1,
-                                g_annot_y1 - g_annot_y0 + 1);
+        if (g_annot_has_region) {
+            if (g_annot_shape == edit_shape::circle) {
+                ImGui::TextDisabled("circle %d,%d r=%d px", g_annot_x0,
+                                    g_annot_y0, g_annot_r);
+            } else {
+                ImGui::TextDisabled("box %d,%d %dx%d px", g_annot_x0,
+                                    g_annot_y0, g_annot_x1 - g_annot_x0 + 1,
+                                    g_annot_y1 - g_annot_y0 + 1);
+            }
         } else {
-            ImGui::TextDisabled("drag on the image to pick a box");
+            ImGui::TextDisabled(g_annot_shape == edit_shape::circle
+                                    ? "drag from the centre to set the radius"
+                                    : "drag on the image to pick a box");
         }
-        if (!g_annot_has_box) {
+        // Switching shape drops the committed region: a box must not ride along
+        // as a circle (or the other way round) just because it was drawn first.
+        // Re-clicking the active radio is not a switch -- RadioButton reports
+        // the click either way, and dropping the region there would throw away
+        // what was just drawn.
+        ImGui::SameLine();
+        if (ImGui::RadioButton("box", g_annot_shape == edit_shape::box) &&
+            g_annot_shape != edit_shape::box) {
+            g_annot_shape = edit_shape::box;
+            g_annot_has_region = false;
+        }
+        ImGui::SameLine();
+        if (ImGui::RadioButton("circle", g_annot_shape == edit_shape::circle) &&
+            g_annot_shape != edit_shape::circle) {
+            g_annot_shape = edit_shape::circle;
+            g_annot_has_region = false;
+        }
+        if (!g_annot_has_region) {
             ImGui::BeginDisabled();
         }
-        if (ImGui::Button("Use this box")) {
-            g_staged_box = campcat::llm::rect{g_annot_x0, g_annot_y0,
-                                              g_annot_x1 - g_annot_x0 + 1,
-                                              g_annot_y1 - g_annot_y0 + 1};
+        if (ImGui::Button("Use this region")) {
+            g_staged_region = annot_draft();
             g_staged_id = g_annot_id;
             g_annot_open = false;
         }
-        if (!g_annot_has_box) {
+        if (!g_annot_has_region) {
             ImGui::EndDisabled();
         }
         ImGui::SameLine();
@@ -1147,16 +1247,10 @@ void draw_staged_thumb(const std::string &_tool) {
     // Where the next row starts; the overlay below is put back here so it costs
     // no layout.
     const ImVec2 below = ImGui::GetCursorScreenPos();
-    const campcat::llm::rect &r = *g_staged_box;
-    const ImVec2 p0(img_min.x + static_cast<float>(r.x) * s,
-                    img_min.y + static_cast<float>(r.y) * s);
-    const ImVec2 p1(img_min.x + static_cast<float>(r.x + r.w) * s,
-                    img_min.y + static_cast<float>(r.y + r.h) * s);
-    ImDrawList *dl = ImGui::GetWindowDrawList();
-    dl->AddRectFilled(p0, p1, IM_COL32(80, 200, 255, 55));
-    dl->AddRect(p0, p1, IM_COL32(255, 220, 80, 255), 0.0F, 0, 2.0F);
+    draw_region(ImGui::GetWindowDrawList(), img_min, s, *g_staged_region,
+                IM_COL32(80, 200, 255, 55), IM_COL32(255, 220, 80, 255), 2.0F);
     ImGui::SameLine();
-    ImGui::TextDisabled("Corrected %s box will be sent with your reply.",
+    ImGui::TextDisabled("Corrected %s region will be sent with your reply.",
                         _tool.c_str());
     ImGui::SetCursorScreenPos(ImVec2(img_max.x - 20.0F, img_min.y + 1.0F));
     if (ImGui::SmallButton("x##staged_clear")) {
@@ -1183,47 +1277,39 @@ void draw_approval_bubble(const campcat::llm_approval &_a) {
             ImVec2(0.0F, 0.0F), ImVec2(1.0F, 1.0F));
         // Read off the Image before anything else touches the "last item"
         // state.
-        const bool dbl = _a.box_editable && ImGui::IsItemHovered() &&
+        const bool dbl = _a.editable && ImGui::IsItemHovered() &&
                          ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left);
         // The boxes are in screenshot pixels; the image is drawn scaled.
         const ImVec2 origin = ImGui::GetItemRectMin();
         const float scale = size.x / static_cast<float>(g_appr_w);
         ImDrawList *dl = ImGui::GetWindowDrawList();
-        for (const campcat::llm::rect &r : _a.highlight) {
-            const ImVec2 p0(origin.x + static_cast<float>(r.x) * scale,
-                            origin.y + static_cast<float>(r.y) * scale);
-            const ImVec2 p1(origin.x + static_cast<float>(r.x + r.w) * scale,
-                            origin.y + static_cast<float>(r.y + r.h) * scale);
-            dl->AddRectFilled(p0, p1, IM_COL32(255, 200, 60, 48));
-            dl->AddRect(p0, p1, IM_COL32(255, 200, 60, 230), 0.0F, 0, 2.0F);
+        for (const campcat::llm::region &r : _a.highlight) {
+            draw_region(dl, origin, scale, r, IM_COL32(255, 200, 60, 48),
+                        IM_COL32(255, 200, 60, 230), 2.0F);
         }
-        // The box the model gave, when the snap moved it. A different colour, not
-        // just a thinner line: the preview is drawn at ~0.16 scale on a phone
-        // resolution, so a 20px snap is a 3px offset and the two frames would read
-        // as one if they were both yellow.
-        if (_a.given_box) {
-            const campcat::llm::rect &r = *_a.given_box;
-            dl->AddRect(
-                ImVec2(origin.x + static_cast<float>(r.x) * scale,
-                       origin.y + static_cast<float>(r.y) * scale),
-                ImVec2(origin.x + static_cast<float>(r.x + r.w) * scale,
-                       origin.y + static_cast<float>(r.y + r.h) * scale),
-                IM_COL32(200, 120, 255, 220), 0.0F, 0, 1.0F);
+        // The region the model gave, when the snap moved it. A different
+        // colour, not just a thinner line: the preview is drawn at ~0.16 scale
+        // on a phone resolution, so a 20px snap is a 3px offset and the two
+        // frames would read as one if they were both yellow.
+        if (_a.given_region) {
+            draw_region(dl, origin, scale, *_a.given_region, 0,
+                        IM_COL32(200, 120, 255, 220), 1.0F);
         }
         if (dbl) {
             open_annotation(_a);
         }
-        if (_a.given_box) {
-            ImGui::TextDisabled(
-                "Thin frame: the box the model gave. Solid: after snapping.");
+        if (_a.given_region) {
+            ImGui::TextDisabled("Thin frame: the region the model gave. Solid: "
+                                "after snapping.");
         }
     }
-    if (_a.box_editable) {
-        ImGui::TextDisabled("Double-click the image to correct the box.");
+    if (_a.editable) {
+        ImGui::TextDisabled("Double-click the image to correct the region.");
     }
     if (ImGui::Button("Approve")) {
         g_host.answer_approval(true);
-        clear_staged(); // an approval means the box is right; a redraw is moot
+        clear_staged(); // an approval means the region is right; a redraw is
+                        // moot
     }
     ImGui::SameLine();
     // Rejection with a typed correction goes through the prompt box, which
@@ -1234,7 +1320,7 @@ void draw_approval_bubble(const campcat::llm_approval &_a) {
     if (ImGui::Button("Reject")) {
         // A staged redraw rides along: the user staged it to be sent, and
         // dropping it silently here would surprise them.
-        g_host.answer_approval(false, {}, g_staged_box);
+        g_host.answer_approval(false, {}, g_staged_region);
         clear_staged();
     }
     ImGui::EndChild();
@@ -1386,8 +1472,9 @@ void llm_panel_shutdown_gl() {
     // in `llm_panel_shutdown_finish`, once there is nothing left to freeze.
     if (!g_config_home.empty()) {
         g_shutdown_thread = std::thread([]() {
-            const campcat::llm_result res = g_host.memorize(
-                g_config_home, g_provider, campcat::k_shutdown_memorize_timeout_ms);
+            const campcat::llm_result res =
+                g_host.memorize(g_config_home, g_provider,
+                                campcat::k_shutdown_memorize_timeout_ms);
             if (!res.ok) {
                 campcat::automation_log::emit("[llm] memory not saved: " +
                                               res.error);
@@ -1487,10 +1574,10 @@ void llm_panel_draw_panel(campcat::shell_state &_st, campcat::app_config &_cfg,
     const bool awaiting = approval.pending;
     // A staged redraw belongs to exactly one question. Drop it as soon as that
     // question is gone, so it cannot ride the next one.
-    if (g_staged_box && (!awaiting || g_staged_id != approval.id)) {
+    if (g_staged_region && (!awaiting || g_staged_id != approval.id)) {
         clear_staged();
     }
-    if (awaiting && g_staged_box && g_appr_tex != 0 && g_appr_w > 0) {
+    if (awaiting && g_staged_region && g_appr_tex != 0 && g_appr_w > 0) {
         draw_staged_thumb(approval.tool);
     }
 
@@ -1518,15 +1605,15 @@ void llm_panel_draw_panel(campcat::shell_state &_st, campcat::app_config &_cfg,
                           awaiting ? "Optional: tell it what to do instead"
                                    : "Tell CampCat what to do...",
                           &g_input);
-    // Attached here rather than inside prompt_input_text: that helper paints the
-    // IME pre-edit without submitting an item, so the box is still the last item
-    // at this point. The target would silently leave the box if the helper ever
-    // submitted one.
+    // Attached here rather than inside prompt_input_text: that helper paints
+    // the IME pre-edit without submitting an item, so the box is still the last
+    // item at this point. The target would silently leave the box if the helper
+    // ever submitted one.
     if (ImGui::BeginDragDropTarget()) {
         if (const ImGuiPayload *payload =
                 ImGui::AcceptDragDropPayload(k_script_drag_payload)) {
-            // `@name` glued to the text before it would not read as a mention, so
-            // a separator goes in unless one is already there.
+            // `@name` glued to the text before it would not read as a mention,
+            // so a separator goes in unless one is already there.
             if (!g_input.empty() &&
                 !std::isspace(static_cast<unsigned char>(g_input.back()))) {
                 g_input.push_back(' ');
@@ -1620,7 +1707,7 @@ void llm_panel_draw_panel(campcat::shell_state &_st, campcat::app_config &_cfg,
         if (awaiting) {
             const bool blank = is_blank(g_input);
             g_host.answer_approval(false, blank ? std::string() : g_input,
-                                   g_staged_box);
+                                   g_staged_region);
             clear_staged();
             g_input.clear(); // consumed as the answer, not as a prompt
         } else {

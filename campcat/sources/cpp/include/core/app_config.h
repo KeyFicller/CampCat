@@ -50,7 +50,8 @@ struct input_config {
 
 /// Template matching.
 struct match_config {
-    double threshold = 0.82;
+    double box_threshold = 0.82;
+    double circle_threshold = 0.96;
     bool multiscale = false;
     /// When true, dump annotated screencaps for each match under `debug_dir`.
     bool debug = false;
@@ -90,15 +91,14 @@ struct llm_config {
 };
 
 /// Pulling the boxes the model gives onto the element's boundary, on the way to
-/// acting on them. See `core/box_snap.h` for what a snap does and what it costs.
+/// acting on them. See `core/box_snap.h` for what a snap does and what it
+/// costs.
 struct box_snap_config {
-    /// Which strategy, `none` included: one field, because "off" and "which
-    /// strategy" are the same question and two fields could answer it twice.
-    /// On by default (`otsu`). `otsu` is the more conservative of the two:
-    /// it leaves two of the three test elements exactly as the model gave them
-    /// and improves the third. `step` wins bigger on one element (18px -> 10px)
-    /// but worsens another by 3px.
-    box_snap_strategy strategy = box_snap_strategy::otsu;
+    /// Which strategy, `none` included: "off" and "which strategy" are one
+    /// question, so one field answers both. Off by default -- `otsu` and `step`
+    /// each improve some elements and worsen others on the test set, not worth
+    /// a failure on an element nobody measured.
+    box_snap_strategy strategy = box_snap_strategy::none;
 };
 
 /**
@@ -125,7 +125,8 @@ struct app_config {
     llm_config llm{};
     box_snap_config box_snap{};
     scheduler_config scheduler{};
-    /// Script 页选中的 bundle 名（`<config_home>/<name>/main.ccat`）；空 = 未选。
+    /// Script 页选中的 bundle 名（`<config_home>/<name>/main.ccat`）；空 =
+    /// 未选。
     std::string script_bundle{};
 
     /**

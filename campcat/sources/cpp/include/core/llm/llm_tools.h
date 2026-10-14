@@ -5,6 +5,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <variant>
 #include <vector>
 
 #include "core/app_config.h"
@@ -16,40 +17,64 @@ class adb_api;
 
 namespace campcat::llm {
 
-/// A box on the screen, in screenshot pixels. A plain aggregate on purpose: the
-/// model never sees this type (`tap` takes four ints) and reflection,
-/// the schema layer, does not know it.
-struct rect {
-    int x = 0; ///< Left edge X, screenshot px
-    int y = 0; ///< Top edge Y
-    int w = 0; ///< Width
-    int h = 0; ///< Height
+/// A rectangle on the screen, in screenshot pixels. A plain aggregate on
+/// purpose: this is the internal currency -- approval, drawing, geometry --
+/// while the model-facing spelling of the same shape is a private struct in
+/// `llm_tools.cpp`, where the schema annotations live (a public header cannot
+/// include the reflective one).
+///
+/// No default member initializers: an absent key must be an error rather than a
+/// silent zero, and a defaulted pair of shapes would decode into each other.
+struct box {
+    int x; ///< Left edge X, screenshot px
+    int y; ///< Top edge Y
+    int w; ///< Width
+    int h; ///< Height
+
+    /// Equality, so a human's redraw can be compared with the model's region
+    /// without spelling the four fields out at each comparison.
+    friend bool operator==(const box &, const box &) = default;
 };
+
+/// A filled disc: centre (cx,cy) and radius r, screenshot px. Covers the pixels
+/// where `dx*dx + dy*dy <= r*r`, so its bounding box is `2r+1` square.
+struct circle {
+    int cx; ///< Centre X, screenshot px
+    int cy; ///< Centre Y
+    int r;  ///< Radius, at least 1
+
+    friend bool operator==(const circle &, const circle &) = default;
+};
+
+/// Either shape: what the approval layer, the correction UI and the geometry
+/// helpers speak. Adding a shape means adding an alternative here, plus a branch
+/// wherever the shapes actually differ (bounds, crop, draw).
+using region = std::variant<box, circle>;
 
 /// One question for the human, asked before a gated tool is allowed to run.
 struct approval_request {
-    std::string tool;            ///< Gated tool name, e.g. "tap"
-    std::string summary;         ///< One line for the human
-    std::vector<rect> highlight; ///< Boxes to draw on the screenshot
+    std::string tool;               ///< Gated tool name, e.g. "tap"
+    std::string summary;            ///< One line for the human
+    std::vector<region> highlight;  ///< Regions to draw on the screenshot
     std::string screen_png; ///< Raw PNG bytes of the latest screenshot (not
                             ///< base64); may be empty
-    /// Whether the human may redraw this box (tap / save_template set it). The
-    /// UI keys on this flag, so it never has to know tool names.
-    bool box_editable = false;
-    /// The box the model gave, set only when it is not the one being acted on
+    /// Whether the human may redraw this region (tap / save_template set it).
+    /// The UI keys on this flag, so it never has to know tool names.
+    bool editable = false;
+    /// The region the model gave, set only when it is not the one being acted on
     /// (the optional CV snap moved it). The UI draws this one thin and dim, so
     /// the human sees both what was asked for and what will actually happen.
-    std::optional<rect> given_box;
+    std::optional<region> given_region;
 };
 
-/// How a human answered an approval_request. `guidance` and `box` are both
+/// How a human answered an approval_request. `guidance` and `redrawn` are both
 /// corrections, so they only mean anything when `approved` is false.
 struct approval_decision {
     bool approved = false;
     std::string guidance;
-    /// The box the human redrew; same rule as the guidance (an approval means
-    /// the box was right, so this is dropped).
-    std::optional<rect> box;
+    /// The region the human redrew; same rule as the guidance (an approval means
+    /// the region was right, so this is dropped).
+    std::optional<region> redrawn;
 };
 
 /// The screenshot the model is working from. Raw PNG bytes (not base64): the
@@ -91,9 +116,8 @@ struct tool_context {
     /// The snap settings for this call. Read live, like `needs_approval`: the
     /// LLM popup's snap switch takes effect on the next tool call rather than
     /// the next turn, so this is a getter rather than the copy in `cfg`. Empty
-    /// falls back to a default-constructed `box_snap_config`, which has the
-    /// snap **on** -- the opposite of `needs_approval`'s empty-means-never, and
-    /// deliberately so: it is what this did before there was a getter.
+    /// falls back to a default-constructed `box_snap_config`, which snaps
+    /// nothing.
     std::function<box_snap_config()> box_snap;
     /// Config the script tools hand to the interpreter (matcher thresholds,
     /// pacing). Null makes `run_script` refuse rather than run with defaults

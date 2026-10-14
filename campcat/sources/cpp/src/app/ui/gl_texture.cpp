@@ -27,7 +27,7 @@ GLuint upload_bgr(const cv::Mat &_bgr, int *_w, int *_h, bool _nearest) {
     return tex;
 }
 
-GLuint upload_bgra(const cv::Mat &_bgra, int *_w, int *_h) {
+GLuint upload_bgra(const cv::Mat &_bgra, int *_w, int *_h, bool _nearest) {
     if (_bgra.empty() || _bgra.type() != CV_8UC4) {
         return 0;
     }
@@ -38,7 +38,8 @@ GLuint upload_bgra(const cv::Mat &_bgra, int *_w, int *_h) {
     glGenTextures(1, &tex);
     glBindTexture(GL_TEXTURE_2D, tex);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER,
+                    _nearest ? GL_NEAREST : GL_LINEAR);
     glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, rgba.cols, rgba.rows, 0, GL_RGBA,
                  GL_UNSIGNED_BYTE, rgba.ptr());

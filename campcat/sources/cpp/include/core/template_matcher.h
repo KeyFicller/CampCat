@@ -15,23 +15,23 @@ struct match_result {
     cv::Point center{};
     double confidence = 0.0;
     cv::Rect bbox{};
+    double threshold = 0.0;
 };
 
 /**
  * @brief The matcher's verdict as one clause for an error message: how close
  * the best candidate came, where it was, and the bar it had to clear.
  *
- * Worded here rather than at each call site, so every statement that fails on a
- * template reports the same numbers -- and so a probe can assert the wording
- * without a device. The box is the four ints `mark` / `view_crop` take, and it
- * is the best candidate even below the threshold, which is the whole point of
- * reporting it: the model needs to tell a near miss from a wrong screen.
+ * Worded here rather than at each call site, so every template failure reports
+ * the same numbers and a probe can assert the wording without a device. The bar
+ * is read off `_r.threshold`, so a disc reports the score it was judged on; the
+ * best candidate is reported even below it, to tell a near miss from a wrong
+ * screen.
  *
  * @param[in] _r The correlation outcome, hit or miss.
- * @param[in] _threshold The bar `_r.found` was measured against.
  * @return One clause, leading space included, ready to append to a sentence.
  */
-std::string match_verdict_text(const match_result &_r, double _threshold);
+std::string match_verdict_text(const match_result &_r);
 
 /**
  * @brief OpenCV-based template matcher with optional brute-force scale sweep.
@@ -40,11 +40,15 @@ class template_matcher {
 public:
     /**
      * @brief Construct matcher knobs for consumer reuse.
-     * @param[in] _default_threshold Baseline similarity threshold reused by
-     * callers.
+     * @param[in] _box_threshold Baseline similarity threshold reused by
+     * callers, for square (3-channel) templates.
+     * @param[in] _circle_threshold Baseline for disc templates, on the same
+     * scale as `_box_threshold` but higher: a disc carries less texture
+     * than the square around it, so the two are not interchangeable.
      * @param[in] _multiscale Enables scaled template search heuristic.
      */
-    explicit template_matcher(double _default_threshold, bool _multiscale);
+    explicit template_matcher(double _box_threshold,
+                              double _circle_threshold, bool _multiscale);
 
     /**
      * @brief Correlate templ against screen optionally restricted by ROI
@@ -52,13 +56,16 @@ public:
      * @param[in] _screen_bgr Full frame BGR mat.
      * @param[in] _templ_bgr Template cropped mat.
      * @param[in] _threshold Confidence threshold; <= 0 falls back to the stored
-     * default.
+     * default for the template's kind.
      * @param[in] _roi Restrict search window (empty=all); must lie inside the
      * frame.
+     * @param[in] _mask Non-empty for a disc template: pixels the mask excludes
+     * take no part in the score.
      * @return match_result honoring best correlated patch.
      */
     match_result match(const cv::Mat &_screen_bgr, const cv::Mat &_templ_bgr,
-                       double _threshold, cv::Rect _roi = {}) const;
+                       double _threshold, cv::Rect _roi = {},
+                       const cv::Mat &_mask = {}) const;
 
     /**
      * @brief Load png from `_png_path`, forward to `match` when decoding
@@ -66,7 +73,9 @@ public:
      * @param[in] _screen_bgr Incoming camera frame snapshot.
      * @param[in] _png_path Template asset path on filesystem.
      * @param[in] _threshold Similarity cutoff; <= 0 falls back to the stored
-     * default.
+     * default. Ignored for a disc template, whose bar is the matcher's own:
+     * callers carry one number, and they cannot know the template's kind before
+     * it is loaded.
      * @param[in] _roi Optional ROI cropping search space.
      * @return nullopt when unreadable PNG; populated match payload otherwise.
      */
@@ -78,10 +87,13 @@ public:
     /**
      * @brief Read png bytes into templ mat honoring OpenCV codecs.
      * @param[in] _png_path Template PNG path candidate.
-     * @param[out] _templ_out Destination mat buffer.
+     * @param[out] _templ_out Destination mat buffer, always 3-channel BGR.
+     * @param[out] _mask_out Filled from the alpha channel of a 4-channel PNG
+     * (255 inside the shape, 0 outside); released for a 3-channel one.
      * @return False when codecs fail or filesystem missing payload.
      */
-    bool load_template(const std::string &_png_path, cv::Mat *_templ_out) const;
+    bool load_template(const std::string &_png_path, cv::Mat *_templ_out,
+                       cv::Mat *_mask_out) const;
 
     /**
      * @brief Draw rectangle/center overlays for QA screenshots.
@@ -102,13 +114,15 @@ public:
 private:
     match_result match_once(const cv::Mat &_screen_bgr,
                             const cv::Mat &_templ_bgr, double _threshold,
-                            cv::Rect _roi) const;
+                            cv::Rect _roi, const cv::Mat &_mask) const;
 
     match_result match_multiscale_inner(const cv::Mat &_screen_bgr,
                                         const cv::Mat &_templ_bgr,
-                                        double _threshold, cv::Rect _roi) const;
+                                        double _threshold, cv::Rect _roi,
+                                        const cv::Mat &_mask) const;
 
-    double m_default_threshold;
+    double m_box_threshold;
+    double m_circle_threshold;
     bool m_multiscale;
 };
 

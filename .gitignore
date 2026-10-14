@@ -2,6 +2,7 @@
 /build-release
 /build-repl
 /cmake-build-*
+/CMakeUserPresets.json
 /.venv
 /.cache
 __pycache__/

@@ -36,7 +36,13 @@ void settings_panel_draw(campcat::shell_state &_st,
     });
     if (match_open) {
         ImGui::SliderScalar("Match threshold", ImGuiDataType_Double,
-                            &_cfg_view.match.threshold, &min_th, &max_th,
+                            &_cfg_view.match.box_threshold, &min_th, &max_th,
+                            "%.3f");
+        // Its own slider: a disc carries less texture than the square around
+        // it, so it needs a higher bar, and the two are worth setting
+        // separately -- this is where the circle bar gets calibrated.
+        ImGui::SliderScalar("Circle threshold", ImGuiDataType_Double,
+                            &_cfg_view.match.circle_threshold, &min_th, &max_th,
                             "%.3f");
         ImGui::Checkbox("Multi-scale match", &_cfg_view.match.multiscale);
     }

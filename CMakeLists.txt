@@ -1,18 +1,27 @@
 cmake_minimum_required(VERSION 3.20)
 
 # clang-p2996 (P2996 static reflection), installed locally:
-#   <LLVM_ROOT>/bin/clang++          compiler
-#   <LLVM_ROOT>/include/c++/v1/meta  reflective libc++
+#   <CPPREF_LLVM_ROOT>/bin/clang++          compiler
+#   <CPPREF_LLVM_ROOT>/include/c++/v1/meta  reflective libc++
 # The tool schemas handed to the model are generated from C++ declarations, so
 # the whole project is pinned to this compiler. See
 # docs/superpowers/specs/2026-10-09-llm-schema-bridge-design.md section 6.
-set(LLVM_ROOT "/Users/keyficller/src/llvm-p2996" CACHE PATH "clang-p2996 install prefix")
-if(NOT EXISTS "${LLVM_ROOT}/bin/clang++" OR NOT EXISTS "${LLVM_ROOT}/include/c++/v1/meta")
-  message(FATAL_ERROR
-    "clang-p2996 not found at ${LLVM_ROOT} (need bin/clang++ and include/c++/v1/meta)")
+#
+# The prefix is machine-local, so it is not written into this file: the
+# gitignored CMakeUserPresets.json "local" preset exports CPPREF_LLVM_ROOT (the
+# same variable CppReflectKit reads), and -DCPPREF_LLVM_ROOT=/path wins over it.
+if(NOT CPPREF_LLVM_ROOT AND DEFINED ENV{CPPREF_LLVM_ROOT})
+  set(CPPREF_LLVM_ROOT "$ENV{CPPREF_LLVM_ROOT}")
 endif()
-set(CMAKE_CXX_COMPILER "${LLVM_ROOT}/bin/clang++" CACHE FILEPATH "" FORCE)
-set(CMAKE_C_COMPILER "${LLVM_ROOT}/bin/clang" CACHE FILEPATH "" FORCE)
+if(NOT EXISTS "${CPPREF_LLVM_ROOT}/bin/clang++" OR
+   NOT EXISTS "${CPPREF_LLVM_ROOT}/include/c++/v1/meta")
+  message(FATAL_ERROR
+    "clang-p2996 not found at \"${CPPREF_LLVM_ROOT}\" (need bin/clang++ and "
+    "include/c++/v1/meta); set CPPREF_LLVM_ROOT, as the CMakeUserPresets.json "
+    "\"local\" preset does, or pass -DCPPREF_LLVM_ROOT=/path")
+endif()
+set(CMAKE_CXX_COMPILER "${CPPREF_LLVM_ROOT}/bin/clang++" CACHE FILEPATH "" FORCE)
+set(CMAKE_C_COMPILER "${CPPREF_LLVM_ROOT}/bin/clang" CACHE FILEPATH "" FORCE)
 
 project(campcat LANGUAGES CXX)
 
@@ -32,7 +41,7 @@ endif()
 # Reflection is a C++ language feature; Objective-C++ does not need it.
 add_compile_options("$<$<COMPILE_LANGUAGE:CXX>:-freflection-latest>")
 # Link the reflective runtime from the prefix instead of /usr/lib.
-add_link_options(-L "${LLVM_ROOT}/lib" "-Wl,-rpath,${LLVM_ROOT}/lib")
+add_link_options(-L "${CPPREF_LLVM_ROOT}/lib" "-Wl,-rpath,${CPPREF_LLVM_ROOT}/lib")
 
 # The macOS IME candidate-window fix needs Objective-C++.
 if(APPLE)
@@ -65,27 +74,17 @@ endif()
 
 include(FetchContent)
 
-# GitHub often unreachable; prefix FetchContent clones via a mirror.
-# Direct:  cmake -DGITHUB_MIRROR=
-# Alts:    https://ghproxy.net/https://github.com
-#          https://hub.gitmirror.com/https://github.com
-set(GITHUB_MIRROR "https://ghfast.top/https://github.com" CACHE STRING
-  "Prefix for GitHub FetchContent URLs (empty = https://github.com)")
-
-function(campcat_github_url out_var repo_path)
-  if(GITHUB_MIRROR STREQUAL "")
-    set(${out_var} "https://github.com/${repo_path}" PARENT_SCOPE)
-  else()
-    set(${out_var} "${GITHUB_MIRROR}/${repo_path}" PARENT_SCOPE)
-  endif()
-endfunction()
+# Dependencies come straight from github.com. A network that cannot reach it
+# redirects through git's own rewrite rules instead: the gitignored
+# CMakeUserPresets.json "local" preset exports GIT_CONFIG_* url.insteadOf
+# entries, the same convention CppReflectKit uses. Keep such a redirect out of
+# this file so a checked-in build stays host-agnostic.
 
 # Shallow clones: full histories made imgui/json .git dirs ~250MB each and
 # re-cloning missing glfw-src dominated configure time.
-campcat_github_url(_glfw_git glfw/glfw.git)
 FetchContent_Declare(
   glfw
-  GIT_REPOSITORY ${_glfw_git}
+  GIT_REPOSITORY "https://github.com/glfw/glfw.git"
   GIT_TAG        3.4
   GIT_SHALLOW    TRUE
   GIT_PROGRESS   TRUE
@@ -96,10 +95,9 @@ set(GLFW_BUILD_TESTS OFF CACHE BOOL "" FORCE)
 set(GLFW_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
 FetchContent_MakeAvailable(glfw)
 
-campcat_github_url(_imgui_git ocornut/imgui.git)
 FetchContent_Declare(
   imgui
-  GIT_REPOSITORY ${_imgui_git}
+  GIT_REPOSITORY "https://github.com/ocornut/imgui.git"
   GIT_TAG        v1.91.8
   GIT_SHALLOW    TRUE
   GIT_PROGRESS   TRUE
@@ -107,10 +105,9 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(imgui)
 
-campcat_github_url(_json_git nlohmann/json.git)
 FetchContent_Declare(
   json
-  GIT_REPOSITORY ${_json_git}
+  GIT_REPOSITORY "https://github.com/nlohmann/json.git"
   GIT_TAG        v3.11.3
   GIT_SHALLOW    TRUE
   GIT_PROGRESS   TRUE
@@ -122,25 +119,29 @@ FetchContent_MakeAvailable(json)
 # consumed instead of kept in tree. Header-only INTERFACE targets; UI is off
 # because CampCat builds its own imgui_lib, and the library's tests are its own
 # business. nlohmann is already provided above, so the library keeps quiet.
-campcat_github_url(_cppreflect_git KeyFicller/CppReflectKit.git)
 set(CPPREF_WITH_UI     OFF CACHE BOOL "" FORCE)
 set(CPPREF_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+# Its mcp target pulls cpp-httplib and cppcodec, which CampCat does not link. It
+# keeps CPPREF_WITH_LLM on all the same, because cppreflect::json -- the target
+# CampCat does link -- hangs off that option. Upstream fetches both deps itself
+# from github.com; it used to expose CPPREF_HTTPLIB_URL / CPPREF_CPPCODEC_URL to
+# redirect them, and dropped that when it dropped its mirrors.
 FetchContent_Declare(
   cppreflect26
-  GIT_REPOSITORY ${_cppreflect_git}
-  GIT_TAG        2cefea7672ec76e3de15c4ca505ee40b711ef2f7
+  GIT_REPOSITORY "https://github.com/KeyFicller/CppReflectKit.git"
+  GIT_TAG        1ac4c8b21624b401862cdde703e8478e86f9159d
   GIT_PROGRESS   TRUE
 )
-# No GIT_SHALLOW: a pinned commit cannot be fetched shallowly from every mirror.
+# No GIT_SHALLOW: a pinned commit is not on a branch tip, and a shallow fetch of
+# one is not something every server allows.
 FetchContent_MakeAvailable(cppreflect26)
 
 # Header-only native file dialogs (Win / macOS / Linux).
 # Their CMakeLists still declares an old cmake_minimum_required; force policy floor.
 set(CMAKE_POLICY_VERSION_MINIMUM 3.5)
-campcat_github_url(_pfd_git samhocevar/portable-file-dialogs.git)
 FetchContent_Declare(
   portable_file_dialogs
-  GIT_REPOSITORY ${_pfd_git}
+  GIT_REPOSITORY "https://github.com/samhocevar/portable-file-dialogs.git"
   GIT_TAG        c12ea8c9a727f5320a2b4570aee863bbede2a204
   GIT_SHALLOW    TRUE
   GIT_PROGRESS   TRUE
@@ -151,10 +152,9 @@ FetchContent_MakeAvailable(portable_file_dialogs)
 # Markdown rendering for the LLM reply bubbles. Upstream ships only a header,
 # so there is no CMakeLists.txt for FetchContent to add; the include directory
 # is exposed through an INTERFACE target instead.
-campcat_github_url(_markdown_git juliettef/imgui_markdown.git)
 FetchContent_Declare(
   imgui_markdown
-  GIT_REPOSITORY ${_markdown_git}
+  GIT_REPOSITORY "https://github.com/juliettef/imgui_markdown.git"
   GIT_TAG        4acbf80584753e15ea54eb271129995862daac8f
   GIT_SHALLOW    TRUE
   GIT_PROGRESS   TRUE
@@ -168,10 +168,9 @@ target_include_directories(imgui_markdown INTERFACE ${imgui_markdown_SOURCE_DIR}
 # The script editor's text widget. Same shape as imgui_markdown above: upstream
 # ships no CMakeLists.txt, so FetchContent only populates and the source is
 # compiled into a small static library of our own.
-campcat_github_url(_coloredit_git KeyFicller/ImGuiColorTextEdit.git)
 FetchContent_Declare(
   imgui_colortextedit
-  GIT_REPOSITORY ${_coloredit_git}
+  GIT_REPOSITORY "https://github.com/KeyFicller/ImGuiColorTextEdit.git"
   GIT_TAG        14fdfd4c2f19846aac6c6f8010899021022a9c16
   GIT_SHALLOW    TRUE
   GIT_PROGRESS   TRUE
@@ -284,11 +283,11 @@ target_compile_definitions(campcat PRIVATE IMGUI_DEFINE_MATH_OPERATORS)
 # what shipped before this block existed.
 include(CTest)
 if(BUILD_TESTING)
-  # Same source as every other dependency, so it honours GITHUB_MIRROR.
-  campcat_github_url(_gtest_git google/googletest.git)
+  # Same source as every other dependency: github.com, redirected by the
+  # developer's git rewrite rules when the network needs it.
   FetchContent_Declare(
     googletest
-    GIT_REPOSITORY ${_gtest_git}
+    GIT_REPOSITORY "https://github.com/google/googletest.git"
     GIT_TAG        v1.15.2
     GIT_SHALLOW    TRUE
     GIT_PROGRESS   TRUE

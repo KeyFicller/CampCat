@@ -10,6 +10,7 @@
 
 #include <opencv2/core.hpp>
 #include <opencv2/imgcodecs.hpp>
+#include <opencv2/imgproc.hpp>
 
 #include <algorithm>
 #include <cmath>
@@ -148,10 +149,19 @@ const preview_tex *preview_for(const std::filesystem::path &_path) {
     preview_tex entry;
     std::error_code ec;
     entry.mtime = std::filesystem::last_write_time(_path, ec);
-    const cv::Mat bgr = cv::imread(key, cv::IMREAD_COLOR);
-    if (!bgr.empty()) {
+    // UNCHANGED: a disc template's shape is its alpha, and COLOR would drop it,
+    // drawing the pixels the match ignores as if they counted.
+    cv::Mat img = cv::imread(key, cv::IMREAD_UNCHANGED);
+    if (img.channels() == 1) {
+        cv::cvtColor(img, img, cv::COLOR_GRAY2BGR);
+    }
+    if (!img.empty()) {
         // GL_NEAREST: a magnified crop should show its actual pixels.
-        entry.tex = campcat::app::upload_bgr(bgr, &entry.w, &entry.h, true);
+        entry.tex = img.channels() == 4
+                        ? campcat::app::upload_bgra(img, &entry.w, &entry.h,
+                                                    true)
+                        : campcat::app::upload_bgr(img, &entry.w, &entry.h,
+                                                   true);
     }
     return &g_previews.emplace(key, entry).first->second;
 }
