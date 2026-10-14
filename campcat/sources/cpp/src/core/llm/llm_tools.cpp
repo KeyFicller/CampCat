@@ -57,7 +57,7 @@ int g_next_shot = 0;
 int g_last_shot = 0;
 
 /// The region the human drew, the last time a rejection handed one out. The
-/// human's region comes back as a fresh `tap` / `save_template` the model relays
+/// human's region comes back as a fresh `tap` / `save_template_box` the model relays
 /// (see the box-correction spec, §9-1), so this is the only way the tools can
 /// tell it from one the model guessed -- and it must not be snapped. Cleared at
 /// session reset, with the frames it was measured on.
@@ -93,7 +93,7 @@ constexpr std::string_view k_device_hint =
 /// failure in the interpreter does and what a device failure does not -- one
 /// condition covers all of them, including ones this file does not know about.
 constexpr std::string_view k_template_hint =
-    "; view_template shows the template it looked for, view_crop what is there "
+    "; view_template shows the template it looked for, view_crop_box what is there "
     "now";
 
 /// Clears a stale stop on entry and marks the script as running until it
@@ -207,16 +207,20 @@ std::string region_arg_json(const llm::region &_region) {
 /// What to append to a refusal when the human redrew the region; empty when they
 /// did not, so the caller keeps its own wording byte for byte. The human's shape
 /// picks the tool suffix, and `_shot` names the frame they drew on, which
-/// `save_template` needs when it is not the current one.
+/// `save_template_box` needs when it is not the current one.
 std::string corrected_region_note(const llm::approval_decision &_d,
                                   const char *_tool, int _shot) {
     if (!_d.redrawn) {
         return {};
     }
-    const std::string tool =
-        std::holds_alternative<llm::circle>(*_d.redrawn)
-            ? std::string(_tool) + "_circle"
-            : std::string(_tool);
+    // `tap` stays bare; the template pair is `_box` / `_circle`.
+    const bool circle = std::holds_alternative<llm::circle>(*_d.redrawn);
+    std::string tool(_tool);
+    if (tool == "save_template") {
+        tool += circle ? "_circle" : "_box";
+    } else if (circle) {
+        tool += "_circle";
+    }
     return "; call " + tool + " again with this corrected region {\"shot\":" +
            std::to_string(_shot) + "," + region_arg_json(*_d.redrawn) + "}";
 }
@@ -711,7 +715,7 @@ CPP_REFLECT_TOOL(view_shot)
     .text = js::str(
         "Shows a template PNG from a script bundle: what a failed tap, "
         "tap_offset, swipe or wait_until was matching against. Look at it "
-        "together with a fresh screenshot or view_crop -- the template is the "
+        "together with a fresh screenshot or view_crop_box -- the template is the "
         "side that did not match, so the question is whether the control it "
         "holds is on the screen at all (then the step before it did not land, or "
         "the screen is not the one you expected) or is there but different "
@@ -759,7 +763,7 @@ CPP_REFLECT_TOOL(view_shot)
     if (png.empty() || cv::imdecode(buf, cv::IMREAD_COLOR).empty()) {
         throw js::bind_error("\"" + bundle + "/" + file +
                              "\" is not a decodable picture; re-cut it with "
-                             "save_template");
+                             "save_template_box");
     }
     return png;
 }
@@ -774,7 +778,7 @@ CPP_REFLECT_TOOL(view_template)
         "compare the two pixel for pixel. It does not change the current "
         "screen.")}]]
     [[= js::param_docs(js::str("The box to cut out."))]] std::string
-    view_crop(box box) {
+    view_crop_box(box box) {
     std::string error;
     const llm::region region = to_region(box);
     if (!region_on_screen(g_ctx.screen.w, g_ctx.screen.h, region, &error)) {
@@ -787,12 +791,12 @@ CPP_REFLECT_TOOL(view_template)
     }
     return std::string(png.begin(), png.end());
 }
-CPP_REFLECT_TOOL(view_crop)
+CPP_REFLECT_TOOL(view_crop_box)
 
 [[= js::image_result]][[= js::doc{
     .text = js::str(
         "Shows a circle's crop at its own size, with nothing drawn on it: the "
-        "same look-at-it-at-template-scale call as view_crop, for a circular "
+        "same look-at-it-at-template-scale call as view_crop_box, for a circular "
         "template. The pixels outside the disc are transparent, exactly as "
         "save_template_circle writes them and as the matcher reads them, so a "
         "mismatch can be traced to the shape or to the pixels. It does not "
@@ -1021,7 +1025,7 @@ CPP_REFLECT_TOOL(start_emulator)
         "While human approval is on, the script is shown to the user "
         "and nothing runs unless they approve it. Call ccat_help "
         "for the language. The sandbox starts empty, so a statement that "
-        "needs a template PNG fails until save_template puts one in the "
+        "needs a template PNG fails until save_template_box puts one in the "
         "bundle (an `if` on a missing PNG is just false); tap_at and "
         "swipe_at need no template, and run(\"<name>/main.ccat\") runs a "
         "saved bundle.")}]]
@@ -1137,14 +1141,14 @@ CPP_REFLECT_TOOL(run_script)
     return "saved \"" + name + "/main.ccat\" (" +
            std::to_string(prog->stmts.size()) + " statements, " +
            std::to_string(source.size()) +
-           " chars); put its templates in the same bundle with save_template, "
+           " chars); put its templates in the same bundle with save_template_box, "
            "and "
            "run it from a script with run(\"" +
            name + "/main.ccat\")";
 }
 CPP_REFLECT_TOOL(save_script)
 
-/// The save body both `save_template` and `save_template_circle` run. The only
+/// The save body both `save_template_box` and `save_template_circle` run. The only
 /// difference between them is how the region is spelled on the way in.
 std::string save_template_region(std::string bundle, std::string name,
                                  const std::optional<int> &shot,
@@ -1244,17 +1248,17 @@ std::string save_template_region(std::string bundle, std::string name,
                 "Omit for the most "
                 "recent one."),
         js::str("The box to cut out, in that screenshot's pixels."))]] std::string
-        save_template(std::string bundle, std::string name,
+        save_template_box(std::string bundle, std::string name,
                       std::optional<int> shot, box box) {
     return save_template_region(std::move(bundle), std::move(name), shot,
                                 to_region(box));
 }
-CPP_REFLECT_TOOL(save_template)
+CPP_REFLECT_TOOL(save_template_box)
 
 [[= js::doc{
     .text = js::str(
         "Cuts a template PNG from a circle, for an element that is round: the "
-        "same thing save_template does for a box. The file is written with the "
+        "same thing save_template_box does for a box. The file is written with the "
         "disc's alpha channel, and matching then ignores every pixel outside "
         "it, so the ring around a round button does not count against the "
         "score. It cuts from the picture you looked at, so screenshot right "
@@ -1394,7 +1398,7 @@ struct template_cut {
         "and "
         "PNGs you do not declare are deleted. Prefer this over saving a new "
         "name when changing a skill you already have; save_script is for a new "
-        "one, and save_template for adjusting a single template while you work "
+        "one, and save_template_box for adjusting a single template while you work "
         "out its box.")}]]
     [[= js::param_docs(
         js::str("Bundle to update; it must already exist (see list_scripts)."),

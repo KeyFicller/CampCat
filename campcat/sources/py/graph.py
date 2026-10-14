@@ -13,6 +13,9 @@ from typing import Iterator, TypedDict
 from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
 from langgraph.graph import END, StateGraph
 
+import agent.memorier as memorier
+import agent.operator as operator
+import agent.scripter as scripter
 import models
 import observability
 import session
@@ -58,7 +61,7 @@ def precheck(state: TurnState) -> dict:
 
 
 def compact(state: TurnState) -> dict:
-    session.compact()
+    memorier.compact()
     return {}
 
 
@@ -66,8 +69,8 @@ def build_messages(state: TurnState) -> dict:
     """The model input: prompt, conversation, the last screen, this turn's text."""
     messages: list[object] = [
         SystemMessage(
-            content=models.system_prompt()
-            + models.memory_block(state.get("memory") or "")
+            content=operator.operator_prompt()
+            + memorier.memory_block(state.get("memory") or "")
         )
     ]
     messages.extend(session.history())
@@ -78,13 +81,13 @@ def build_messages(state: TurnState) -> dict:
     return {"messages": messages, "input_len": len(messages)}
 
 
-def invoke(state: TurnState) -> dict:
-    """One model turn.
+def _invoke(state: TurnState, offered: list) -> dict:
+    """One model turn against `offered`.
 
-    The tool schemas come straight from the host and are passed to bind_tools
-    unchanged, so the model sees exactly the signature C++ will enforce.
+    The schemas are passed to bind_tools unchanged, so the model sees exactly
+    the signature the caller will enforce. The operator and the scripter share
+    this; each passes its own table.
     """
-    offered = state.get("tools") or []
     exhausted = bool(offered) and state.get("tool_rounds", 0) >= MAX_TOOL_ROUNDS
     try:
         model = models.build_chat_model()
@@ -127,6 +130,46 @@ def invoke(state: TurnState) -> dict:
     return {"messages": messages, "reply": reply}
 
 
+def invoke(state: TurnState) -> dict:
+    """The operator's model turn: every host tool except the scripter's own."""
+    return _invoke(state, operator.operator_tools(state.get("tools") or []))
+
+
+def _host_result(name: str, args: dict) -> tuple[object, list]:
+    """One host tool. Pictures stay out of the result list; the caller appends them."""
+    reply = tools.call_cpp(name, args)
+    if reply.get("ok"):
+        content: object = reply.get("text") or "ok"
+    else:
+        content = "error: " + str(reply.get("error", ""))
+    image = reply.get("image_b64") or ""
+    if not image:
+        return content, []
+    if name == "screenshot":
+        frame = session.screenshot_frame(reply.get("shot"), image)
+        return content, [frame] if frame is not None else []
+    if name == "view_shot":
+        return content, [session.recall_frame(args.get("shot"), image)]
+    return content, [session.picture_of(name, image)]
+
+
+def _run_host_tools(messages: list) -> list:
+    """Run every tool call on the last message on the host.
+
+    `author_script` is not special here. The scripter uses this, and a handoff
+    tool it emits has to reach the host as an unknown tool rather than start
+    another scripter.
+    """
+    calls = getattr(messages[-1], "tool_calls", None) or []
+    results: list = []
+    pictures: list = []
+    for call in calls:
+        content, pics = _host_result(call.get("name", ""), call.get("args") or {})
+        results.append(ToolMessage(content=content, tool_call_id=call.get("id", "")))
+        pictures.extend(pics)
+    return session.demote_pictures(messages + results + pictures)
+
+
 def run_tools(state: TurnState) -> dict:
     """Run the tool calls the model just asked for, one by one.
 
@@ -143,26 +186,25 @@ def run_tools(state: TurnState) -> dict:
     # calls before it and reject the whole request (400 "insufficient tool
     # messages following tool_calls message").
     pictures: list = []
+    host_tools = state.get("tools") or []
     for call in calls:
         name = call.get("name", "")
         args = call.get("args") or {}
-        reply = tools.call_cpp(name, args)
-        if reply.get("ok"):
-            content: object = reply.get("text") or "ok"
-        else:
-            content = "error: " + str(reply.get("error", ""))
-        results.append(ToolMessage(content=content, tool_call_id=call.get("id", "")))
-        image = reply.get("image_b64") or ""
-        if not image:
+        if name == operator.AUTHOR_SCRIPT_NAME:
+            # The screen belongs to the device. A shot the scripter took is the
+            # one a later tap in this turn is checked against, so the operator
+            # has to see it before that tap.
+            before = session._LATEST_NUM
+            content = scripter.run_scripter(args, host_tools)
+            results.append(ToolMessage(content=content, tool_call_id=call.get("id", "")))
+            if session._LATEST_NUM != before:
+                frame = session.latest_frame()
+                if frame is not None:
+                    pictures.append(frame)
             continue
-        if name == "screenshot":
-            frame = session.screenshot_frame(reply.get("shot"), image)
-            if frame is not None:
-                pictures.append(frame)
-        elif name == "view_shot":
-            pictures.append(session.recall_frame(args.get("shot"), image))
-        else:
-            pictures.append(session.picture_of(name, image))
+        content, pics = _host_result(name, args)
+        results.append(ToolMessage(content=content, tool_call_id=call.get("id", "")))
+        pictures.extend(pics)
     return {"messages": session.demote_pictures(messages + results + pictures),
             "tool_rounds": state.get("tool_rounds", 0) + 1}
 

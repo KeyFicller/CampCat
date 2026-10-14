@@ -167,17 +167,17 @@ TEST_F(ShapeTools, ANonPositiveRadiusIsRefused) {
 // wrong by copying one shape's test into the other.
 TEST_F(ShapeTools, BoxMaySitFlushAgainstTheEdge) {
     const auto flush =
-        call("view_crop", R"({"box":{"x":90,"y":70,"w":10,"h":10}})");
+        call("view_crop_box", R"({"box":{"x":90,"y":70,"w":10,"h":10}})");
     EXPECT_TRUE(flush.ok) << flush.error;
 
     const auto past =
-        call("view_crop", R"({"box":{"x":91,"y":70,"w":10,"h":10}})");
+        call("view_crop_box", R"({"box":{"x":91,"y":70,"w":10,"h":10}})");
     EXPECT_FALSE(past.ok);
     EXPECT_NE(past.error.find("out of range"), std::string::npos) << past.error;
 }
 
 TEST_F(ShapeTools, AZeroSizedBoxIsRefused) {
-    const auto reply = call("view_crop", R"({"box":{"x":10,"y":10,"w":0,"h":10}})");
+    const auto reply = call("view_crop_box", R"({"box":{"x":10,"y":10,"w":0,"h":10}})");
     EXPECT_FALSE(reply.ok);
     EXPECT_NE(reply.error.find("out of range"), std::string::npos)
         << reply.error;
@@ -189,7 +189,7 @@ TEST_F(ShapeTools, AZeroSizedBoxIsRefused) {
 // computed. A disc's is 2r+1 square: the disc plus the one-pixel rim that makes
 // its centre land on a pixel rather than between four.
 TEST_F(ShapeTools, ACropIsTheRegionsBoundingBox) {
-    const auto box = call("view_crop", R"({"box":{"x":10,"y":20,"w":30,"h":15}})");
+    const auto box = call("view_crop_box", R"({"box":{"x":10,"y":20,"w":30,"h":15}})");
     ASSERT_TRUE(box.ok) << box.error;
     EXPECT_EQ(decode_png(box.image_png).size(), cv::Size(30, 15));
 
@@ -276,7 +276,7 @@ TEST(ShapeSchema, ADiscToolOffersOnlyTheDisc) {
     EXPECT_NE(circle->schema.find("\"cx\""), std::string_view::npos);
     EXPECT_EQ(circle->schema.find("\"x\""), std::string_view::npos);
 
-    const campcat::llm::js::tool_entry *box = tool_named("view_crop");
+    const campcat::llm::js::tool_entry *box = tool_named("view_crop_box");
     ASSERT_NE(box, nullptr);
     EXPECT_NE(box->schema.find("\"x\""), std::string_view::npos);
     EXPECT_EQ(box->schema.find("\"cx\""), std::string_view::npos);

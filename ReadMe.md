@@ -26,4 +26,8 @@
 
 **跨会话记忆** —— 记录用户习惯和游戏内黑话，落在 `ccat_library/memory.md`。
 
+**图** —— 操作员这一轮，和 `run_tools` 里调起的脚本员。脚本员是另编的一张图，主图的 `xray` 展不开它，所以两张都用 `get_graph(xray=True)` 画在一起。
+
+![langgraph](docs/images/langgraph-xray.png)
+
 ![intro](campcat/sources/cpp/assets/images/intro.jpg)

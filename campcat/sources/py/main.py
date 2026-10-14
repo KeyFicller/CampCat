@@ -17,6 +17,7 @@ import time
 import traceback
 from typing import Iterator
 
+import agent.memorier as memorier
 import graph
 import models
 import observability
@@ -51,7 +52,7 @@ def handle_request(req: dict) -> Iterator[dict]:
     if rtype == "memorize":
         # The conversation is already here, so only the current notes cross the
         # wire; the reply carries the rewritten ones back for the host to write.
-        notes = session.memorize(req.get("memory") or "")
+        notes = memorier.memorize(req.get("memory") or "")
         if notes is None:
             yield protocol.build_error_result(rid, "memory not updated")
         else:

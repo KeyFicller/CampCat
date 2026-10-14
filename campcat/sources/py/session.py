@@ -10,27 +10,14 @@ import base64
 import io
 import re
 import struct
-import sys
 import time
 
-from langchain.agents.middleware import SummarizationMiddleware
-from langchain.agents.middleware.summarization import count_tokens_approximately
-from langchain_core.messages import (
-    AIMessage,
-    HumanMessage,
-    RemoveMessage,
-    SystemMessage,
-    ToolMessage,
-)
-from langgraph.runtime import Runtime
+from langchain_core.messages import HumanMessage
 
 try:                       # optional: without it the older frames are dropped
     from PIL import Image  # instead of scaled, which is what this did before
 except ImportError:
     Image = None
-
-import models
-import observability
 
 # Tools hand back PNG only, so the mime type is fixed here. Add a protocol field
 # if a tool ever returns another format.
@@ -97,11 +84,6 @@ _LATEST_TIME = 0.0
 # two frames separated by device time instead of by the user thinking.
 _TURN_PREV_SHOT = None
 
-# Built lazily: both the budget and the model come from the environment, which
-# main.py loads from .env before the first request. A summary lands in
-# _MESSAGES as the first HumanMessage, never as a SystemMessage: the summarizer
-# drops those, so build_messages prepends the prompt instead.
-_MW = None
 
 # The opening message of each turn carries this id prefix, so `size()` can count
 # turns without guessing from the rounds in between, and a compaction that folds
@@ -110,17 +92,25 @@ _MW = None
 _TURN_MARK = "turn"
 _TURN_SEQ = 0
 
+# The scripter's own conversation. Kept out of `_MESSAGES` so a handoff's
+# dozens of tool rounds never enter the operator's prompt or its cache prefix.
+_SCRIPTER_MESSAGES: list = []
+_SCRIPTER_TURN_MARK = "scripter-turn"
+
 
 def reset() -> None:
     """Drop every turn. The next request starts a fresh conversation."""
-    global _MW, _LATEST_NUM, _LATEST_B64, _LATEST_TIME, _MEMORIZED_UPTO, _TURN_PREV_SHOT
+    global _LATEST_NUM, _LATEST_B64, _LATEST_TIME, _MEMORIZED_UPTO, _TURN_PREV_SHOT
     global _TURN_SEQ
+    import agent.memorier as memorier
     _MESSAGES.clear()
+    _SCRIPTER_MESSAGES.clear()
     _LATEST_NUM = 0
     _LATEST_B64 = ""
     _LATEST_TIME = 0.0
     _TURN_PREV_SHOT = None
-    _MW = None
+    memorier._MW = None
+    memorier._SCRIPTER_MW = None
     _MEMORIZED_UPTO = 0
     _TURN_SEQ = 0
 
@@ -161,116 +151,24 @@ def append_turn(text: str, raw: list) -> None:
     _MESSAGES.extend(_detach_picture(m) if _is_picture(m) else m for m in raw)
 
 
-def memorize(memory: str) -> str | None:
-    """Fold the turns since the last call into `memory`, returning the new notes.
+def scripter_history() -> list:
+    """The scripter's conversation. A copy, for the same reason as `history`."""
+    return list(_SCRIPTER_MESSAGES)
 
-    Called between turns rather than during one, so the user is never waiting on
-    it. Returns `memory` unchanged when there is nothing new -- no model call --
-    and None when the call fails, which leaves the caller's file alone.
+
+def append_scripter_turn(brief: str, raw: list) -> None:
+    """One handoff, kept where the operator's history cannot see it.
+
+    Same rule as `append_turn`: pictures lose their bytes and keep the caption
+    that names the frame. The id prefix is not `turn`, so `size()` ignores it.
     """
-    global _MEMORIZED_UPTO
-    if _MEMORIZED_UPTO >= len(_MESSAGES):
-        return memory
-    try:
-        model = models.build_memory_model()
-        instructions = models.MEMORY_INSTRUCTIONS.format(
-            max_chars=models.memory_max_chars()
-        )
-        with observability.turn("rewrite-memory") as callbacks:
-            reply = model.invoke([
-                SystemMessage(content=instructions),
-                HumanMessage(content=(
-                    "## Notes so far\n" + (memory.strip() or "(none)") +
-                    "\n\n## Session transcript\n" +
-                    _transcript(_MESSAGES[_MEMORIZED_UPTO:])
-                )),
-            ], config={"callbacks": callbacks})
-    except Exception as exc:  # noqa: BLE001 - a missed update, never fatal
-        print(f"[sidecar] memory not updated: {exc}", file=sys.stderr)
-        return None
-    text = strip_tool_markup(
-        content_text(getattr(reply, "content", reply))
-    ).strip()
-    if not text:
-        return None
-    _MEMORIZED_UPTO = len(_MESSAGES)
-    return text
+    global _TURN_SEQ
+    _TURN_SEQ += 1
+    _SCRIPTER_MESSAGES.append(
+        HumanMessage(content=brief, id=f"{_SCRIPTER_TURN_MARK}:{_TURN_SEQ}"))
+    _SCRIPTER_MESSAGES.extend(
+        _detach_picture(m) if _is_picture(m) else m for m in raw)
 
-
-def _transcript(messages: list) -> str:
-    """The conversation as plain text, for the memory model to read."""
-    lines: list[str] = []
-    for m in messages:
-        if isinstance(m, HumanMessage):
-            lines.append("User: " + content_text(m.content))
-        elif isinstance(m, ToolMessage):
-            lines.append("Tool result: " + content_text(m.content))
-        elif isinstance(m, AIMessage):
-            for call in m.tool_calls or []:
-                lines.append(f"Tool call {call.get('name')} {call.get('args')}")
-            text = content_text(m.content)
-            if text:
-                lines.append("Assistant: " + text)
-    return "\n\n".join(lines)
-
-
-def _tokens(messages: list) -> int:
-    """Provider-reported size of the last request, plus what came after it.
-
-    `usage_metadata['total_tokens']` is what the provider really charged for
-    that request, and the next prompt is that plus the reply it produced, so
-    anchoring there beats approximating the whole list. Only the messages after
-    it are unknown, and at compaction time there usually are none.
-    """
-    for i in range(len(messages) - 1, -1, -1):
-        meta = getattr(messages[i], "usage_metadata", None)
-        if meta and meta.get("total_tokens"):
-            return int(meta["total_tokens"]) + count_tokens_approximately(
-                messages[i + 1:], tokens_per_image=models.TOKENS_PER_IMAGE
-            )
-    return count_tokens_approximately(
-        messages, tokens_per_image=models.TOKENS_PER_IMAGE
-    )
-
-
-def _middleware():
-    """Summarizes older turns once the request approaches the budget.
-
-    `keep` is a quarter of the budget. The history is text only -- screenshots
-    live outside it and only the latest one is re-sent, by `build_messages` --
-    so a quarter already covers many turns.
-    """
-    global _MW
-    if _MW is None:
-        budget = models.context_tokens()
-        _MW = SummarizationMiddleware(
-            model=models.build_chat_model(),
-            trigger=("tokens", budget),
-            keep=("tokens", budget // 4),
-            token_counter=_tokens,
-        )
-    return _MW
-
-
-def compact() -> None:
-    """Fold the oldest turns into a rolling summary once past the budget.
-
-    Summarizing rewrites the request prefix, which invalidates the provider's
-    prompt cache from that point on, so the summarizer's own hysteresis is what
-    keeps this rare. A failure here is skipped, never fatal: the request is
-    still far below the model's real limit, so it goes out unsummarized.
-    """
-    if not _MESSAGES:
-        return
-    try:
-        out = _middleware().before_model({"messages": list(_MESSAGES)}, Runtime())
-    except Exception as exc:  # noqa: BLE001 - summarizing must not lose history
-        print(f"[sidecar] summarization skipped: {exc}", file=sys.stderr)
-        return
-    if not out or "messages" not in out:
-        return
-    # Drop the RemoveMessage sentinel: it signals a reducer this list has none of.
-    _MESSAGES[:] = [m for m in out["messages"] if not isinstance(m, RemoveMessage)]
 
 
 def latest_frame() -> HumanMessage | None:
@@ -350,7 +248,7 @@ def _shot_caption(shot: int, lead: str, image: str, captured: float = 0.0,
                   since_previous: float | None = None) -> str:
     """`lead` plus the number, size and time, which is what names this frame later.
 
-    `save_template`'s `shot` is this number and its box is in these pixels, so
+    `save_template_box`'s `shot` is this number and its box is in these pixels, so
     both have to be on screen next to the picture. The time is what lets a wait
     be reasoned about instead of guessed: `since_previous` is how long passed
     between this frame and the one before it in the same turn.
