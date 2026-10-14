@@ -1,6 +1,8 @@
 #include "app/ui/graph_panel.h"
 
 #include "app/ui/fonts.h"
+#include "app/ui/gl_texture.h"
+#include "app/ui/script_editor_panel.h"
 #include "core/app_config.h"
 #include "core/script/ccat_bundle.h"
 #include "core/script/ccat_graph.h"
@@ -9,12 +11,19 @@
 
 #include <imgui.h>
 
+#include <opencv2/imgcodecs.hpp>
+#include <opencv2/imgproc.hpp>
+
 #include <algorithm>
+#include <cfloat>
+#include <cmath>
 #include <cstdint>
 #include <filesystem>
+#include <map>
 #include <optional>
 #include <string>
 #include <string_view>
+#include <system_error>
 #include <utility>
 #include <vector>
 
@@ -32,6 +41,14 @@ constexpr float k_line_h = 17.0F;
 constexpr float k_node_min_h = 72.0F;
 constexpr float k_gap_x = 88.0F;
 constexpr float k_gap_y = 28.0F;
+/// Longest side of a template tooltip, and the floor under which a crop is
+/// magnified by a whole number. The same bounds the script editor uses.
+constexpr float k_preview_min_side = 96.0F;
+constexpr float k_preview_max_side = 360.0F;
+/// GraphEditor's slot and curve constants (`GetInputSlotPos`, `DisplayLinks`).
+/// A page node has one slot, so the slot sits on the vertical middle.
+constexpr float k_slot_y_bias = 8.0F;
+constexpr float k_curve_pull = 50.0F;
 
 const ImU32 k_ink = IM_COL32(216, 222, 229, 255);
 /// A template the graph declares but the bundle does not have.
@@ -67,11 +84,43 @@ using campcat::ccat_lang::graph_interrupt;
 using campcat::ccat_lang::loaded_graph;
 using campcat::ccat_lang::screen_graph;
 
-/// One line under a node's title. `bad` paints it in the warning red.
+/// One line under a node's title. `bad` paints it in the warning red. `preview`
+/// is set for a template row; `open_script` is set for an interrupt row.
 struct body_line {
     std::string text;
     bool bad = false;
+    std::filesystem::path preview;
+    std::string open_script;
 };
+
+/// A screen rectangle that hovers or double-clicks. Filled while drawing, read
+/// once the canvas has finished.
+struct hit_target {
+    ImRect rect;
+    std::filesystem::path preview;
+    std::string open_script;
+};
+
+std::vector<hit_target> g_hits;
+/// Where `Show` places the canvas this frame. Labels are drawn from inside it,
+/// which runs after these are set.
+ImVec2 g_canvas_origin;
+ImVec2 g_canvas_size;
+bool g_edge_labels_drawn = false;
+GraphEditor::ViewState g_view;
+
+void draw_edge_labels(ImDrawList *_dl, ImVec2 _origin, ImVec2 _canvas,
+                      const GraphEditor::ViewState &_view,
+                      std::vector<hit_target> *_hits);
+
+/// A decoded template, kept between hovers. Key is the absolute path.
+struct preview_tex {
+    GLuint tex = 0;
+    int w = 0;
+    int h = 0;
+    std::filesystem::file_time_type mtime{};
+};
+std::map<std::string, preview_tex> g_previews;
 
 /// Whether the graph lists this anchor as a popup rather than as a place on an
 /// edge.
@@ -99,6 +148,19 @@ int count_golden(const std::filesystem::path &_dir) {
     return count;
 }
 
+/// The bundle name without the graph's own name in front. `shuaitu.desktop-main`
+/// on the shuaitu graph reads `desktop-main`. A script that does not start
+/// with that prefix is shown whole. The bundle opened on double-click is
+/// always the full name.
+std::string_view edge_label(std::string_view _graph, std::string_view _script) {
+    if (!_graph.empty() && _script.size() > _graph.size() + 1 &&
+        _script.substr(0, _graph.size()) == _graph &&
+        _script[_graph.size()] == '.') {
+        return _script.substr(_graph.size() + 1);
+    }
+    return _script;
+}
+
 /// One `must` (or `must_not`) list, a name per line: the first carries the
 /// label and the rest hang under it. A name per line rather than wrapped
 /// because the body font is 14px and one line holds about thirty characters,
@@ -112,7 +174,11 @@ void push_template_lines(std::vector<body_line> *_out,
         const anchor_template &t = _templates[i];
         std::error_code ec;
         const bool missing = !std::filesystem::is_regular_file(_dir / t.png, ec);
-        _out->push_back({(i == 0 ? _label : pad) + t.png, missing});
+        body_line line;
+        line.text = (i == 0 ? _label : pad) + t.png;
+        line.bad = missing;
+        line.preview = _dir / t.png;
+        _out->push_back(std::move(line));
     }
 }
 
@@ -132,20 +198,33 @@ std::vector<body_line> body_lines_for(const screen_graph &_graph,
     push_template_lines(&out, "must_not: ", _anchor.must_not, _dir);
     for (const graph_interrupt &interrupt : _graph.interrupts) {
         if (interrupt.anchor == _anchor.id) {
-            out.push_back({"interrupt: " + interrupt.script, false});
+            body_line line;
+            line.text = "interrupt: " +
+                        std::string(edge_label(_graph.name, interrupt.script));
+            line.open_script = interrupt.script;
+            out.push_back(std::move(line));
         }
     }
     out.push_back({"golden: " + std::to_string(
                                   count_golden(_dir / "golden" / _anchor.id)),
                    false});
-    for (const graph_edge &edge : _graph.edges) {
-        if (edge.to == _anchor.id) {
-            out.push_back({"<- " + edge.script + " " +
-                               std::to_string(edge.timeout_ms) + " ms",
-                           false});
-        }
-    }
     return out;
+}
+
+/// Column pitch at zoom 1: wide enough for the longest edge label, and never
+/// tighter than the old fixed gap.
+float column_gap(const screen_graph &_graph) {
+    ImFont *font = campcat::app::fonts_get(campcat::app::font_role::small);
+    ImGui::PushFont(font);
+    float widest = 0.0F;
+    for (const graph_edge &edge : _graph.edges) {
+        const std::string_view label = edge_label(_graph.name, edge.script);
+        widest = std::max(widest, ImGui::CalcTextSize(label.data(),
+                                                      label.data() + label.size())
+                                       .x);
+    }
+    ImGui::PopFont();
+    return std::max(k_gap_x, widest + 16.0F);
 }
 
 /**
@@ -205,7 +284,7 @@ public:
 
 private:
     /// Column = hops from root, row = order among the anchors sharing a column.
-    void place(std::string_view _root);
+    void place(std::string_view _root, float _gap_x);
     std::optional<GraphEditor::NodeIndex> node_of(std::string_view _id) const;
 
     std::vector<GraphEditor::Node> m_nodes;
@@ -262,7 +341,7 @@ void graph_view_delegate::reset(const loaded_graph &_loaded) {
         m_links.push_back(link);
         m_out[*from].push_back(*to);
     }
-    place(graph.root);
+    place(graph.root, column_gap(graph));
 }
 
 std::optional<GraphEditor::NodeIndex>
@@ -275,7 +354,7 @@ graph_view_delegate::node_of(std::string_view _id) const {
     return std::nullopt;
 }
 
-void graph_view_delegate::place(std::string_view _root) {
+void graph_view_delegate::place(std::string_view _root, float _gap_x) {
     const std::size_t count = m_nodes.size();
     std::vector<int> rank(count, -1);
     std::vector<GraphEditor::NodeIndex> queue;
@@ -310,7 +389,7 @@ void graph_view_delegate::place(std::string_view _root) {
                          k_body_pad);
         const std::size_t col =
             rank[i] < 0 ? loose_col : static_cast<std::size_t>(rank[i]);
-        const float x = static_cast<float>(col) * (k_node_w + k_gap_x);
+        const float x = static_cast<float>(col) * (k_node_w + _gap_x);
         const float y = next_y[col];
         next_y[col] = y + height + k_gap_y;
         m_nodes[i].mRect =
@@ -324,13 +403,38 @@ void graph_view_delegate::CustomDraw(ImDrawList *_draw_list, ImRect _rect,
     ImFont *font = campcat::app::fonts_get(campcat::app::font_role::small);
     const std::vector<body_line> &lines = m_body[_i];
     for (std::size_t line = 0; line < lines.size(); ++line) {
-        _draw_list->AddText(
-            font, font->FontSize,
-            ImVec2(_rect.Min.x + k_text_pad,
-                   _rect.Min.y + k_text_pad + static_cast<float>(line) * k_line_h),
-            lines[line].bad ? k_bad : k_ink, lines[line].text.c_str());
+        const ImVec2 pos(_rect.Min.x + k_text_pad,
+                         _rect.Min.y + k_text_pad +
+                             static_cast<float>(line) * k_line_h);
+        _draw_list->AddText(font, font->FontSize, pos,
+                            lines[line].bad ? k_bad : k_ink,
+                            lines[line].text.c_str());
+        if (lines[line].preview.empty() && lines[line].open_script.empty()) {
+            continue;
+        }
+        const float width =
+            font->CalcTextSizeA(font->FontSize, FLT_MAX, 0.0F,
+                                lines[line].text.c_str())
+                .x;
+        ImRect hit(pos, ImVec2(pos.x + width, pos.y + k_line_h));
+        hit.ClipWith(_rect);
+        if (hit.GetWidth() <= 0.0F || hit.GetHeight() <= 0.0F) {
+            continue;
+        }
+        g_hits.push_back(
+            {hit, lines[line].preview, lines[line].open_script});
     }
     _draw_list->PopClipRect();
+    // Once per frame, on the channel GraphEditor paints after the nodes. The
+    // script editor is its own window and draws later, so it covers a label
+    // it overlaps instead of the label floating over the text.
+    if (!g_edge_labels_drawn) {
+        g_edge_labels_drawn = true;
+        _draw_list->ChannelsSetCurrent(2);
+        draw_edge_labels(_draw_list, g_canvas_origin, g_canvas_size, g_view,
+                         &g_hits);
+        _draw_list->ChannelsSetCurrent(1);
+    }
 }
 
 /// The canvas's look, in the shell's palette. Built once: `Show` takes it by
@@ -373,6 +477,103 @@ std::vector<std::string> graph_bundles(const std::filesystem::path &_home) {
     return out;
 }
 
+const preview_tex *preview_for(const std::filesystem::path &_path) {
+    const std::string key = _path.string();
+    std::error_code ec;
+    const auto stamp = std::filesystem::last_write_time(_path, ec);
+    const auto found = g_previews.find(key);
+    if (found != g_previews.end()) {
+        const bool gone = ec && found->second.tex == 0;
+        const bool same = !ec && found->second.mtime == stamp;
+        if (gone || same) {
+            return &found->second;
+        }
+        campcat::app::delete_tex(&found->second.tex, &found->second.w,
+                                 &found->second.h);
+    }
+
+    preview_tex entry;
+    entry.mtime = stamp;
+    cv::Mat img = cv::imread(key, cv::IMREAD_UNCHANGED);
+    if (img.channels() == 1) {
+        cv::cvtColor(img, img, cv::COLOR_GRAY2BGR);
+    }
+    if (!img.empty()) {
+        entry.tex = img.channels() == 4
+                        ? campcat::app::upload_bgra(img, &entry.w, &entry.h,
+                                                    true)
+                        : campcat::app::upload_bgr(img, &entry.w, &entry.h,
+                                                   true);
+    }
+    if (found != g_previews.end()) {
+        found->second = entry;
+        return &found->second;
+    }
+    return &g_previews.emplace(key, entry).first->second;
+}
+
+void clear_previews() {
+    for (auto &pair : g_previews) {
+        campcat::app::delete_tex(&pair.second.tex, &pair.second.w,
+                                 &pair.second.h);
+    }
+    g_previews.clear();
+}
+
+ImVec2 preview_size(int _w, int _h) {
+    const float longest = static_cast<float>(std::max(_w, _h));
+    if (longest <= 0.0F) {
+        return ImVec2(0.0F, 0.0F);
+    }
+    float scale = 1.0F;
+    if (longest > k_preview_max_side) {
+        scale = k_preview_max_side / longest;
+    } else if (longest < k_preview_min_side) {
+        scale = std::floor(k_preview_min_side / longest);
+    }
+    return ImVec2(static_cast<float>(_w) * scale,
+                  static_cast<float>(_h) * scale);
+}
+
+void draw_template_tooltip(const std::filesystem::path &_path) {
+    const preview_tex *preview = preview_for(_path);
+    const std::string name = _path.filename().string();
+    ImGui::BeginTooltip();
+    if (preview->tex == 0) {
+        ImGui::TextUnformatted("unreadable");
+    } else {
+        ImGui::Image(
+            static_cast<ImTextureID>(static_cast<uintptr_t>(preview->tex)),
+            preview_size(preview->w, preview->h), ImVec2(0.0F, 0.0F),
+            ImVec2(1.0F, 1.0F));
+        ImGui::Text("%s  %dx%d", name.c_str(), preview->w, preview->h);
+    }
+    ImGui::EndTooltip();
+}
+
+ImVec2 bezier_mid(ImVec2 _p0, ImVec2 _p1, ImVec2 _p2, ImVec2 _p3) {
+    return _p0 * 0.125F + _p1 * 0.375F + _p2 * 0.375F + _p3 * 0.125F;
+}
+
+void apply_hits(const std::vector<hit_target> &_hits,
+                const std::filesystem::path &_home) {
+    const ImVec2 mouse = ImGui::GetMousePos();
+    const bool down = ImGui::IsMouseDown(ImGuiMouseButton_Left);
+    const bool dbl = ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left);
+    for (const hit_target &hit : _hits) {
+        if (!hit.rect.Contains(mouse)) {
+            continue;
+        }
+        if (!down && !hit.preview.empty()) {
+            draw_template_tooltip(hit.preview);
+        }
+        if (dbl && !hit.open_script.empty()) {
+            script_editor_open(_home, hit.open_script);
+        }
+        return;
+    }
+}
+
 std::string g_selected;
 loaded_graph g_loaded;
 std::string g_recover;
@@ -380,8 +581,63 @@ std::string g_error;
 /// Fit the view once, on the frame after a load: `Show` resets the flag itself,
 /// so it is spent the first time it is read.
 bool g_need_fit = false;
-GraphEditor::ViewState g_view;
 graph_view_delegate g_delegate;
+
+std::optional<GraphEditor::NodeIndex> node_index(std::string_view _id) {
+    for (std::size_t i = 0; i < g_delegate.GetNodeCount(); ++i) {
+        const char *name = g_delegate.GetNode(i).mName;
+        if (name != nullptr && _id == name) {
+            return i;
+        }
+    }
+    return std::nullopt;
+}
+
+void draw_edge_labels(ImDrawList *_dl, ImVec2 _origin, ImVec2 _canvas,
+                      const GraphEditor::ViewState &_view,
+                      std::vector<hit_target> *_hits) {
+    const float factor = _view.mFactor;
+    const ImVec2 offset = _origin + _view.mPosition * factor;
+    const ImRect canvas(_origin, _origin + _canvas);
+    ImFont *font = campcat::app::fonts_get(campcat::app::font_role::small);
+    const float size = font->FontSize * factor;
+    for (const graph_edge &edge : g_loaded.graph.edges) {
+        const std::optional<GraphEditor::NodeIndex> from = node_index(edge.from);
+        const std::optional<GraphEditor::NodeIndex> to = node_index(edge.to);
+        if (!from.has_value() || !to.has_value()) {
+            continue;
+        }
+        const GraphEditor::Node a = g_delegate.GetNode(*from);
+        const GraphEditor::Node b = g_delegate.GetNode(*to);
+        const ImVec2 size_a = a.mRect.GetSize() * factor;
+        const ImVec2 size_b = b.mRect.GetSize() * factor;
+        const ImVec2 p_from(offset.x + a.mRect.Max.x * factor,
+                            offset.y + a.mRect.Min.y * factor +
+                                size_a.y * 0.5F + k_slot_y_bias);
+        const ImVec2 p_to(offset.x + b.mRect.Min.x * factor,
+                          offset.y + b.mRect.Min.y * factor + size_b.y * 0.5F +
+                              k_slot_y_bias);
+        const ImVec2 mid =
+            bezier_mid(p_from, p_from + ImVec2(k_curve_pull, 0.0F) * factor,
+                       p_to + ImVec2(-k_curve_pull, 0.0F) * factor, p_to);
+        const std::string_view label =
+            edge_label(g_loaded.graph.name, edge.script);
+        const ImVec2 text = font->CalcTextSizeA(size, FLT_MAX, 0.0F,
+                                                 label.data(),
+                                                 label.data() + label.size());
+        const ImVec2 pad(4.0F * factor, 2.0F * factor);
+        const ImRect box(mid - text * 0.5F - pad, mid + text * 0.5F + pad);
+        ImRect visible = box;
+        visible.ClipWith(canvas);
+        if (visible.GetWidth() <= 0.0F || visible.GetHeight() <= 0.0F) {
+            continue;
+        }
+        _dl->AddRectFilled(box.Min, box.Max, view_options().mBackgroundColor);
+        _dl->AddText(font, size, mid - text * 0.5F, k_ink, label.data(),
+                     label.data() + label.size());
+        _hits->push_back({visible, {}, edge.script});
+    }
+}
 
 /// Read `_name` and rebuild the canvas.
 ///
@@ -389,6 +645,7 @@ graph_view_delegate g_delegate;
 /// stats every template and parses every edge script, which is not something to
 /// repeat every frame.
 void load_graph(const std::filesystem::path &_home, const std::string &_name) {
+    clear_previews();
     g_loaded = campcat::ccat_lang::load_graph(_home, _name);
     // A failed load comes back with the graph cleared, so this leaves the
     // canvas empty rather than showing the graph that was there before.
@@ -406,6 +663,7 @@ void load_graph(const std::filesystem::path &_home, const std::string &_name) {
 } // namespace
 
 void graph_panel_draw(const campcat::app_config &_cfg_view) {
+    script_editor_draw_windows();
     const std::filesystem::path home = _cfg_view.config_home;
     const std::vector<std::string> names = graph_bundles(home);
     if (names.empty()) {
@@ -423,6 +681,7 @@ void graph_panel_draw(const campcat::app_config &_cfg_view) {
         g_recover.clear();
         g_error.clear();
         g_delegate.reset(g_loaded);
+        clear_previews();
     }
 
     const ImGuiStyle &style = ImGui::GetStyle();
@@ -469,7 +728,23 @@ void graph_panel_draw(const campcat::app_config &_cfg_view) {
     GraphEditor::FitOnScreen fit =
         g_need_fit ? GraphEditor::Fit_AllNodes : GraphEditor::Fit_None;
     g_need_fit = false;
+    g_hits.clear();
+    g_edge_labels_drawn = false;
+    g_canvas_origin = ImGui::GetCursorScreenPos();
+    g_canvas_size = ImGui::GetContentRegionAvail();
     // Always enabled: with it false `Show` draws the grid and nothing else,
     // and read-only is enforced by the delegate refusing every change.
+    // Edge labels are submitted from CustomDraw, on the canvas child.
+    // `Show` zooms whenever the cursor is inside the canvas rectangle, which
+    // is also true when the script editor covers that spot and is the window
+    // the wheel already scrolled. Drop the wheel unless this page is the one
+    // under the cursor, and put it back for whatever is drawn after.
+    ImGuiIO &io = ImGui::GetIO();
+    const float wheel = io.MouseWheel;
+    if (!ImGui::IsWindowHovered(ImGuiHoveredFlags_ChildWindows)) {
+        io.MouseWheel = 0.0F;
+    }
     GraphEditor::Show(g_delegate, view_options(), g_view, true, &fit);
+    io.MouseWheel = wheel;
+    apply_hits(g_hits, home);
 }
