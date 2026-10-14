@@ -178,6 +178,21 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(imgui_colortextedit)
 
+# ImGuizmo's GraphEditor: the canvas the Graph page draws. Only that widget is
+# wanted, so `src` is named as the subdirectory to add -- it has no
+# CMakeLists.txt, so FetchContent only populates and the rest of the repo's
+# widgets stay out of the build.
+FetchContent_Declare(
+  imguizmo
+  GIT_REPOSITORY "https://github.com/CedricGuillemet/ImGuizmo.git"
+  GIT_TAG        b796ac3b861afc6e91ca74e4611effd9c9527367
+  GIT_PROGRESS   TRUE
+  SOURCE_SUBDIR  src
+)
+# No GIT_SHALLOW: a pinned commit is not on a branch tip, and a shallow fetch of
+# one is not something every server allows.
+FetchContent_MakeAvailable(imguizmo)
+
 find_package(OpenGL REQUIRED)
 
 add_library(imgui_lib STATIC
@@ -206,6 +221,16 @@ target_include_directories(imgui_colortextedit_lib PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}/campcat/sources/cpp/include
 )
 target_link_libraries(imgui_colortextedit_lib PUBLIC imgui_lib)
+
+# Same shape as the widget above: upstream's CMakeLists compiles every widget it
+# ships, and only GraphEditor is wanted.
+add_library(imgui_grapheditor_lib STATIC
+  ${imguizmo_SOURCE_DIR}/src/GraphEditor.cpp
+)
+target_include_directories(imgui_grapheditor_lib PUBLIC
+  ${imguizmo_SOURCE_DIR}/src
+)
+target_link_libraries(imgui_grapheditor_lib PUBLIC imgui_lib)
 
 # Core framework + Dear ImGui shell + the ccat driver
 add_library(campcat_core STATIC
@@ -260,6 +285,7 @@ add_executable(campcat
   campcat/sources/cpp/src/app/ui/settings_panel.cpp
   campcat/sources/cpp/src/app/ui/script_editor_panel.cpp
   campcat/sources/cpp/src/app/ui/template_capture_panel.cpp
+  campcat/sources/cpp/src/app/ui/graph_panel.cpp
   campcat/sources/cpp/src/app/ui/prompt_input.cpp
   campcat/sources/cpp/src/app/ui/fonts.cpp
   campcat/sources/cpp/src/app/ui/gl_texture.cpp
@@ -271,7 +297,8 @@ target_include_directories(campcat PRIVATE
   ${portable_file_dialogs_SOURCE_DIR}
 )
 target_link_libraries(campcat PRIVATE campcat_core imgui_lib glfw OpenGL::GL
-                                      imgui_markdown imgui_colortextedit_lib)
+                                      imgui_markdown imgui_colortextedit_lib
+                                      imgui_grapheditor_lib)
 
 if(APPLE)
   target_link_libraries(campcat PRIVATE "-framework Cocoa" "-framework IOKit" "-framework CoreVideo")

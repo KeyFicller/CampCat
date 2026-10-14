@@ -69,6 +69,7 @@ tag_clone cppcodec     tplgy/cppcodec.git      v0.2
 sha_clone portable_file_dialogs samhocevar/portable-file-dialogs.git c12ea8c9a727f5320a2b4570aee863bbede2a204
 sha_clone imgui_markdown juliettef/imgui_markdown.git      4acbf80584753e15ea54eb271129995862daac8f
 sha_clone imgui_colortextedit KeyFicller/ImGuiColorTextEdit.git 14fdfd4c2f19846aac6c6f8010899021022a9c16
+sha_clone imguizmo CedricGuillemet/ImGuizmo.git b796ac3b861afc6e91ca74e4611effd9c9527367
 
 rmdir "$TMP" 2>/dev/null
 echo "--- cache total ---"
