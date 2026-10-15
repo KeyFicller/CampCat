@@ -49,6 +49,10 @@ constexpr float k_preview_max_side = 360.0F;
 /// A page node has one slot, so the slot sits on the vertical middle.
 constexpr float k_slot_y_bias = 8.0F;
 constexpr float k_curve_pull = 50.0F;
+/// A return edge drops this far under the lower card, then the next return
+/// drops another pitch, so their labels do not sit on one another.
+constexpr float k_return_drop = 36.0F;
+constexpr float k_return_pitch = 28.0F;
 
 const ImU32 k_ink = IM_COL32(216, 222, 229, 255);
 /// A template the graph declares but the bundle does not have.
@@ -102,6 +106,11 @@ struct hit_target {
 };
 
 std::vector<hit_target> g_hits;
+/// Parallel to `g_loaded.graph.edges`. A return edge is one of a pair that
+/// points back toward the root; GraphEditor does not draw it.
+std::vector<char> g_edge_return;
+/// Which stacked lane under the cards that return edge uses.
+std::vector<int> g_edge_lane;
 /// Where `Show` places the canvas this frame. Labels are drawn from inside it,
 /// which runs after these are set.
 ImVec2 g_canvas_origin;
@@ -295,6 +304,11 @@ private:
     std::vector<std::vector<body_line>> m_body;
     /// Edge targets by node index, for the layout walk.
     std::vector<std::vector<GraphEditor::NodeIndex>> m_out;
+    /// Hops from the root, filled by `place`. -1 when nothing reaches it.
+    std::vector<int> m_rank;
+    /// True when `_i` is the edge of a pair that points back toward the root.
+    /// The other edge of the pair keeps the short curve.
+    bool edge_returns(const screen_graph &_graph, std::size_t _i) const;
 };
 
 void graph_view_delegate::reset(const loaded_graph &_loaded) {
@@ -304,6 +318,9 @@ void graph_view_delegate::reset(const loaded_graph &_loaded) {
     m_names.clear();
     m_body.clear();
     m_out.clear();
+    m_rank.clear();
+    g_edge_return.assign(graph.edges.size(), 0);
+    g_edge_lane.assign(graph.edges.size(), 0);
 
     m_names.reserve(graph.anchors.size());
     m_body.reserve(graph.anchors.size());
@@ -329,6 +346,28 @@ void graph_view_delegate::reset(const loaded_graph &_loaded) {
         if (!from.has_value() || !to.has_value()) {
             continue; // load_graph already reported an edge naming no anchor
         }
+        m_out[*from].push_back(*to);
+    }
+    place(graph.root, column_gap(graph));
+
+    int lane = 0;
+    for (std::size_t i = 0; i < graph.edges.size(); ++i) {
+        if (!edge_returns(graph, i)) {
+            continue;
+        }
+        g_edge_return[i] = 1;
+        g_edge_lane[i] = lane++;
+    }
+    for (std::size_t i = 0; i < graph.edges.size(); ++i) {
+        if (g_edge_return[i]) {
+            continue; // drawn under the cards, so its label is not on the other edge
+        }
+        const graph_edge &edge = graph.edges[i];
+        const std::optional<GraphEditor::NodeIndex> from = node_of(edge.from);
+        const std::optional<GraphEditor::NodeIndex> to = node_of(edge.to);
+        if (!from.has_value() || !to.has_value()) {
+            continue;
+        }
         GraphEditor::Link link;
         // GraphEditor's field names are the reverse of what it draws:
         // DisplayLinks puts the tail of the line on mInputNodeIndex's OUTPUT
@@ -339,9 +378,33 @@ void graph_view_delegate::reset(const loaded_graph &_loaded) {
         link.mOutputNodeIndex = *to;
         link.mOutputSlotIndex = 0;
         m_links.push_back(link);
-        m_out[*from].push_back(*to);
     }
-    place(graph.root, column_gap(graph));
+}
+
+bool graph_view_delegate::edge_returns(const screen_graph &_graph,
+                                       std::size_t _i) const {
+    const graph_edge &edge = _graph.edges[_i];
+    std::size_t opposite = _graph.edges.size();
+    for (std::size_t j = 0; j < _graph.edges.size(); ++j) {
+        if (_graph.edges[j].from == edge.to && _graph.edges[j].to == edge.from) {
+            opposite = j;
+            break;
+        }
+    }
+    if (opposite == _graph.edges.size()) {
+        return false;
+    }
+    const std::optional<GraphEditor::NodeIndex> from = node_of(edge.from);
+    const std::optional<GraphEditor::NodeIndex> to = node_of(edge.to);
+    if (!from.has_value() || !to.has_value()) {
+        return false;
+    }
+    const int rank_from = m_rank[*from];
+    const int rank_to = m_rank[*to];
+    if (rank_from != rank_to) {
+        return rank_from > rank_to;
+    }
+    return _i > opposite;
 }
 
 std::optional<GraphEditor::NodeIndex>
@@ -371,6 +434,7 @@ void graph_view_delegate::place(std::string_view _root, float _gap_x) {
             }
         }
     }
+    m_rank = rank;
     int columns = 1;
     for (const int r : rank) {
         columns = std::max(columns, r + 1);
@@ -601,7 +665,8 @@ void draw_edge_labels(ImDrawList *_dl, ImVec2 _origin, ImVec2 _canvas,
     const ImRect canvas(_origin, _origin + _canvas);
     ImFont *font = campcat::app::fonts_get(campcat::app::font_role::small);
     const float size = font->FontSize * factor;
-    for (const graph_edge &edge : g_loaded.graph.edges) {
+    for (std::size_t i = 0; i < g_loaded.graph.edges.size(); ++i) {
+        const graph_edge &edge = g_loaded.graph.edges[i];
         const std::optional<GraphEditor::NodeIndex> from = node_index(edge.from);
         const std::optional<GraphEditor::NodeIndex> to = node_index(edge.to);
         if (!from.has_value() || !to.has_value()) {
@@ -617,9 +682,35 @@ void draw_edge_labels(ImDrawList *_dl, ImVec2 _origin, ImVec2 _canvas,
         const ImVec2 p_to(offset.x + b.mRect.Min.x * factor,
                           offset.y + b.mRect.Min.y * factor + size_b.y * 0.5F +
                               k_slot_y_bias);
-        const ImVec2 mid =
-            bezier_mid(p_from, p_from + ImVec2(k_curve_pull, 0.0F) * factor,
-                       p_to + ImVec2(-k_curve_pull, 0.0F) * factor, p_to);
+        const bool returns = i < g_edge_return.size() && g_edge_return[i];
+        ImVec2 c1 = p_from + ImVec2(k_curve_pull, 0.0F) * factor;
+        ImVec2 c2 = p_to + ImVec2(-k_curve_pull, 0.0F) * factor;
+        if (returns) {
+            const int lane = i < g_edge_lane.size() ? g_edge_lane[i] : 0;
+            const float y =
+                offset.y +
+                (std::max(a.mRect.Max.y, b.mRect.Max.y) + k_return_drop +
+                 static_cast<float>(lane) * k_return_pitch) *
+                    factor;
+            c1 = ImVec2(p_from.x, y);
+            c2 = ImVec2(p_to.x, y);
+            // GraphEditor brightens a link while the pointer is on either
+            // end. This curve is not one of its links, so the same test is
+            // done here. The card's screen rect is what its button covers.
+            const ImVec2 mouse = ImGui::GetMousePos();
+            const auto under_pointer = [&](const GraphEditor::Node &_node) {
+                const ImVec2 mn = offset + _node.mRect.Min * factor;
+                return ImRect(mn, mn + _node.mRect.GetSize() * factor)
+                    .Contains(mouse);
+            };
+            const bool hot = canvas.Contains(mouse) &&
+                             ImGui::IsWindowHovered() &&
+                             (under_pointer(a) || under_pointer(b));
+            const ImU32 col = k_accent | (hot ? 0xF0F0F0 : 0);
+            const float thick = view_options().mLineThickness * 1.5F * factor;
+            _dl->AddBezierCubic(p_from, c1, c2, p_to, col, thick);
+        }
+        const ImVec2 mid = bezier_mid(p_from, c1, c2, p_to);
         const std::string_view label =
             edge_label(g_loaded.graph.name, edge.script);
         const ImVec2 text = font->CalcTextSizeA(size, FLT_MAX, 0.0F,
