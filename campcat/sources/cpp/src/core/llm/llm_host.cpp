@@ -28,11 +28,6 @@ constexpr int k_startup_timeout_ms = 60000;
 /// but healthy turn dies as "sidecar timed out" rather than finishing.
 constexpr int k_request_timeout_ms = 86400000;
 
-/// Hard stop on a runaway tool loop, kept above the sidecar's round budget: a
-/// round may issue several calls, and this must not cut a turn the sidecar
-/// still considers legal. The deadline above is what bounds total time.
-constexpr int k_max_tool_calls = 1000000;
-
 /// How many of the turn's newest screenshots keep their bytes. Past this the
 /// oldest is dropped and its timeline step renders as unavailable.
 constexpr int k_event_image_stash = 32;
@@ -121,6 +116,7 @@ void llm_host::handle_line(const std::string &_line) {
             m_result.error = msg.error;
             m_result.turns = msg.turns;
             m_has_result = true;
+            llm_protocol::apply_usage(&m_usage, msg);
         }
     }
         m_cv.notify_all();
@@ -142,6 +138,7 @@ void llm_host::handle_line(const std::string &_line) {
         if (msg.id == m_pending_id) {
             m_tool_call = msg;
             m_has_tool = true;
+            llm_protocol::apply_usage(&m_usage, msg);
         }
     }
         m_cv.notify_all();
@@ -379,9 +376,9 @@ std::string llm_host::run_tool(const llm_protocol::message &_call) {
         std::lock_guard<std::mutex> lk(m_mu);
         call_index = ++m_tool_calls;
     }
-    if (call_index > k_max_tool_calls) {
+    if (call_index > m_turn_max_calls) {
         const std::string error = "tool call limit reached (" +
-                                  std::to_string(k_max_tool_calls) + ")";
+                                  std::to_string(m_turn_max_calls) + ")";
         record_note(tool_note(_call.tool_name, "error", error));
         return llm_protocol::build_tool_result(_call.call_id, false, "", error,
                                                "");
@@ -493,10 +490,21 @@ llm_result llm_host::exchange(const std::string &_request_line,
     }
 }
 
+llm_protocol::usage_stats llm_host::usage() const {
+    std::lock_guard<std::mutex> lk(m_mu);
+    return m_usage;
+}
+
 llm_result llm_host::run_turn(const std::filesystem::path &_config_home,
                               const std::string &_provider,
-                              const std::string &_prompt) {
+                              const std::string &_prompt, int _max_tool_calls,
+                              int _max_tool_rounds) {
     llm_result r;
+    m_turn_max_calls = _max_tool_calls >= 1 ? _max_tool_calls
+                                            : llm::k_default_max_tool_calls;
+    if (_max_tool_rounds < 1) {
+        _max_tool_rounds = llm::k_default_max_tool_rounds;
+    }
     if (_prompt.empty()) {
         r.error = "empty request";
         return r;
@@ -534,7 +542,7 @@ llm_result llm_host::run_turn(const std::filesystem::path &_config_home,
 
     const long id = next_request_id();
     std::string request = llm_protocol::build_turn_request(
-        id, _prompt, llm::tools_json(), memory, _provider);
+        id, _prompt, llm::tools_json(), memory, _provider, _max_tool_rounds);
     request.push_back('\n');
     const llm_result turn = exchange(request, k_request_timeout_ms);
     // This turn may have replaced the screenshot; take it back for the next one
@@ -610,6 +618,7 @@ llm_result llm_host::reset(const std::filesystem::path &_repo_root) {
             // No child, so no history: report success without spawning one.
             r.ok = true;
             r.turns = 0;
+            m_usage = {};
             return r;
         }
     }
@@ -618,7 +627,12 @@ llm_result llm_host::reset(const std::filesystem::path &_repo_root) {
     const long id = next_request_id();
     std::string request = llm_protocol::build_reset_request(id);
     request.push_back('\n');
-    return exchange(request, k_request_timeout_ms);
+    llm_result out = exchange(request, k_request_timeout_ms);
+    if (out.ok) {
+        std::lock_guard<std::mutex> lk(m_mu);
+        m_usage = {};
+    }
+    return out;
 }
 
 void llm_host::teardown() {
@@ -693,8 +707,13 @@ bool llm_host::ensure_running(const std::filesystem::path &,
     return false;
 }
 
+llm_protocol::usage_stats llm_host::usage() const {
+    return {};
+}
+
 llm_result llm_host::run_turn(const std::filesystem::path &,
-                              const std::string &, const std::string &) {
+                              const std::string &, const std::string &, int,
+                              int) {
     llm_result r;
     r.error = "the LLM sidecar is not supported on Windows";
     return r;

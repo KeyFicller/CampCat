@@ -11,6 +11,9 @@ import os
 from pathlib import Path
 
 from langchain.chat_models import init_chat_model
+from langchain_core.callbacks import BaseCallbackHandler
+
+import session
 
 
 DEFAULT_MAX_TOKENS = 1024
@@ -113,7 +116,27 @@ def _provider() -> dict:
 
 
 
-def _chat_model(name: str, max_tokens: int):
+class _UsageHandler(BaseCallbackHandler):
+    """Counts one completion when the model call returns.
+
+    Hung on the model itself. The summarizer calls `with_retry().invoke`,
+    which still runs this model's callbacks; a proxy around `invoke` would
+    not see that call.
+    """
+
+    def __init__(self, *, context: bool) -> None:
+        super().__init__()
+        self._context = context
+
+    def on_chat_model_end(self, response, **kwargs) -> None:
+        msg = None
+        gens = getattr(response, "generations", None) or []
+        if gens and gens[0]:
+            msg = getattr(gens[0][0], "message", None)
+        session.note_llm(msg, context=self._context)
+
+
+def _chat_model(name: str, max_tokens: int, *, context: bool = False):
     """Build a chat model for the selected provider.
 
     Key and base URL are passed explicitly, so neither has to be a name the
@@ -128,17 +151,26 @@ def _chat_model(name: str, max_tokens: int):
     api_key = _env(provider["key_env"])
     if not api_key:
         raise RuntimeError(f"{provider['key_env']} is not set (put it in .env)")
-    return init_chat_model(
+    model = init_chat_model(
         name,
         api_key=api_key,
         base_url=_setting(provider["base_url_env"], provider["base_url"]),
         max_tokens=max_tokens,
         extra_body=provider["extra_body"],
     )
+    # The provider tests stand in a non-model for init_chat_model. A real chat
+    # model has this attribute; without it there is nothing to count.
+    if hasattr(model, "callbacks"):
+        model.callbacks = [_UsageHandler(context=context)]
+    return model
 
 
-def build_chat_model():
+def build_chat_model(*, context: bool = False):
     """Build the chat model named by the environment.
+
+    `context` is true only for a conversation request: that response's
+    `input_tokens` is the status bar's context length. Other callers leave it
+    false so their own prompts do not overwrite it.
 
     Raises RuntimeError when the API key is missing; the caller reports it as a
     failed result.
@@ -146,6 +178,7 @@ def build_chat_model():
     return _chat_model(
         _setting("CAMPCAT_LLM_MODEL", _provider()["model"]),
         int(_env("CAMPCAT_LLM_MAX_TOKENS") or DEFAULT_MAX_TOKENS),
+        context=context,
     )
 
 

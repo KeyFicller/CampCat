@@ -32,7 +32,7 @@ def _drive(monkeypatch, scripted, responses):
 
     monkeypatch.setattr(tools, "call_cpp", fake_call_cpp)
     model = scripted(responses)
-    monkeypatch.setattr(models, "build_chat_model", lambda: model)
+    monkeypatch.setattr(models, "build_chat_model", lambda **_: model)
     out = {}
     text = "".join(
         chunk
@@ -86,7 +86,7 @@ def test_scripter_model_error_stays_in_the_tool_result(monkeypatch, scripted):
     session.reset()
     made = {"n": 0}
 
-    def build():
+    def build(**_):
         made["n"] += 1
         if made["n"] == 1:
             return scripted([AIMessage(content="", tool_calls=[
@@ -118,7 +118,7 @@ def test_second_handoff_sees_the_first(monkeypatch, scripted):
         AIMessage(content="Done."),
     ])
     monkeypatch.setattr(tools, "call_cpp", lambda name, args: {"ok": True, "text": "ok"})
-    monkeypatch.setattr(models, "build_chat_model", lambda: model)
+    monkeypatch.setattr(models, "build_chat_model", lambda **_: model)
     session.reset()
     for _ in range(2):
         list(graph.stream_turn({"text": "write it", "tools": [], "memory": ""}, {}))
@@ -137,7 +137,7 @@ def test_empty_goal_skips_the_model(monkeypatch, scripted):
         AIMessage(content="Done."),
     ])
 
-    def build():
+    def build(**_):
         made["n"] += 1
         return model
 
@@ -228,7 +228,7 @@ def test_no_summary_ignores_an_earlier_handoff(monkeypatch, scripted):
     ])
     monkeypatch.setattr(tools, "call_cpp",
                         lambda name, args: {"ok": True, "text": name + " ok"})
-    monkeypatch.setattr(models, "build_chat_model", lambda: model)
+    monkeypatch.setattr(models, "build_chat_model", lambda **_: model)
     session.reset()
     list(graph.stream_turn({"text": "write it", "tools": [], "memory": ""}, {}))
     list(graph.stream_turn({"text": "again", "tools": [], "memory": ""}, {}))
@@ -252,7 +252,7 @@ def test_operator_turn_keeps_the_scripter_screenshot(monkeypatch, scripted):
         AIMessage(content="saved it"),
         AIMessage(content="Done."),
     ])
-    monkeypatch.setattr(models, "build_chat_model", lambda: model)
+    monkeypatch.setattr(models, "build_chat_model", lambda **_: model)
     list(graph.stream_turn({"text": "write it", "tools": [], "memory": ""}, {}))
 
     kept = " ".join(session.content_text(m.content) for m in session.history())

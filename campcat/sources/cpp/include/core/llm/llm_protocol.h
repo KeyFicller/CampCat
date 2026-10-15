@@ -54,7 +54,40 @@ struct message {
 
     /// Turns the sidecar retains after this result; 0 after a reset.
     int turns = 0;
+
+    /// Present only when the sidecar put the field on this line. Absent means
+    /// "leave the display alone", not zero.
+    bool has_llm_calls = false;
+    int llm_calls = 0;
+    bool has_tool_calls = false;
+    int tool_calls = 0;
+    bool has_context = false;
+    int context_tokens = 0;
 };
+
+/// Counters the status bar shows. `context_tokens` of -1 means the provider
+/// has not reported one since the last reset.
+struct usage_stats {
+    int llm_calls = 0;
+    int tool_calls = 0;
+    int context_tokens = -1;
+};
+
+/// Copy the usage fields this message actually carries. Missing fields stay.
+inline void apply_usage(usage_stats *_dst, const message &_msg) {
+    if (_dst == nullptr) {
+        return;
+    }
+    if (_msg.has_llm_calls) {
+        _dst->llm_calls = _msg.llm_calls;
+    }
+    if (_msg.has_tool_calls) {
+        _dst->tool_calls = _msg.tool_calls;
+    }
+    if (_msg.has_context) {
+        _dst->context_tokens = _msg.context_tokens;
+    }
+}
 
 /**
  * @brief Standard base64 (RFC 4648, no line breaks).
@@ -82,7 +115,8 @@ std::string base64_encode(const unsigned char *_data, std::size_t _len);
 std::string build_turn_request(long _id, std::string_view _text,
                                std::string_view _tools_json,
                                std::string_view _memory,
-                               std::string_view _provider);
+                               std::string_view _provider,
+                               int _max_tool_rounds);
 
 /**
  * @brief Build one `tool_result` line answering a `tool_call`.

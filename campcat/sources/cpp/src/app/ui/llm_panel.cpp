@@ -1,5 +1,8 @@
 #include "app/ui/llm_panel.h"
 
+#include <cstdio>
+#include <cstring>
+
 #include "core/adb_client.h"
 #include "core/app_config.h"
 #include "core/automation_log.h"
@@ -632,7 +635,8 @@ void run_prompt_loop(campcat::shell_state *_st, const campcat::app_config &_cfg,
         }
         _promote = true;
         campcat::llm_result res = g_host.run_turn(
-            _cfg.config_home, _cfg.llm.provider, _prompt);
+            _cfg.config_home, _cfg.llm.provider, _prompt,
+            _cfg.llm.max_tool_calls, _cfg.llm.max_tool_rounds);
         post_turn(std::move(res));
         std::optional<std::string> next = take_queued();
         if (!next.has_value()) {
@@ -1004,6 +1008,70 @@ constexpr float k_send_icon_side = 20.0F;
 
 /// Wide enough for the longest snap mode name ("Otsu blobs") plus the arrow.
 constexpr float k_snap_combo_w = 130.0F;
+
+/// Empty or the infinity mark means the built-in stand-in. Anything else must
+/// be a positive integer of at most seven digits; a half-typed field is not
+/// written.
+bool parse_cap(const char *_text, int _fallback, int *_out) {
+    if (_text[0] == '\0' || std::strcmp(_text, "\xE2\x88\x9E") == 0) {
+        *_out = _fallback;
+        return true;
+    }
+    int n = 0;
+    int digits = 0;
+    for (const char *p = _text; *p != '\0'; ++p) {
+        if (*p < '0' || *p > '9' || digits == 7) {
+            return false;
+        }
+        n = n * 10 + (*p - '0');
+        ++digits;
+    }
+    if (n < 1) {
+        return false;
+    }
+    *_out = n;
+    return true;
+}
+
+void show_cap(char *_buf, std::size_t _n, int _value) {
+    if (campcat::llm::fuse_is_unlimited(_value)) {
+        std::snprintf(_buf, _n, "\xE2\x88\x9E");
+    } else {
+        std::snprintf(_buf, _n, "%d", _value);
+    }
+}
+
+/// Per-turn fuse caps. Drawn inside the status font so infinity has a glyph.
+void draw_fuse_settings(campcat::app_config &_c) {
+    static char calls_buf[32];
+    static char rounds_buf[32];
+    static bool fresh = true;
+    if (!ImGui::BeginPopup("llm_fuse_settings")) {
+        fresh = true;
+        return;
+    }
+    if (fresh) {
+        show_cap(calls_buf, sizeof calls_buf, _c.llm.max_tool_calls);
+        show_cap(rounds_buf, sizeof rounds_buf, _c.llm.max_tool_rounds);
+        fresh = false;
+    }
+    ImGui::InputText("Tool calls per turn", calls_buf, sizeof calls_buf);
+    ImGui::InputText("Tool rounds per turn", rounds_buf, sizeof rounds_buf);
+    int calls = 0;
+    int rounds = 0;
+    const bool calls_ok =
+        parse_cap(calls_buf, campcat::llm::k_default_max_tool_calls, &calls);
+    const bool rounds_ok =
+        parse_cap(rounds_buf, campcat::llm::k_default_max_tool_rounds, &rounds);
+    if (calls_ok && rounds_ok && campcat::llm::fuse_pair_ok(calls, rounds)) {
+        _c.llm.max_tool_calls = calls;
+        _c.llm.max_tool_rounds = rounds;
+    } else if (calls_ok && rounds_ok) {
+        ImGui::TextDisabled(
+            "Tool rounds per turn cannot exceed tool calls per turn.");
+    }
+    ImGui::EndPopup();
+}
 
 /// Which tools ask the human before acting. The master switch keeps its old
 /// meaning -- off means nothing asks -- and the seven under it only matter
@@ -1818,12 +1886,10 @@ void llm_panel_draw_panel(campcat::shell_state &_st, campcat::app_config &_cfg,
     ImGui::SameLine();
     draw_approval_settings(_cfg);
 
-    // What the conversation currently holds, as a three-column grid so the
-    // numbers line up instead of running together. Two turn counts, because
-    // they answer different questions and drift apart: `turns` is what the
-    // model still holds verbatim, `shown` is what this panel has kept, capped
-    // at `k_turn_cap`.
+    // Four counts. Tool calls is the only one with a fuse, and that fuse is
+    // per turn while the number is the conversation total.
     refresh_memory_chars();
+    const campcat::llm_protocol::usage_stats usage = g_host.usage();
     ImGui::Indent(k_stat_indent);
     WITH_FONT(small, {
         // Zero vertical cell padding: a row's height is its content plus
@@ -1832,23 +1898,39 @@ void llm_panel_draw_panel(campcat::shell_state &_st, campcat::app_config &_cfg,
         // horizontal half stays, so the columns keep their inset.
         const float pad_x = ImGui::GetStyle().CellPadding.x;
         ImGui::PushStyleVar(ImGuiStyleVar_CellPadding, ImVec2(pad_x, 0.0F));
-        if (ImGui::BeginTable("##llm_stats", 3,
+        // Opened after the table: a popup id pushed inside the table does not
+        // match BeginPopup outside it.
+        bool open_fuse = false;
+        const auto cell = [&](const char *_label, const std::string &_value) {
+            ImGui::TableNextColumn();
+            ImGui::TextDisabled("%s", _label);
+            if (ImGui::IsItemHovered() &&
+                ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
+                open_fuse = true;
+            }
+            ImGui::SameLine();
+            ImGui::TextUnformatted(_value.c_str());
+            if (ImGui::IsItemHovered() &&
+                ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
+                open_fuse = true;
+            }
+        };
+        if (ImGui::BeginTable("##llm_stats", 4,
                               ImGuiTableFlags_SizingStretchSame)) {
-            ImGui::TableNextColumn();
-            ImGui::TextDisabled("Turns");
-            ImGui::SameLine();
-            ImGui::Text("%d", g_sidecar_turns);
-            ImGui::TableNextColumn();
-            ImGui::TextDisabled("Shown");
-            ImGui::SameLine();
-            ImGui::Text("%d/%d", static_cast<int>(g_turns.size()), k_turn_cap);
-            ImGui::TableNextColumn();
-            ImGui::TextDisabled("Memory (chars)");
-            ImGui::SameLine();
-            ImGui::Text("%d/%d", g_memory_chars,
-                        static_cast<int>(campcat::llm::k_memory_max_chars));
+            cell("Turns", std::to_string(g_sidecar_turns));
+            cell("LLM calls", std::to_string(usage.llm_calls));
+            cell("Tool calls",
+                 std::to_string(usage.tool_calls) + "/" +
+                     campcat::llm::format_fuse(_cfg.llm.max_tool_calls));
+            cell("Context", usage.context_tokens < 0
+                               ? std::string("\xE2\x80\x94")
+                               : std::to_string(usage.context_tokens));
             ImGui::EndTable();
         }
+        if (open_fuse) {
+            ImGui::OpenPopup("llm_fuse_settings");
+        }
+        draw_fuse_settings(_cfg);
         ImGui::PopStyleVar();
     });
     ImGui::Unindent(k_stat_indent);

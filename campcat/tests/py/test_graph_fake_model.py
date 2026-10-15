@@ -46,7 +46,7 @@ def test_tool_round_then_answer(monkeypatch, scripted):
         }]),
         AIMessage(content="Done."),
     ])
-    monkeypatch.setattr(models, "build_chat_model", lambda: model)
+    monkeypatch.setattr(models, "build_chat_model", lambda **_: model)
 
     out = {}
     text = "".join(
@@ -74,7 +74,7 @@ def test_stock_fake_model_cannot_be_bound(monkeypatch):
     goes red -- and then the shim in conftest can go too.
     """
     session.reset()
-    monkeypatch.setattr(models, "build_chat_model", lambda: FakeMessagesListChatModel(
+    monkeypatch.setattr(models, "build_chat_model", lambda **_: FakeMessagesListChatModel(
         responses=[AIMessage(content="Done.")],
     ))
 

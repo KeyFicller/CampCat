@@ -81,6 +81,24 @@ void fonts_init() {
         return r;
     }();
 
+    // The 14px status face is Latin-only. Infinity and the em dash sit outside
+    // that range, and ImGui keeps this pointer until the atlas is built.
+    static const std::vector<ImWchar> status_ranges = [&io] {
+        std::vector<ImWchar> r;
+        for (const ImWchar *p = io.Fonts->GetGlyphRangesDefault();
+             p[0] != 0 && p[1] != 0; p += 2) {
+            r.push_back(p[0]);
+            r.push_back(p[1]);
+        }
+        r.push_back(0x2014); // em dash: unknown context
+        r.push_back(0x2014);
+        r.push_back(0x221E); // infinity: an unlimited fuse
+        r.push_back(0x221E);
+        r.push_back(0);
+        r.push_back(0);
+        return r;
+    }();
+
     // MergeMode appends to the font added just before it, so each merge is
     // issued right after its own base font.
     //
@@ -88,8 +106,8 @@ void fonts_init() {
     // atlas to 4096x16384 (+320 MB RSS, +128 MB VRAM) for strings that are all
     // ASCII today. A Chinese title would draw "?"; add the merge then if it
     // becomes worth that.
-    auto load_font = [&io](const char *_path, float _size, bool _cjk,
-                           int _face) -> ImFont * {
+    auto load_font = [&io](const char *_path, float _size, bool _cjk, int _face,
+                           const ImWchar *_ranges = nullptr) -> ImFont * {
         // AddFontFromFileTTF asserts on a missing file, and that assert is live
         // in a Debug build. Probing first turns a missing face file into a null
         // return the callers below already know how to fall back from.
@@ -99,7 +117,8 @@ void fonts_init() {
         }
         ImFontConfig base;
         base.FontNo = _face; // a .ttc holds several faces
-        ImFont *font = io.Fonts->AddFontFromFileTTF(_path, _size, &base);
+        ImFont *font =
+            io.Fonts->AddFontFromFileTTF(_path, _size, &base, _ranges);
         if (font == nullptr || !_cjk) {
             return font;
         }
@@ -147,8 +166,10 @@ void fonts_init() {
 
     // The status line under the prompt box, which is context, not conversation.
     // Latin-only like `title`: a CJK merge at every size is what makes the
-    // atlas expensive, and the line is ASCII.
-    ImFont *font_small = load_font(k_latin_regular, 14.0F, false, 0);
+    // atlas expensive. Two codepoints outside Latin come along: infinity and
+    // the em dash.
+    ImFont *font_small =
+        load_font(k_latin_regular, 14.0F, false, 0, status_ranges.data());
     if (font_small == nullptr) {
         font_small = font_body;
     }

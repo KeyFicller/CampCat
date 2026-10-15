@@ -103,7 +103,7 @@ def _drive(monkeypatch, responses, args, name="tap", host=None, images=None,
     monkeypatch.setattr(tools, "call_cpp", fake_call_cpp)
     inner = ScriptedModel(responses=responses)
     model = _Seeing(inner, fail_at)
-    monkeypatch.setattr(models, "build_chat_model", lambda: model)
+    monkeypatch.setattr(models, "build_chat_model", lambda **_: model)
     out = {}
     "".join(
         chunk for is_answer, chunk in graph.stream_turn(

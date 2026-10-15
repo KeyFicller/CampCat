@@ -73,7 +73,7 @@ def test_second_tool_stops_the_turn(monkeypatch):
         ]),
         AIMessage(content="Done."),
     ])
-    monkeypatch.setattr(models, "build_chat_model", lambda: model)
+    monkeypatch.setattr(models, "build_chat_model", lambda **_: model)
 
     out = {}
     text = "".join(
@@ -111,7 +111,7 @@ def test_scripter_interrupt_stops_the_operator(monkeypatch):
         }]),
         AIMessage(content="Done."),
     ])
-    monkeypatch.setattr(models, "build_chat_model", lambda: model)
+    monkeypatch.setattr(models, "build_chat_model", lambda **_: model)
 
     out = {}
     list(graph.stream_turn(

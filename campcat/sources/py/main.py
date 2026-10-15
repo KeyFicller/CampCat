@@ -44,7 +44,7 @@ def handle_request(req: dict) -> Iterator[dict]:
         session.reset()
         # A reset ends one conversation; the next turns get a fresh session id.
         observability.new_session()
-        yield protocol.build_result(rid, True, turns=0)
+        yield protocol.build_result(rid, True, turns=0, **session.usage_fields())
         return
     # Both branches left build a model, so the provider is settled once here.
     # Empty means the host did not say, and models falls back to `.env`.
@@ -54,9 +54,10 @@ def handle_request(req: dict) -> Iterator[dict]:
         # wire; the reply carries the rewritten ones back for the host to write.
         notes = memorier.memorize(req.get("memory") or "")
         if notes is None:
-            yield protocol.build_error_result(rid, "memory not updated")
+            yield protocol.build_error_result(
+                rid, "memory not updated", **session.usage_fields())
         else:
-            yield protocol.build_result(rid, True, notes)
+            yield protocol.build_result(rid, True, notes, **session.usage_fields())
         return
     if rtype != "turn":
         yield protocol.build_log("warn", f"ignoring unknown message type: {rtype}")
@@ -75,6 +76,7 @@ def handle_request(req: dict) -> Iterator[dict]:
                 "tools": req.get("tools") or [],
                 # Long-term notes, read off disk by the host this turn.
                 "memory": req.get("memory") or "",
+                "max_tool_rounds": graph.rounds_of(req.get("max_tool_rounds")),
             },
             out,
         ):
@@ -93,17 +95,18 @@ def handle_request(req: dict) -> Iterator[dict]:
                 last = now
     except Exception as exc:  # noqa: BLE001 - never let a request kill the loop
         traceback.print_exc(file=sys.stderr)
-        yield protocol.build_error_result(rid, str(exc))
+        yield protocol.build_error_result(rid, str(exc), **session.usage_fields())
         return
 
     if buf:
         yield protocol.build_chunk(rid, "".join(buf))
     if out.get("error"):
-        yield protocol.build_error_result(rid, str(out["error"]))
+        yield protocol.build_error_result(
+            rid, str(out["error"]), **session.usage_fields())
         return
     yield protocol.build_result(
         rid, True, str(out.get("reply", "")), turns=out.get("turns"),
-        interrupted=bool(out.get("interrupted")),
+        interrupted=bool(out.get("interrupted")), **session.usage_fields(),
     )
 
 

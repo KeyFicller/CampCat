@@ -52,7 +52,8 @@ std::string base64_encode(const unsigned char *_data, std::size_t _len) {
 std::string build_turn_request(long _id, std::string_view _text,
                                std::string_view _tools_json,
                                std::string_view _memory,
-                               std::string_view _provider) {
+                               std::string_view _provider,
+                               int _max_tool_rounds) {
     nlohmann::json j;
     j["type"] = "turn";
     j["id"] = _id;
@@ -64,6 +65,7 @@ std::string build_turn_request(long _id, std::string_view _text,
     }
     j["memory"] = std::string(_memory);
     j["provider"] = std::string(_provider);
+    j["max_tool_rounds"] = _max_tool_rounds;
     return j.dump();
 }
 
@@ -112,6 +114,25 @@ std::string build_memorize_request(long _id, std::string_view _memory,
     return j.dump();
 }
 
+namespace {
+
+void read_usage(const nlohmann::json &_j, message *_out) {
+    if (_j.contains("llm_calls")) {
+        _out->has_llm_calls = true;
+        _out->llm_calls = _j.value("llm_calls", 0);
+    }
+    if (_j.contains("tool_calls")) {
+        _out->has_tool_calls = true;
+        _out->tool_calls = _j.value("tool_calls", 0);
+    }
+    if (_j.contains("context")) {
+        _out->has_context = true;
+        _out->context_tokens = _j.value("context", 0);
+    }
+}
+
+} // namespace
+
 bool parse_line(std::string_view _line, message *_out) {
     if (_out == nullptr) {
         return false;
@@ -155,6 +176,7 @@ bool parse_line(std::string_view _line, message *_out) {
         _out->text = j.value("text", std::string());
         _out->error = j.value("error", std::string());
         _out->turns = j.value("turns", 0);
+        read_usage(j, _out);
         return true;
     }
     if (type == "chunk") {
@@ -174,6 +196,7 @@ bool parse_line(std::string_view _line, message *_out) {
         // here.
         _out->tool_args_json =
             j.contains("args") ? j["args"].dump() : std::string("{}");
+        read_usage(j, _out);
         return true;
     }
 

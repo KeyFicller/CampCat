@@ -6,6 +6,7 @@
 #include <nlohmann/json.hpp>
 
 #include "core/box_snap.h"
+#include "core/llm/llm_fuse.h"
 
 namespace campcat {
 
@@ -88,6 +89,11 @@ struct approval_config {
 /// change takes effect on the next turn rather than the next restart.
 struct llm_config {
     std::string provider = "deepseek"; ///< "deepseek" or "qwen"
+    /// Per-turn tool-call cap. At or above `k_fuse_unlimited` the bar draws ∞.
+    int max_tool_calls = llm::k_default_max_tool_calls;
+    /// Per-turn model-round cap, sent on the turn request. Must not exceed
+    /// `max_tool_calls`: one round can issue several calls.
+    int max_tool_rounds = llm::k_default_max_tool_rounds;
 };
 
 /// Pulling the boxes the model gives onto the element's boundary, on the way to

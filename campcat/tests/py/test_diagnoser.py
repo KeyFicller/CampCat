@@ -77,7 +77,7 @@ def _run(monkeypatch, error, template="btn", bundle="b", screen=None,
 
     monkeypatch.setattr(tools, "call_cpp", fake)
     model = _Seeing(ScriptedModel(responses=[AIMessage(content=verdict)]), fail)
-    monkeypatch.setattr(models, "build_chat_model", lambda: model)
+    monkeypatch.setattr(models, "build_chat_model", lambda **_: model)
     text = diagnoser.run_diagnoser({
         "bundle": bundle, "template": template, "error": error, "expect": "the button",
     })
@@ -179,7 +179,7 @@ def test_scripter_intercepts_diagnose_and_keeps_host_clean(monkeypatch):
         AIMessage(content="failed: the cut is loose"),
         AIMessage(content="Done."),
     ]))
-    monkeypatch.setattr(models, "build_chat_model", lambda: model)
+    monkeypatch.setattr(models, "build_chat_model", lambda **_: model)
     "".join(chunk for _, chunk in graph.stream_turn(
         {"text": "fix it", "tools": [], "memory": ""}, {}))
     assert "diagnose_template" not in calls
@@ -207,7 +207,7 @@ def test_interrupt_in_gather_stops_the_outer_turn(monkeypatch):
             "id": "d",
         }]),
     ]))
-    monkeypatch.setattr(models, "build_chat_model", lambda: model)
+    monkeypatch.setattr(models, "build_chat_model", lambda **_: model)
     out = {}
     "".join(chunk for _, chunk in graph.stream_turn(
         {"text": "fix it", "tools": [], "memory": ""}, out))

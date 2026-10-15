@@ -103,6 +103,13 @@ _TURN_PREV_SHOT = None
 _TURN_MARK = "turn"
 _TURN_SEQ = 0
 
+# Status-bar counters for this conversation. Reset with it. `_CONTEXT` stays
+# None until a conversation response reports input_tokens; a missing report
+# must not look like zero.
+_LLM_CALLS = 0
+_TOOL_CALLS = 0
+_CONTEXT: int | None = None
+
 # The scripter's own conversation. Kept out of `_MESSAGES` so a handoff's
 # dozens of tool rounds never enter the operator's prompt or its cache prefix.
 _SCRIPTER_MESSAGES: list = []
@@ -112,7 +119,7 @@ _SCRIPTER_TURN_MARK = "scripter-turn"
 def reset() -> None:
     """Drop every turn. The next request starts a fresh conversation."""
     global _LATEST_NUM, _LATEST_B64, _LATEST_TIME, _MEMORIZED_UPTO, _TURN_PREV_SHOT
-    global _TURN_SEQ
+    global _TURN_SEQ, _LLM_CALLS, _TOOL_CALLS, _CONTEXT
     import agent.memorier as memorier
     _MESSAGES.clear()
     _SCRIPTER_MESSAGES.clear()
@@ -124,6 +131,48 @@ def reset() -> None:
     memorier._SCRIPTER_MW = None
     _MEMORIZED_UPTO = 0
     _TURN_SEQ = 0
+    _LLM_CALLS = 0
+    _TOOL_CALLS = 0
+    _CONTEXT = None
+
+
+def note_llm(response: object | None, *, context: bool) -> None:
+    """Count one chat completion. `context` updates the bar's token length.
+
+    A missing response is not a call. `input_tokens` is the provider's count;
+    `total_tokens` includes the completion and is not a stand-in. `bool` is an
+    `int` in Python, and `True` is not a token count.
+    """
+    global _LLM_CALLS, _CONTEXT
+    if response is None:
+        return
+    _LLM_CALLS += 1
+    if not context:
+        return
+    meta = getattr(response, "usage_metadata", None)
+    if not isinstance(meta, dict):
+        return
+    n = meta.get("input_tokens")
+    if isinstance(n, int) and not isinstance(n, bool):
+        _CONTEXT = n
+
+
+def note_tool() -> None:
+    """Count one tool the sidecar asked the host to run."""
+    global _TOOL_CALLS
+    _TOOL_CALLS += 1
+
+
+def usage_fields() -> dict:
+    """The counters a `result` or `tool_call` should carry.
+
+    `context` is omitted until a provider has reported it, so a host that
+    treats a missing field as "leave the display alone" does not zero it.
+    """
+    fields = {"llm_calls": _LLM_CALLS, "tool_calls": _TOOL_CALLS}
+    if _CONTEXT is not None:
+        fields["context"] = _CONTEXT
+    return fields
 
 
 def size() -> int:

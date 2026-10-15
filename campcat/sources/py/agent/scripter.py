@@ -303,7 +303,8 @@ def _no_summary(messages: list) -> str:
     return "failed: script agent gave no summary\n" + last
 
 
-def run_scripter(args: dict, host_tools: list) -> str:
+def run_scripter(args: dict, host_tools: list,
+                 max_tool_rounds: int | None = None) -> str:
     """Run the scripter to the end and return the text the operator should see.
 
     A failure here is a tool result, not a failed operator turn.
@@ -311,13 +312,16 @@ def run_scripter(args: dict, host_tools: list) -> str:
     goal = str(args.get("goal") or "").strip()
     if not goal:
         return "error: empty goal"
-    state = {
-        "text": brief_of(args),
-        "tools": scripter_tools(host_tools),
-        "tool_rounds": 0,
-    }
     try:
         import graph
+        if max_tool_rounds is None:
+            max_tool_rounds = graph.MAX_TOOL_ROUNDS
+        state = {
+            "text": brief_of(args),
+            "tools": scripter_tools(host_tools),
+            "tool_rounds": 0,
+            "max_tool_rounds": max_tool_rounds,
+        }
         # Callbacks only. The parent's whole config joins the two Pregel runs,
         # and a picture coming back then stalls the parent's stream.
         out = graph.run_subgraph(_scripter_graph(), state)

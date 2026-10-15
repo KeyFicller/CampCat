@@ -12,6 +12,7 @@ from __future__ import annotations
 from uuid import uuid4
 
 import protocol
+import session
 import transport
 
 # Written into the history for the call that was in flight and for every call
@@ -36,8 +37,10 @@ def call_cpp(name: str, args: dict) -> dict:
     a frame the host kept itself, so there is nothing to look up or attach here.
     """
     call_id = f"{name}-{uuid4().hex}"
+    session.note_tool()
     transport.emit(
-        protocol.build_tool_call(transport.get_current_rid(), call_id, name, args)
+        protocol.build_tool_call(transport.get_current_rid(), call_id, name, args,
+                                 **session.usage_fields())
     )
     while True:
         msg = transport.read_message()

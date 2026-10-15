@@ -28,6 +28,17 @@ import tools
 # instead. Both caps move together.
 MAX_TOOL_ROUNDS = 100000
 
+
+def rounds_of(raw: object) -> int:
+    """The per-turn round cap from a request field.
+
+    A JSON bool is an int in Python, and `true` is not a cap. Missing or
+    unusable values keep the default the sidecar used before the field existed.
+    """
+    if isinstance(raw, int) and not isinstance(raw, bool) and raw >= 1:
+        return raw
+    return MAX_TOOL_ROUNDS
+
 # Said to the model once the rounds above are spent. With the tools withdrawn it
 # otherwise reaches for one anyway and writes the call into its answer as text.
 NO_TOOLS_NOTE = (
@@ -45,6 +56,7 @@ class TurnState(TypedDict, total=False):
     input_len: int  # built by build_messages: where this turn's own messages start
     reply: str      # response: model output
     turns: int      # response: turns retained in the conversation
+    max_tool_rounds: int  # request: per-turn round cap; default MAX_TOOL_ROUNDS
     error: str
     interrupted: bool  # the user sent a new message; commit, then stop
 
@@ -91,9 +103,10 @@ def _invoke(state: TurnState, offered: list) -> dict:
     scripter share this; each passes its own table.
     """
     offered = region_review.with_expect(offered)
-    exhausted = bool(offered) and state.get("tool_rounds", 0) >= MAX_TOOL_ROUNDS
+    cap = state.get("max_tool_rounds", MAX_TOOL_ROUNDS)
+    exhausted = bool(offered) and state.get("tool_rounds", 0) >= cap
     try:
-        model = models.build_chat_model()
+        model = models.build_chat_model(context=True)
         # Past the round cap the tools are withdrawn, so the model has to answer
         # in text instead of the request ending on an empty tool call.
         if offered and not exhausted:
@@ -248,7 +261,8 @@ def run_tools(state: TurnState) -> dict:
             # propagates, and the calls after this one are filled in by
             # `_run_calls`.
             before = session._LATEST_NUM
-            content = scripter.run_scripter(args, host_tools)
+            content = scripter.run_scripter(
+                args, host_tools, state.get("max_tool_rounds", MAX_TOOL_ROUNDS))
             pics: list = []
             if session._LATEST_NUM != before:
                 frame = session.latest_frame()
@@ -279,7 +293,7 @@ def route_after_invoke(state: TurnState) -> str:
     calls = getattr(messages[-1], "tool_calls", None) if messages else None
     if not calls:
         return "commit"
-    if state.get("tool_rounds", 0) >= MAX_TOOL_ROUNDS:
+    if state.get("tool_rounds", 0) >= state.get("max_tool_rounds", MAX_TOOL_ROUNDS):
         return "commit"
     return "run_tools"
 
