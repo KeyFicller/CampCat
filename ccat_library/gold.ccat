@@ -1,37 +1,64 @@
-// Collects the daily reward: signs in through the saved skill, claims it, and says what it found.
-// Reference example -- every template name here stands for a real app's control.
+Reference examples for graph `app`: one anchor, one edge, and a task that walks over them.
+Every template name stands for a real app's control.
 
+### Anchor `app.feed`
+
+`golden.md` -- what the screen is, fixed parts and changing parts:
+
+```text
+---
+kind: page
+---
+Home feed: the tab bar along the bottom (feed, search, inbox, profile) with the feed tab
+lit, the app's logo top left. The posts, their pictures and the unread counts change.
+```
+
+`main.ccat` -- only judges whether that screen is showing:
+
+```ccat
+// The feed tab bar is fixed and on this screen only.
+if (has("feed.png")) {
+  // The search overlay keeps the tab bar but covers the feed: not this screen.
+  if (has("search_open.png")) { return false }
+  return true
+}
+return false
+```
+
+### Edge `app.entry-feed`
+
+`main.ccat` -- only the move. The engine checks it starts on `entry` and gives `feed`
+20 s to show up afterwards, so it never checks its own ends and never calls `goto`:
+
+```ccat
+// From the desktop into the app. A cold start puts the sign-in sheet up
+// first; a warm start lands on the feed directly. Either way ends on the feed.
+tap("app_icon.png")
+wait(3000)                           // the captures put the app's first frame at ~1.5s; twice that
+if (tap("sign_in.png")) {            // cold start only; on a warm start this is just false
+  log("signed in on a cold start")
+}
+```
+
+### Task `app.daily_claim`
+
+`main.ccat` -- `goto` to its screen first, an anchor after each action, each `log` on its
+anchor, every `ms` sized from the screenshots:
+
+```ccat
+// Collects the daily reward on the feed, and says what it found.
 defs {
-  sign_in = "../sign_in/main.ccat"   // the saved sign-in skill: reuse it, never re-write those steps
-  feed    = "feed.png"               // home feed tab bar, up only once sign-in finished
+  feed    = "feed.png"               // home feed tab bar
   claim   = "claim.png"              // the claim button, present only while the reward is unclaimed
   taken   = "claimed.png"            // the same button, greyed out once it is collected
   popup   = "reward_popup.png"       // the receipt sheet that shows only after a claim lands
   close_x = "popup_close.png"        // its top-right X
 }
 
-// Ask the saved skill to sign in; it answers whether it reached the feed. A
-// failed sign-in is a `false` here, so the script stops instead of tapping into
-// whatever stale screen is behind it.
-if (run(sign_in)) {
-  log("signed in")                   // the callee anchored the feed itself
-} else {
-  log("sign-in did not reach the feed")
-  return false                       // our call failed: say so rather than press on
-}
-
-// Anchor the screen that step promised, as a condition this time: a
-// `wait_until` that times out is `false` here instead of an error, so the
-// script can say what it saw rather than stopping at the anchor. The captions
-// put the feed about +2s after the sign-in tap, so ask for twice that; it stops
-// the moment the template matches.
-if (wait_until(feed, 4000)) {
-  log("feed is up")                  // grounded in the anchor just matched
-  // other action in this condition
-} else {
-  log("sign-in returned, but the feed never appeared")
-  return false
-}
+// A task starts by walking to its screen. The graph checks both ends of every
+// hop, so arriving is already confirmed; a screen it cannot reach is an error
+// that names the hops, and nothing below runs against the wrong screen.
+goto("app:feed")
 
 // "Already claimed" is a normal screen, not a failure, so it is a branch rather
 // than a wait_until that would have to time out.
@@ -68,3 +95,4 @@ if (wait_until(taken, 4000)) {
   log("the claim never registered")
   return false
 }
+```

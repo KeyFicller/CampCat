@@ -3,6 +3,7 @@
 add_executable(test_campcat_core cpp/test_approval_gate.cpp
                                  cpp/test_automation_log.cpp
                                  cpp/test_box_snap.cpp
+                                 cpp/test_ccat_anchor.cpp
                                  cpp/test_ccat_cond_action.cpp
                                  cpp/test_ccat_condition_walks.cpp
                                  cpp/test_ccat_graph.cpp

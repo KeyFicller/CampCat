@@ -23,7 +23,7 @@ SCRIPTER_ONLY = frozenset({
     "read_script", "ccat_help",
     "save_script", "update_script", "delete_script", "rename_script",
     "save_template_box", "save_template_circle", "view_template",
-    "read_graph", "update_graph", "save_golden",
+    "read_graph", "save_anchor",
 })
 # Offered to both: the operator runs saved skills and looks at the screen; the
 # scripter verifies what it wrote and cuts templates from fresh frames.
@@ -70,7 +70,9 @@ RULES = {
         "\n"
         "1. `list_scripts` first. If a bundle already does the job, run it with "
         "`run(\"<name>/main.ccat\")`; if one is close, `read_script` it and build on it. "
-        "Write a new script only when neither holds.\n"
+        "Write a new script only when neither holds. A task on a game that has a graph "
+        "starts with `goto(\"<graph>:<anchor>\")` to the screen it works on; a screen "
+        "the graph does not have yet is added first (graph_workflow).\n"
         "2. `screenshot`, so you can see the screen you are scripting.\n"
         "3. Decide each step's anchor: the image that only appears when that step worked, "
         "taken from a fixed UI control -- a button, a tab, a label -- never from free-form "
@@ -153,54 +155,53 @@ RULES = {
         "instead of changing another template."
     ),
     "graph_workflow": (
-        "A graph is the screens of one game: an anchor is a screen, a bundle is the "
-        "movements that take you from one to the next, and `goto(\"<graph>:<anchor>\")` "
-        "walks there. When the brief is about getting around a game, or a goal lands on "
-        "the wrong screen, this is the work -- and it is this sequence:\n"
+        "A graph is the screens of one game, kept as bundles: anchor `<graph>.<id>` is "
+        "one screen -- its golden.md says what the screen is, its main.ccat answers "
+        "whether it is showing -- and edge `<graph>.<a>-<b>` is the script that moves "
+        "from screen a to screen b. `goto(\"<graph>:<id>\")` walks there over the "
+        "edges, checking both ends of every hop. When the brief is about getting around "
+        "a game, or a goal needs a screen the graph does not have yet, this is the work "
+        "-- and it is this sequence:\n"
         "\n"
-        "1. `list_scripts` and find the game's bundle: the graph is the one tagged "
-        "`[graph, N anchors, M edges]`, and `[edge of <graph>]` marks its edges. "
-        "`read_graph` it. With no graph yet, `save_script` the game's own bundle first, "
-        "with main.ccat holding one line: the default task, "
-        "`goto(\"<graph>:<the anchor you start on>\")`.\n"
-        "2. One anchor per screen you must recognise. `screenshot` that screen, then cut "
-        "its fixed control with `save_template_box(<graph>, <name>, <shot>, <box>)` -- a "
-        "round one with `save_template_circle`. The template goes into the graph's own "
-        "bundle, which is where graph.json looks for it.\n"
-        "3. `update_graph(<graph>, <the graph.json text>)`: `read_graph`'s text with your "
-        "anchors added. It is checked before it is written, and every problem comes back "
-        "at once, so fix them and submit again.\n"
-        "4. Each edge is its own bundle: `save_script(\"<graph>.<from>-<to>\", <the "
-        "movements>)`, then its templates, then `update_graph` again with the edge added. "
-        "It is refused until that bundle exists and parses.\n"
-        "5. Verify with `run_script` and the source `goto(\"<graph>:<anchor>\")`. The "
-        "error names the hops it tried and, after a timeout, the screen it last saw.\n"
-        "6. When it walks, `save_golden(<graph>, <anchor>, <shot>, <box>)` for each "
-        "anchor on the screens it passed through, then `read_graph` to see the counts."
+        "1. `list_scripts`, then `read_graph(<graph>)`. A graph's bundles are tagged "
+        "`[graph <graph>, N anchors, M edges]`, `[anchor of <graph>, <kind>]` and "
+        "`[edge of <graph>]`. A new graph starts at anchor `entry`: the screen every "
+        "run can begin from, normally the desktop.\n"
+        "2. Each screen: `screenshot`, then `save_anchor(graph, anchor, golden, source, "
+        "templates)`, which writes golden.md, main.ccat and the templates in one step. "
+        "It first runs the existing anchors on the latest screenshot: refused with "
+        "`already anchor <id>` means this screen is in the graph -- use that anchor, do "
+        "not save a second one.\n"
+        "3. Each edge: `save_script(\"<graph>.<a>-<b>\", <the movements>)`, then its "
+        "templates with `save_template_box`. The reply ends with the graph check; fix "
+        "every problem it lists.\n"
+        "4. Verify one edge from screen a with `run_script` and the source "
+        "`run(\"<graph>.<a>-<b>/main.ccat\")`: it checks it starts on a and lands on b. "
+        "Verify a whole path with `run_script` and `goto(\"<graph>:<anchor>\")`; the "
+        "error names the hops it tried and the screen it last saw."
     ),
     "graph_rules": (
-        "  * An anchor's template is a fixed control that is on that screen and no other: "
-        "a title, a tab, a button. Two screens matching one anchor is a graph that cannot "
-        "navigate, so when a template turns up on a second screen add `must_not` for it, or "
-        "narrow the search with `roi` -- never a threshold.\n"
-        "  * An edge only performs movements: taps, swipes, `wait(ms)`, `log`. No "
-        "`wait_until`, no `has(...)` branch, no `goto`. The graph checks both ends of every "
-        "hop itself, so an assertion in the edge is a second, weaker copy of that check.\n"
+        "  * An anchor script only judges: `has`, `if` / `elif` / `else`, `log`, "
+        "`return true` / `return false`. Every anchor runs on every locate, so it never "
+        "acts, and `save_anchor` refuses one that does.\n"
+        "  * An anchor's template is a fixed control on that screen and no other: a "
+        "title, a tab, a button. Two anchors answering true on one screen is a graph "
+        "that cannot navigate, so tell them apart with a `has` on what only one of them "
+        "shows (`if (has(\"other.png\")) { return false }`) -- never a threshold.\n"
+        "  * golden.md is front matter, then one description of the screen: which parts "
+        "are fixed and which vary between runs. `kind: page` (the default) is a screen "
+        "you can stay on; `kind: transient` is a loading or transition screen -- "
+        "somewhere you may be, not somewhere to go, so it gets no edges; `kind: popup` "
+        "with `close: <the bundle that closes it>` is a popup that can cover any "
+        "screen.\n"
+        "  * An edge may branch -- a cold start and a warm start take different paths -- "
+        "but it does not check its own ends and never calls `goto`: the graph checks "
+        "that it starts on a, and gives b 20 s to show up afterwards.\n"
+        "  * An edge that takes longer waits for it itself: `wait_until` on a template "
+        "of b, or `loop` + `wait_until` for a long load.\n"
         "  * An edge must survive being run twice from either end: it is re-run after a "
         "replan lands you somewhere unexpected. Anything that spends a resource or claims a "
         "reward belongs in a task, not in an edge.\n"
-        "  * A loading or transition screen is `\"transient\": true` and gets no edges: it "
-        "is somewhere you may be, not somewhere you can stay.\n"
-        "  * A popup that can appear over any screen goes in `interrupts` with the bundle "
-        "that closes it. Nothing else may assume it will not appear.\n"
-        "  * `timeout_ms` on an edge is sized from the screenshots the way `wait_until`'s "
-        "`ms` is: about twice what you observed, never a guess.\n"
-        "  * The graph's `recover` bundle is where a lost run restarts, normally `home` "
-        "followed by the buttons that get back. Without one, three failed homes end the "
-        "`goto` instead of retrying.\n"
-        "  * `save_golden` proves the anchors are still telling the screens apart: a shot "
-        "must locate as its own anchor and no other. Give the widest box you can -- the "
-        "part outside it is not checked -- and take the shot while that screen is up.\n"
     ),
 }
 
@@ -209,8 +210,7 @@ def _read_gold_script() -> str:
     """The worked example, read from the library rather than copied here.
 
     One example in one file, edited in one place -- `ccat_help` reads `CCAT.md`
-    the same way. It sits as a bundle under `ccat_library/`, which also makes it
-    readable from the app's own editor. A missing file is not fatal, since the
+    the same way. A missing file is not fatal, since the
     rules above stand on their own, so an empty string is the answer and the
     block is left out.
     """
@@ -226,9 +226,8 @@ def _read_gold_script() -> str:
 _example = _read_gold_script()
 if _example:
     RULES["example_script"] = (
-        "A whole script that follows every rule above: reuse through `run`, an anchor "
-        "after each action, each `log` on its anchor, and every `ms` sized from the "
-        "screenshots. Copy this shape:\n\n" + _example
+        "Worked examples that follow every rule above -- an anchor, an edge, and a task "
+        "that walks there first. Copy their shapes:\n\n" + _example
     )
 
 _CCAT_CHEATSHEET = (
@@ -254,10 +253,10 @@ _CCAT_CHEATSHEET = (
     "Statements that need a PNG (`tap`, `tap_offset`, `swipe`, `wait_until`) or a `.ccat` "
     "(`run`) fail when the file is missing; a `has(...)` whose template is missing is "
     "just false.\n"
-    "  * A graph is the screens of a game: `goto(\"<graph>:<anchor>\")` walks to one and "
-    "`at(\"<graph>:<anchor>\")` tests whether you are on one, for a branch. Its anchor "
-    "templates live in that bundle's graph.json, not in a script, so a graph is read and "
-    "written with `read_graph` / `update_graph` and never by hand.\n"
+    "  * A graph is the screens of a game: anchor bundles `<graph>.<id>` (golden.md and a "
+    "main.ccat that only judges) and edge bundles `<graph>.<a>-<b>`. "
+    "`goto(\"<graph>:<anchor>\")` walks to an anchor and `at(\"<graph>:<anchor>\")` tests "
+    "whether you are on one, for a branch. A `run` of an edge checks both its ends too.\n"
 )
 
 
@@ -272,8 +271,8 @@ SCRIPTER_PERSONA = (
 )
 
 SCRIPTER_RULE_NAMES = (
-    "script_workflow", "script_rules", "script_failure_workflow",
-    "graph_workflow", "graph_rules", "example_script",
+    "graph_workflow", "graph_rules",
+    "script_workflow", "script_rules", "script_failure_workflow", "example_script",
 )
 
 

@@ -5,14 +5,14 @@ struct app_config;
 }
 
 /**
- * @brief Draw the Graph page: pick a bundle that holds a `graph.json`, then
+ * @brief Draw the Graph page: pick a graph (a `<G>.entry` anchor bundle), then
  * draw its anchors and edges as a node graph.
  *
  * Read-only. The canvas pans, zooms, selects and drags nodes, but nothing it
  * does reaches the disk: a new link cannot be drawn and no node moves on the
- * next load. Double-clicking an edge's script name, or an interrupt line on a
- * popup node, opens that bundle in the script editor. A `graph.json` that will
- * not load is reported in place of the canvas.
+ * next load. Double-clicking an edge's script name, an anchor's kind line, or a
+ * popup's close line opens that bundle in the script editor. The graph's
+ * problems are listed above the canvas.
  *
  * @param[in] _cfg_view This frame's config view, read for `config_home`.
  */

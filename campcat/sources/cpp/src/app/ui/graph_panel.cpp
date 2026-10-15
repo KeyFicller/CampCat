@@ -55,7 +55,7 @@ constexpr float k_return_drop = 36.0F;
 constexpr float k_return_pitch = 28.0F;
 
 const ImU32 k_ink = IM_COL32(216, 222, 229, 255);
-/// A template the graph declares but the bundle does not have.
+/// A line reporting something the anchor lacks.
 const ImU32 k_bad = IM_COL32(224, 106, 106, 255);
 
 /// The shell's accent and its amber, as ImGuizmo takes them (ImU32, not
@@ -68,8 +68,8 @@ const char *k_in_names[] = {"in"};
 const char *k_out_names[] = {"out"};
 
 /// The two node kinds. A stable anchor is an edge's endpoint, so it has one
-/// slot each way; a loading page and a popup are neither (load_graph rejects
-/// an edge that starts or ends on one), so they have none.
+/// slot each way; a loading page and a popup are neither (the graph check
+/// rejects an edge that starts or ends on one), so they have none.
 constexpr std::size_t k_page_template = 0;
 constexpr std::size_t k_loose_template = 1;
 const GraphEditor::Template k_templates[] = {
@@ -82,14 +82,13 @@ const GraphEditor::Template k_templates[] = {
 const ImVec4 k_err_col = ImVec4(0.95F, 0.42F, 0.42F, 1.0F);
 
 using campcat::ccat_lang::anchor_def;
-using campcat::ccat_lang::anchor_template;
+using campcat::ccat_lang::anchor_kind;
 using campcat::ccat_lang::graph_edge;
-using campcat::ccat_lang::graph_interrupt;
-using campcat::ccat_lang::loaded_graph;
+using campcat::ccat_lang::scanned_graph;
 using campcat::ccat_lang::screen_graph;
 
 /// One line under a node's title. `bad` paints it in the warning red. `preview`
-/// is set for a template row; `open_script` is set for an interrupt row.
+/// is set for a template row; `open_script` is set for a row naming a bundle.
 struct body_line {
     std::string text;
     bool bad = false;
@@ -131,32 +130,6 @@ struct preview_tex {
 };
 std::map<std::string, preview_tex> g_previews;
 
-/// Whether the graph lists this anchor as a popup rather than as a place on an
-/// edge.
-bool is_popup(const screen_graph &_graph, std::string_view _id) {
-    return std::any_of(_graph.interrupts.begin(), _graph.interrupts.end(),
-                       [&_id](const graph_interrupt &_i) {
-                           return _i.anchor == _id;
-                       });
-}
-
-/// How many golden shots an anchor has. A missing `golden/` directory is none,
-/// not an error: nothing creates it until the first shot is saved.
-int count_golden(const std::filesystem::path &_dir) {
-    std::error_code ec;
-    int count = 0;
-    if (!std::filesystem::is_directory(_dir, ec)) {
-        return count;
-    }
-    for (const std::filesystem::directory_entry &entry :
-         std::filesystem::directory_iterator(_dir, ec)) {
-        if (entry.is_regular_file(ec) && entry.path().extension() == ".png") {
-            ++count;
-        }
-    }
-    return count;
-}
-
 /// The bundle name without the graph's own name in front. `shuaitu.desktop-main`
 /// on the shuaitu graph reads `desktop-main`. A script that does not start
 /// with that prefix is shown whole. The bundle opened on double-click is
@@ -170,53 +143,36 @@ std::string_view edge_label(std::string_view _graph, std::string_view _script) {
     return _script;
 }
 
-/// One `must` (or `must_not`) list, a name per line: the first carries the
-/// label and the rest hang under it. A name per line rather than wrapped
-/// because the body font is 14px and one line holds about thirty characters,
-/// which a long template name and a comma-joined list together do not fit.
-void push_template_lines(std::vector<body_line> *_out,
-                         const std::string &_label,
-                         const std::vector<anchor_template> &_templates,
-                         const std::filesystem::path &_dir) {
-    const std::string pad(_label.size(), ' ');
-    for (std::size_t i = 0; i < _templates.size(); ++i) {
-        const anchor_template &t = _templates[i];
-        std::error_code ec;
-        const bool missing = !std::filesystem::is_regular_file(_dir / t.png, ec);
-        body_line line;
-        line.text = (i == 0 ? _label : pad) + t.png;
-        line.bad = missing;
-        line.preview = _dir / t.png;
-        _out->push_back(std::move(line));
-    }
-}
-
-/// What the node says about one anchor: how it is recognised, how it was
-/// checked, and what leads into it.
+/// What the node says about one anchor: its kind (double-click opens the
+/// anchor's script), a popup's close bundle, the first line of its description,
+/// and its templates, a name per line so each one previews on hover.
 std::vector<body_line> body_lines_for(const screen_graph &_graph,
                                       const anchor_def &_anchor,
-                                      const std::filesystem::path &_dir) {
+                                      const std::filesystem::path &_home) {
+    const std::string bundle = _graph.name + "." + _anchor.id;
     std::vector<body_line> out;
-    if (_anchor.id == _graph.root) {
-        out.push_back({"root", false});
+    body_line kind;
+    kind.text = _anchor.kind == anchor_kind::popup       ? "popup"
+                : _anchor.kind == anchor_kind::transient ? "transient"
+                                                         : "page";
+    kind.open_script = bundle;
+    out.push_back(std::move(kind));
+    if (_anchor.kind == anchor_kind::popup) {
+        body_line close;
+        close.text = "close: " + std::string(edge_label(_graph.name, _anchor.close));
+        close.open_script = _anchor.close;
+        out.push_back(std::move(close));
     }
-    if (_anchor.transient) {
-        out.push_back({"transient", false});
+    const std::string first =
+        _anchor.description.substr(0, _anchor.description.find('\n'));
+    out.push_back({first.empty() ? "(no description)" : first, first.empty()});
+    for (const std::string &png :
+         campcat::ccat_lang::bundle_templates(_home, bundle)) {
+        body_line line;
+        line.text = png;
+        line.preview = _home / bundle / png;
+        out.push_back(std::move(line));
     }
-    push_template_lines(&out, "must: ", _anchor.must, _dir);
-    push_template_lines(&out, "must_not: ", _anchor.must_not, _dir);
-    for (const graph_interrupt &interrupt : _graph.interrupts) {
-        if (interrupt.anchor == _anchor.id) {
-            body_line line;
-            line.text = "interrupt: " +
-                        std::string(edge_label(_graph.name, interrupt.script));
-            line.open_script = interrupt.script;
-            out.push_back(std::move(line));
-        }
-    }
-    out.push_back({"golden: " + std::to_string(
-                                  count_golden(_dir / "golden" / _anchor.id)),
-                   false});
     return out;
 }
 
@@ -246,9 +202,8 @@ float column_gap(const screen_graph &_graph) {
  */
 class graph_view_delegate final : public GraphEditor::Delegate {
 public:
-    /// Rebuild the canvas from a graph. A graph that failed to load comes back
-    /// empty, which empties the canvas.
-    void reset(const loaded_graph &_loaded);
+    /// Rebuild the canvas from a graph, whatever of it could be read.
+    void reset(const screen_graph &_graph, const std::filesystem::path &_home);
 
     bool AllowedLink(GraphEditor::NodeIndex, GraphEditor::NodeIndex) override {
         return false;
@@ -292,7 +247,7 @@ public:
     }
 
 private:
-    /// Column = hops from root, row = order among the anchors sharing a column.
+    /// Column = hops from entry, row = order among the anchors sharing a column.
     void place(std::string_view _root, float _gap_x);
     std::optional<GraphEditor::NodeIndex> node_of(std::string_view _id) const;
 
@@ -304,15 +259,16 @@ private:
     std::vector<std::vector<body_line>> m_body;
     /// Edge targets by node index, for the layout walk.
     std::vector<std::vector<GraphEditor::NodeIndex>> m_out;
-    /// Hops from the root, filled by `place`. -1 when nothing reaches it.
+    /// Hops from entry, filled by `place`. -1 when nothing reaches it.
     std::vector<int> m_rank;
-    /// True when `_i` is the edge of a pair that points back toward the root.
+    /// True when `_i` is the edge of a pair that points back toward entry.
     /// The other edge of the pair keeps the short curve.
     bool edge_returns(const screen_graph &_graph, std::size_t _i) const;
 };
 
-void graph_view_delegate::reset(const loaded_graph &_loaded) {
-    const screen_graph &graph = _loaded.graph;
+void graph_view_delegate::reset(const screen_graph &_graph,
+                                const std::filesystem::path &_home) {
+    const screen_graph &graph = _graph;
     m_nodes.clear();
     m_links.clear();
     m_names.clear();
@@ -326,15 +282,15 @@ void graph_view_delegate::reset(const loaded_graph &_loaded) {
     m_body.reserve(graph.anchors.size());
     for (const anchor_def &anchor : graph.anchors) {
         m_names.push_back(anchor.id);
-        m_body.push_back(body_lines_for(graph, anchor, graph.dir));
+        m_body.push_back(body_lines_for(graph, anchor, _home));
     }
     for (std::size_t i = 0; i < graph.anchors.size(); ++i) {
         const anchor_def &anchor = graph.anchors[i];
         GraphEditor::Node node;
         node.mName = m_names[i].c_str();
-        node.mTemplateIndex = (anchor.transient || is_popup(graph, anchor.id))
-                                  ? k_loose_template
-                                  : k_page_template;
+        node.mTemplateIndex = anchor.kind == anchor_kind::page
+                                  ? k_page_template
+                                  : k_loose_template;
         node.mRect = ImRect(ImVec2(0.0F, 0.0F), ImVec2(k_node_w, k_node_min_h));
         m_nodes.push_back(node);
     }
@@ -344,11 +300,11 @@ void graph_view_delegate::reset(const loaded_graph &_loaded) {
         const std::optional<GraphEditor::NodeIndex> from = node_of(edge.from);
         const std::optional<GraphEditor::NodeIndex> to = node_of(edge.to);
         if (!from.has_value() || !to.has_value()) {
-            continue; // load_graph already reported an edge naming no anchor
+            continue;
         }
         m_out[*from].push_back(*to);
     }
-    place(graph.root, column_gap(graph));
+    place("entry", column_gap(graph));
 
     int lane = 0;
     for (std::size_t i = 0; i < graph.edges.size(); ++i) {
@@ -528,19 +484,6 @@ const GraphEditor::Options &view_options() {
     return options;
 }
 
-/// The bundles under `_home` that hold a `graph.json`, sorted (the order
-/// `bundle_names` already gives).
-std::vector<std::string> graph_bundles(const std::filesystem::path &_home) {
-    std::vector<std::string> out;
-    for (const std::string &name : campcat::ccat_lang::bundle_names(_home)) {
-        std::error_code ec;
-        if (std::filesystem::is_regular_file(_home / name / "graph.json", ec)) {
-            out.push_back(name);
-        }
-    }
-    return out;
-}
-
 const preview_tex *preview_for(const std::filesystem::path &_path) {
     const std::string key = _path.string();
     std::error_code ec;
@@ -639,8 +582,7 @@ void apply_hits(const std::vector<hit_target> &_hits,
 }
 
 std::string g_selected;
-loaded_graph g_loaded;
-std::string g_recover;
+scanned_graph g_loaded;
 std::string g_error;
 /// Fit the view once, on the frame after a load: `Show` resets the flag itself,
 /// so it is spent the first time it is read.
@@ -732,21 +674,18 @@ void draw_edge_labels(ImDrawList *_dl, ImVec2 _origin, ImVec2 _canvas,
 
 /// Read `_name` and rebuild the canvas.
 ///
-/// Called only when the selection changes or the user asks for it: `load_graph`
-/// stats every template and parses every edge script, which is not something to
-/// repeat every frame.
+/// Called only when the selection changes or the user asks for it: `scan_graph`
+/// reads every anchor and parses every script, which is not something to
+/// repeat every frame. A graph with problems is still drawn, under the list of
+/// them, since one is built a screen at a time.
 void load_graph(const std::filesystem::path &_home, const std::string &_name) {
     clear_previews();
-    g_loaded = campcat::ccat_lang::load_graph(_home, _name);
-    // A failed load comes back with the graph cleared, so this leaves the
-    // canvas empty rather than showing the graph that was there before.
-    g_delegate.reset(g_loaded);
-    g_error = g_loaded.ok ? std::string() : g_loaded.error;
-    g_recover.clear();
-    if (!g_loaded.ok) {
-        return;
+    g_loaded = campcat::ccat_lang::scan_graph(_home, _name);
+    g_delegate.reset(g_loaded.graph, _home);
+    g_error.clear();
+    for (const std::string &problem : g_loaded.problems) {
+        g_error += (g_error.empty() ? "" : "\n") + problem;
     }
-    g_recover = g_loaded.graph.recover;
     g_need_fit = true;
     g_view = GraphEditor::ViewState{};
 }
@@ -756,7 +695,7 @@ void load_graph(const std::filesystem::path &_home, const std::string &_name) {
 void graph_panel_draw(const campcat::app_config &_cfg_view) {
     script_editor_draw_windows();
     const std::filesystem::path home = _cfg_view.config_home;
-    const std::vector<std::string> names = graph_bundles(home);
+    const std::vector<std::string> names = campcat::ccat_lang::graph_names(home);
     if (names.empty()) {
         ImGui::TextDisabled("No graph under %s", home.string().c_str());
         return;
@@ -768,10 +707,9 @@ void graph_panel_draw(const campcat::app_config &_cfg_view) {
     if (!g_selected.empty() &&
         std::find(names.begin(), names.end(), g_selected) == names.end()) {
         g_selected.clear();
-        g_loaded = loaded_graph{};
-        g_recover.clear();
+        g_loaded = scanned_graph{};
         g_error.clear();
-        g_delegate.reset(g_loaded);
+        g_delegate.reset(g_loaded.graph, home);
         clear_previews();
     }
 
@@ -810,11 +748,7 @@ void graph_panel_draw(const campcat::app_config &_cfg_view) {
     }
     if (!g_error.empty()) {
         ImGui::TextColored(k_err_col, "%s", g_error.c_str());
-        return;
     }
-    // `recover` is a bundle rather than a place, so it is not a node.
-    ImGui::TextDisabled("recover: %s",
-                        g_recover.empty() ? "(none)" : g_recover.c_str());
 
     GraphEditor::FitOnScreen fit =
         g_need_fit ? GraphEditor::Fit_AllNodes : GraphEditor::Fit_None;

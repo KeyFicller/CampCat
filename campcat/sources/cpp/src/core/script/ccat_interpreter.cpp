@@ -99,6 +99,10 @@ bool CcatInterpreter::capture_screen(
     if (_should_stop()) {
         return false;
     }
+    if (m_frame != nullptr) {
+        *_out = m_frame->clone();
+        return true;
+    }
     if (!m_adb->screencap_bgr(_out)) {
         return false;
     }
@@ -577,6 +581,36 @@ DebugStmt::exec(CcatInterpreter &_interp,
 stmt_exec_outcome
 RunStmt::exec(CcatInterpreter &_interp,
               const std::function<bool()> &_should_stop) const {
+    const std::filesystem::path abs =
+        resolve_script_path_from(_interp.m_images_base, script_rel);
+    std::error_code ec;
+    const std::filesystem::path home =
+        std::filesystem::weakly_canonical(_interp.m_cfg->config_home, ec);
+    if (!ec && abs.filename() == "main.ccat" &&
+        abs.parent_path().parent_path() == home) {
+        const std::string bundle = abs.parent_path().filename().string();
+        const bundle_tag tag = bundle_tags(home, bundle);
+        if (!tag.edge_of.empty()) {
+            std::string err;
+            const screen_graph *graph = _interp.cached_graph(tag.edge_of, &err);
+            if (graph == nullptr) {
+                return stmt_exec_outcome::make_error("run " + bundle + ": " +
+                                                     err);
+            }
+            const auto edge = std::find_if(
+                graph->edges.begin(), graph->edges.end(),
+                [&](const graph_edge &_e) { return _e.script == bundle; });
+            const nav_result got =
+                run_edge(*graph, *edge, _interp.graph_io(tag.edge_of, _should_stop));
+            if (got.stopped) {
+                return stmt_exec_outcome::make_stopped();
+            }
+            if (!got.ok) {
+                return stmt_exec_outcome::make_error(got.message, got.device);
+            }
+            return stmt_exec_outcome::make_ok();
+        }
+    }
     bool value = true;
     stmt_exec_outcome o = outcome_from_opt(
         _interp.run_script_impl(script_rel, _should_stop, &value));
@@ -829,10 +863,11 @@ CcatInterpreter::run_graph_bundle(const std::string &_bundle,
     bool value = true;
     // Held for the whole callee, including anything it `run()`s, so none of
     // them can start a second navigation.
+    const bool was_in_graph = m_in_graph_script;
     m_in_graph_script = true;
     const std::optional<action_failure> err =
         run_script_impl(main.string(), _should_stop, &value);
-    m_in_graph_script = false;
+    m_in_graph_script = was_in_graph;
     if (err) {
         if (err->message == "stopped") {
             ran.stopped = true;
@@ -847,6 +882,71 @@ CcatInterpreter::run_graph_bundle(const std::string &_bundle,
         ran.message = "returned false";
     }
     return ran;
+}
+
+anchor_check
+CcatInterpreter::check_anchor(const std::string &_bundle, const cv::Mat &_frame,
+                              const std::function<bool()> &_should_stop) {
+    struct restore {
+        CcatInterpreter &interp;
+        const cv::Mat *frame;
+        bool in_graph;
+        ~restore() {
+            interp.m_frame = frame;
+            interp.m_in_graph_script = in_graph;
+        }
+    } guard{*this, m_frame, m_in_graph_script};
+    if (!safe_leaf_name(_bundle)) {
+        return {false, "\"" + _bundle + "\" is not a bundle name"};
+    }
+    m_frame = &_frame;
+    m_in_graph_script = true;
+    const std::filesystem::path main = std::filesystem::path(m_cfg->config_home) /
+                                       _bundle / "main.ccat";
+    bool value = true;
+    const std::optional<action_failure> err =
+        run_script_impl(main.string(), _should_stop, &value);
+    if (err) {
+        return {false, err->message};
+    }
+    return {value, {}};
+}
+
+nav_io CcatInterpreter::graph_io(const std::string &_graph,
+                                 const std::function<bool()> &_should_stop) {
+    nav_io io;
+    io.capture = [this, _should_stop](cv::Mat *_out) {
+        return capture_screen(_out, _should_stop);
+    };
+    io.should_stop = _should_stop;
+    io.check = [this, _graph, _should_stop](const anchor_def &_a,
+                                            const cv::Mat &_frame) {
+        return check_anchor(_graph + "." + _a.id, _frame, _should_stop);
+    };
+    io.log = [](const std::string &_line) {
+        automation_log::emit(std::string(automation_log::k_script_log_tag) +
+                             _line);
+    };
+    io.run_bundle = [this, _should_stop](const std::string &_bundle) {
+        return run_graph_bundle(_bundle, _should_stop);
+    };
+    return io;
+}
+
+locate_hit
+CcatInterpreter::locate_frame(const std::string &_graph, const cv::Mat &_frame,
+                              const std::function<bool()> &_should_stop,
+                              std::string *_err) {
+    const scanned_graph scanned =
+        scan_graph(std::filesystem::path(m_cfg->config_home), _graph);
+    if (!scanned.exists) {
+        locate_hit hit;
+        hit.kind = locate_kind::error;
+        *_err = "graph \"" + _graph + "\" does not exist";
+        hit.detail = *_err;
+        return hit;
+    }
+    return locate(scanned.graph, graph_io(_graph, _should_stop).check, _frame);
 }
 
 stmt_exec_outcome
@@ -866,20 +966,8 @@ GotoStmt::exec(CcatInterpreter &_interp,
     if (graph == nullptr) {
         return stmt_exec_outcome::make_error(err);
     }
-    nav_io io;
-    io.capture = [&](cv::Mat *_out) {
-        return _interp.capture_screen(_out, _should_stop);
-    };
-    io.should_stop = _should_stop;
-    io.log = [](const std::string &_line) {
-        automation_log::emit(std::string(automation_log::k_script_log_tag) +
-                             _line);
-    };
-    io.run_bundle = [&](const std::string &_bundle) {
-        return _interp.run_graph_bundle(_bundle, _should_stop);
-    };
     const nav_result got =
-        navigate(*graph, anchor, _interp.m_matcher, io);
+        navigate(*graph, anchor, _interp.graph_io(graph_name, _should_stop));
     if (got.stopped) {
         return stmt_exec_outcome::make_stopped();
     }
@@ -911,7 +999,8 @@ AtStmt::exec(CcatInterpreter &_interp,
         return stmt_exec_outcome::make_error("at: screencap failed",
                                              /*_device=*/true);
     }
-    const locate_hit hit = locate(*graph, _interp.m_matcher, frame);
+    const locate_hit hit =
+        locate(*graph, _interp.graph_io(graph_name, _should_stop).check, frame);
     if (hit.kind == locate_kind::error || hit.kind == locate_kind::ambiguous) {
         return stmt_exec_outcome::make_error("at " + target + " " + hit.detail);
     }

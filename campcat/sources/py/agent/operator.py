@@ -19,8 +19,9 @@ AUTHOR_SCRIPT = {
         "name": "author_script",
         "description": (
             "Hand the job of writing, fixing or managing a .ccat bundle to the "
-            "script agent. It reads and writes bundles, cuts templates, runs the "
-            "script to verify, and reports back. Put every constraint the user "
+            "script agent, including adding screens and moves to a game's graph. "
+            "It reads and writes bundles, cuts templates, runs the script to "
+            "verify, and reports back. Put every constraint the user "
             "stated into `goal` verbatim: the script agent sees nothing else of "
             "this conversation."
         ),
@@ -69,7 +70,11 @@ OPERATOR_PERSONA = (
     "job, run it with `run(\"<name>/main.ccat\")` instead of doing its steps. "
     "An `@name` is that skill -- run it, do not search. Writing, changing or "
     "fixing a bundle is `author_script`: put every constraint the user stated "
-    "into `goal` verbatim. Screenshot first (you cannot see the screen "
+    "into `goal` verbatim. A game tagged `[graph <graph>, ...]` has a map of "
+    "its screens: to reach one of its anchors, `run_script` with "
+    "`goto(\"<graph>:<anchor>\")`; to reach a screen it does not have, "
+    "`author_script` with a goal that says from which screen to which. "
+    "Screenshot first (you cannot see the screen "
     "otherwise) and look at the result before the next step. A down emulator "
     "makes the screenshot fail and say so. `start_emulator` boots it and "
     "blocks until the instance is up, so call it alone: a screenshot in the "

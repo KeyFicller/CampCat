@@ -6,7 +6,7 @@
 #include "core/automation_log.h"
 #include "core/box_snap.h"
 #include "core/script/ccat_bundle.h" // bundle_main / bundle_names / ...
-#include "core/script/ccat_graph.h"  // graph.json: load / summary / templates
+#include "core/script/ccat_graph.h"  // screen graph: scan / summary / tags
 #include "core/script/ccat_parser.h" // parse_program / parse_error
 
 // Private: <meta> and the consteval cost stay out of include/.
@@ -267,16 +267,10 @@ std::string joined(const std::vector<std::string> &_items, const char *_none) {
     return out.empty() ? _none : out;
 }
 
-/// The bundles that hold a graph, for an error message that offers the model
+/// The graphs in the library, for an error message that offers the model
 /// somewhere else to look: "none yet" when the library has no graph at all.
 std::string existing_graphs() {
-    std::vector<std::string> names;
-    for (const std::string &name : ccat_lang::bundle_names(g_ctx.script_dir)) {
-        if (ccat_lang::bundle_tags(g_ctx.script_dir, name).graph) {
-            names.push_back(name);
-        }
-    }
-    return joined(names, "none yet");
+    return joined(ccat_lang::graph_names(g_ctx.script_dir), "none yet");
 }
 
 /// `"ok"` -> `"ok.png"`; unchanged when it already ends in `.png`.
@@ -362,7 +356,8 @@ cv::Mat check_template_target(const std::string &_bundle,
                               const std::string &_name,
                               const llm::region &_region,
                               const std::optional<int> &_shot,
-                              std::string *_file, std::string *_frame_png) {
+                              std::string *_file, std::string *_frame_png,
+                              bool _require_bundle = true) {
     if (!ccat_lang::safe_leaf_name(_bundle)) {
         throw js::bind_error("bundle \"" + _bundle +
                              "\" is not a plain file name");
@@ -371,7 +366,8 @@ cv::Mat check_template_target(const std::string &_bundle,
         throw js::bind_error("name \"" + _name + "\" is not a plain file name");
     }
     std::error_code ec;
-    if (!std::filesystem::is_regular_file(
+    if (_require_bundle &&
+        !std::filesystem::is_regular_file(
             ccat_lang::bundle_main(g_ctx.script_dir, _bundle), ec)) {
         throw js::bind_error(
             "unknown script bundle \"" + _bundle +
@@ -561,40 +557,46 @@ struct pending_cut {
 /// when they stand as a condition -- `if (tap("x.png"))` really runs, so its
 /// template has to be in the bundle.
 ///
-/// Deliberately not `has(...)`: "that template is not here" is the `false` a
-/// `has` exists to report, not a failure, so a typo in it is the author's to
-/// find in the else branch. Not `run()`'s target either, which is another .ccat
-/// resolved at run time.
+/// Not `has(...)` unless `_with_has`: "that template is not here" is the
+/// `false` a `has` exists to report, not a failure, so a typo in it is the
+/// author's to find in the else branch. An anchor is the exception -- a `has`
+/// it can never match makes the anchor never recognise its screen. Not
+/// `run()`'s target either, which is another .ccat resolved at run time.
 ///
 /// ponytail: a statement type carrying a template must be added here; the
 /// language only grows in the parser, so nothing can appear unseen.
 void collect_required_templates(const ccat_lang::Stmt &_s,
-                                std::vector<std::string> *_out) {
+                                std::vector<std::string> *_out,
+                                bool _with_has = false) {
     using namespace ccat_lang;
     if (const auto *b = dynamic_cast<const BlockStmt *>(&_s)) {
         for (const auto &child : b->body) {
-            collect_required_templates(*child, _out);
+            collect_required_templates(*child, _out, _with_has);
         }
     } else if (const auto *i = dynamic_cast<const IfStmt *>(&_s)) {
         if (i->action) {
-            collect_required_templates(*i->action, _out);
+            collect_required_templates(*i->action, _out, _with_has);
         }
         if (i->then_branch) {
-            collect_required_templates(*i->then_branch, _out);
+            collect_required_templates(*i->then_branch, _out, _with_has);
         }
         if (i->else_branch) {
-            collect_required_templates(*i->else_branch, _out);
+            collect_required_templates(*i->else_branch, _out, _with_has);
         }
     } else if (const auto *d = dynamic_cast<const DoWhileStmt *>(&_s)) {
         if (d->condition_action) {
-            collect_required_templates(*d->condition_action, _out);
+            collect_required_templates(*d->condition_action, _out, _with_has);
         }
         if (d->body) {
-            collect_required_templates(*d->body, _out);
+            collect_required_templates(*d->body, _out, _with_has);
         }
     } else if (const auto *l = dynamic_cast<const LoopStmt *>(&_s)) {
         if (l->body) {
-            collect_required_templates(*l->body, _out);
+            collect_required_templates(*l->body, _out, _with_has);
+        }
+    } else if (const auto *h = dynamic_cast<const HasStmt *>(&_s)) {
+        if (_with_has) {
+            _out->push_back(h->image_path);
         }
     } else if (const auto *t = dynamic_cast<const TapStmt *>(&_s)) {
         _out->push_back(t->image_path);
@@ -1153,6 +1155,22 @@ CPP_REFLECT_TOOL(start_emulator)
 }
 CPP_REFLECT_TOOL(run_script)
 
+/// What the graph `_graph` looks like after a write into it, for the reply:
+/// a broken graph is refused by `goto`, so the author hears about it now.
+std::string graph_check(const std::string &_graph) {
+    const ccat_lang::scanned_graph scanned =
+        ccat_lang::scan_graph(g_ctx.script_dir, _graph);
+    if (scanned.problems.empty()) {
+        return "graph " + _graph + ": no problems";
+    }
+    std::string text = "graph " + _graph + " problems (goto refuses it until "
+                                           "they are fixed):";
+    for (const std::string &p : scanned.problems) {
+        text += "\n  - " + p;
+    }
+    return text;
+}
+
 [[= js::doc{
     .text = js::str(
         "Saves a .ccat script as a reusable bundle under the LLM script root: "
@@ -1202,13 +1220,16 @@ CPP_REFLECT_TOOL(run_script)
                              g_ctx.script_dir.string() +
                              " exist and allow writes?)");
     }
+    const ccat_lang::bundle_tag tag =
+        ccat_lang::bundle_tags(g_ctx.script_dir, name);
     return "saved \"" + name + "/main.ccat\" (" +
            std::to_string(prog->stmts.size()) + " statements, " +
            std::to_string(source.size()) +
            " chars); put its templates in the same bundle with save_template_box, "
            "and "
            "run it from a script with run(\"" +
-           name + "/main.ccat\")";
+           name + "/main.ccat\")" +
+           (tag.edge_of.empty() ? "" : "\n" + graph_check(tag.edge_of));
 }
 CPP_REFLECT_TOOL(save_script)
 
@@ -1393,14 +1414,21 @@ CPP_REFLECT_TOOL(ccat_help)
         if (!out.empty()) {
             out += "\n";
         }
-        // A graph and an edge are not skills to run on their own: the tag says
+        // Anchors and edges are not skills to run on their own: the tag says
         // so, and it is where the model learns a graph exists at all.
         const ccat_lang::bundle_tag tag =
             ccat_lang::bundle_tags(g_ctx.script_dir, name);
         std::string suffix;
-        if (tag.graph) {
-            suffix = " [graph, " + std::to_string(tag.anchors) + " anchors, " +
+        if (tag.anchors > 0) {
+            suffix = " [graph " + tag.anchor_of + ", " +
+                     std::to_string(tag.anchors) + " anchors, " +
                      std::to_string(tag.edges) + " edges]";
+        } else if (!tag.anchor_of.empty()) {
+            const char *kind = tag.kind == ccat_lang::anchor_kind::popup ? "popup"
+                               : tag.kind == ccat_lang::anchor_kind::transient
+                                   ? "transient"
+                                   : "page";
+            suffix = " [anchor of " + tag.anchor_of + ", " + kind + "]";
         } else if (!tag.edge_of.empty()) {
             suffix = " [edge of " + tag.edge_of + "]";
         }
@@ -1450,11 +1478,6 @@ CPP_REFLECT_TOOL(list_scripts)
 }
 CPP_REFLECT_TOOL(read_script)
 
-/// `<script_dir>/<name>/graph.json`, whether or not it exists.
-std::filesystem::path graph_json_path(const std::string &_name) {
-    return g_ctx.script_dir / _name / "graph.json";
-}
-
 /// The bundle `_name` must be, in the words a wrong name always gets.
 void require_bundle(const std::string &_name) {
     if (!ccat_lang::safe_leaf_name(_name)) {
@@ -1468,31 +1491,6 @@ void require_bundle(const std::string &_name) {
                              "\"; save_script creates one (existing: " +
                              existing_bundles() + ")");
     }
-}
-
-/// The `graph.json` it must have, and where else to look when it has none.
-void require_graph_json(const std::string &_name) {
-    std::error_code ec;
-    if (!std::filesystem::is_regular_file(graph_json_path(_name), ec)) {
-        throw js::bind_error("\"" + _name +
-                             "\" has no graph.json; write one with "
-                             "update_graph, or read a graph that exists (" +
-                             existing_graphs() + ")");
-    }
-}
-
-/// A graph bundle that also loads: what `save_golden` needs before it can write
-/// anything into it.
-ccat_lang::loaded_graph require_graph(const std::string &_name) {
-    require_bundle(_name);
-    require_graph_json(_name);
-    const ccat_lang::loaded_graph loaded =
-        ccat_lang::load_graph(g_ctx.script_dir, _name);
-    if (!loaded.ok) {
-        throw js::bind_error("graph.json in \"" + _name +
-                             "\" does not load: " + loaded.error);
-    }
-    return loaded;
 }
 
 /// One entry of the template set an update declares: a name, either a shape to
@@ -1513,46 +1511,27 @@ struct template_cut {
                         "there is no cut.")}]] std::optional<int> shot;
 };
 
-[[= js::doc{
-    .text = js::str(
-        "Replaces an existing bundle's main.ccat and its whole template set in "
-        "one step, under one approval. Declare every template the updated "
-        "script should have afterwards: an entry with a cut is re-cut from "
-        "that "
-        "screenshot, an entry with just a name keeps the PNG already there, "
-        "and "
-        "PNGs you do not declare are deleted -- except the ones the bundle's "
-        "graph.json declares as anchors, which the graph keeps. Prefer this "
-        "over saving a new "
-        "name when changing a skill you already have; save_script is for a new "
-        "one, and save_template_box for adjusting a single template while you work "
-        "out its box.")}]]
-    [[= js::param_docs(
-        js::str("Bundle to update; it must already exist (see list_scripts)."),
-        js::str("The new main.ccat source, replacing the old one."),
-        js::str(
-            "Every template the bundle should have afterwards."))]] std::string
-        update_script(std::string name, std::string source,
-                      std::vector<template_cut> templates) {
-    if (!ccat_lang::safe_leaf_name(name)) {
-        throw js::bind_error("name \"" + name + "\" is not a plain file name");
-    }
-    std::error_code ec;
-    if (!std::filesystem::is_regular_file(
-            ccat_lang::bundle_main(g_ctx.script_dir, name), ec)) {
-        throw js::bind_error("unknown script bundle \"" + name +
-                             "\"; save_script creates a new one (existing: " +
-                             existing_bundles() + ")");
-    }
-    // Parsed first: a syntax error answers the model directly, rather than
-    // asking a human to read a script that cannot run.
-    const std::unique_ptr<ccat_lang::Program> prog = parse_or_throw(source);
+/// What a declared template set does to a bundle. Everything in it has been
+/// checked and cut, so a human is only ever asked about a set that can be
+/// written.
+struct template_plan {
+    std::vector<pending_cut> cuts;
+    std::vector<std::string> kept;
+    std::vector<std::string> to_delete;
+};
 
+/// Checks `_templates` as the whole template set `_bundle` will have once it
+/// runs `_prog`, and takes the crops. `_anchor` counts `has(...)` operands as
+/// required too; `_new_bundle` lets cuts go to a bundle not on disk yet.
+template_plan plan_templates(const std::string &_bundle,
+                             const ccat_lang::Program &_prog,
+                             const std::vector<template_cut> &_templates,
+                             bool _anchor, bool _new_bundle) {
     // The declared names, checked before anything is resolved against the disk,
     // so a duplicate is reported as a duplicate and not as whatever the first
     // entry happened to be missing.
     std::vector<std::string> declared;
-    for (const template_cut &entry : templates) {
+    for (const template_cut &entry : _templates) {
         const std::string file = with_png_ext(entry.name);
         if (!ccat_lang::safe_leaf_name(file)) {
             throw js::bind_error("template name \"" + entry.name +
@@ -1569,12 +1548,11 @@ struct template_cut {
 
     // A template operand that fails the script has to be declared, or the
     // update would write a script the bundle cannot run. A condition's action
-    // is an operand for the same reason (`if (tap("x.png"))` really runs), but
-    // `has(...)` is not: its template missing is the `false` it exists to
-    // report. Neither is an absolute path, which is not a file in the bundle.
+    // is an operand for the same reason (`if (tap("x.png"))` really runs).
+    // Neither is an absolute path, which is not a file in the bundle.
     std::vector<std::string> operands;
-    for (const auto &stmt : prog->stmts) {
-        collect_required_templates(*stmt, &operands);
+    for (const auto &stmt : _prog.stmts) {
+        collect_required_templates(*stmt, &operands, _anchor);
     }
     std::vector<std::string> missing;
     for (const std::string &operand : operands) {
@@ -1599,57 +1577,162 @@ struct template_cut {
     // Now the disk work: cut what is to be cut, and confirm what is to be kept
     // is there. Every region is checked here, so a bad one costs nobody a look
     // at the bubble.
-    std::vector<pending_cut> cuts;
-    std::vector<std::string> kept;
-    for (const template_cut &entry : templates) {
+    template_plan plan;
+    std::error_code ec;
+    for (const template_cut &entry : _templates) {
         const std::string file = with_png_ext(entry.name);
         if (!entry.cut.has_value()) {
             if (!std::filesystem::is_regular_file(
-                    g_ctx.script_dir / name / file, ec)) {
+                    g_ctx.script_dir / _bundle / file, ec)) {
                 throw js::bind_error(
                     "template \"" + file +
                     "\" has no cut and is not in the bundle, so there is "
                     "nothing to keep");
             }
-            kept.push_back(file);
+            plan.kept.push_back(file);
             continue;
         }
         const llm::region region = to_region(*entry.cut);
         pending_cut cut;
         std::string checked;
-        const cv::Mat frame = check_template_target(
-            name, entry.name, region, entry.shot, &checked, &cut.frame_png);
+        const cv::Mat frame =
+            check_template_target(_bundle, entry.name, region, entry.shot,
+                                  &checked, &cut.frame_png, !_new_bundle);
         cut.file = checked;
         cut.shot = entry.shot.value_or(g_next_shot);
         cut.region = region;
         cut.crop = crop_region(frame, region);
         require_textured(cut.crop,
-                         "template \"" + name + "/" + cut.file + "\"");
-        cuts.push_back(std::move(cut));
+                         "template \"" + _bundle + "/" + cut.file + "\"");
+        plan.cuts.push_back(std::move(cut));
     }
 
     // Everything left in the bundle that is not declared goes, which is what
-    // makes the declared set the bundle's template set. A graph's own anchors
-    // are declared in its graph.json rather than in the script, so they count
-    // as declared too: without that, one update would delete the anchors.
-    std::string graph_err;
-    const auto graph_pngs =
-        ccat_lang::graph_template_names(graph_json_path(name), &graph_err);
-    if (!graph_pngs.has_value()) {
-        throw js::bind_error("cannot tell which templates \"" + name +
-                             "\"'s graph.json declares (" + graph_err +
-                             "), so an update would delete its anchors; fix "
-                             "graph.json first");
-    }
-    declared.insert(declared.end(), graph_pngs->begin(), graph_pngs->end());
-    std::vector<std::string> to_delete;
+    // makes the declared set the bundle's template set.
     for (const std::string &file :
-         ccat_lang::bundle_templates(g_ctx.script_dir, name)) {
+         ccat_lang::bundle_templates(g_ctx.script_dir, _bundle)) {
         if (std::find(declared.begin(), declared.end(), file) ==
             declared.end()) {
-            to_delete.push_back(file);
+            plan.to_delete.push_back(file);
         }
     }
+    return plan;
+}
+
+/// The template lines of an approval summary, and its picture.
+void describe_templates(const template_plan &_plan,
+                        llm::approval_request *_req) {
+    for (const pending_cut &cut : _plan.cuts) {
+        _req->summary += "cut \"" + cut.file + "\" from " +
+                         shot_phrase(cut.shot) + " at " +
+                         region_phrase(cut.region) + "\n";
+    }
+    _req->summary += "keep: " + joined(_plan.kept, "none") + "\n";
+    _req->summary += "delete: " + joined(_plan.to_delete, "none") + "\n\n";
+    // One picture fits in the bubble, so it is the frame the first cut comes
+    // from, with only the regions taken from that same frame drawn on it. Any
+    // cuts from other frames are named in the summary.
+    if (!_plan.cuts.empty()) {
+        _req->screen_png = _plan.cuts.front().frame_png;
+        for (const pending_cut &cut : _plan.cuts) {
+            if (cut.shot == _plan.cuts.front().shot) {
+                _req->highlight.push_back(cut.region);
+            }
+        }
+    }
+}
+
+void write_text(const std::string &_bundle, const std::string &_file,
+                const std::string &_text) {
+    std::ofstream out(g_ctx.script_dir / _bundle / _file,
+                      std::ios::binary | std::ios::trunc);
+    out.write(_text.data(), static_cast<std::streamsize>(_text.size()));
+    out.close();
+    if (!out) {
+        throw js::bind_error("could not write " + _bundle + "/" + _file);
+    }
+}
+
+/// Writes `_source` as `_bundle`'s main.ccat, then the templates it names,
+/// then deletes the leftovers.
+void write_bundle(const std::string &_bundle, const std::string &_source,
+                  const template_plan &_plan) {
+    std::error_code ec;
+    std::filesystem::create_directories(g_ctx.script_dir / _bundle, ec);
+    write_text(_bundle, "main.ccat", _source);
+    for (const pending_cut &cut : _plan.cuts) {
+        const std::filesystem::path path = g_ctx.script_dir / _bundle / cut.file;
+        try {
+            if (!cv::imwrite(path.string(), cut.crop)) {
+                throw js::bind_error("could not write " + _bundle + "/" +
+                                     cut.file);
+            }
+        } catch (const cv::Exception &e) {
+            throw js::bind_error("could not write " + _bundle + "/" +
+                                 cut.file + ": " + e.what());
+        }
+    }
+    for (const std::string &file : _plan.to_delete) {
+        std::filesystem::remove(g_ctx.script_dir / _bundle / file, ec);
+        if (ec) {
+            throw js::bind_error("could not delete " + _bundle + "/" + file +
+                                 ": " + ec.message());
+        }
+    }
+}
+
+void require_anchor_script(const ccat_lang::Program &_prog) {
+    const std::vector<std::string> problems =
+        ccat_lang::anchor_script_problems(_prog);
+    if (!problems.empty()) {
+        throw js::bind_error("not an anchor script: " + joined(problems, "") +
+                             "; an anchor only judges whether its screen is "
+                             "showing and returns true or false");
+    }
+}
+
+
+[[= js::doc{
+    .text = js::str(
+        "Replaces an existing bundle's main.ccat and its whole template set in "
+        "one step, under one approval. Declare every template the updated "
+        "script should have afterwards: an entry with a cut is re-cut from "
+        "that "
+        "screenshot, an entry with just a name keeps the PNG already there, "
+        "and "
+        "PNGs you do not declare are deleted. Prefer this "
+        "over saving a new "
+        "name when changing a skill you already have; save_script is for a new "
+        "one, and save_template_box for adjusting a single template while you work "
+        "out its box.")}]]
+    [[= js::param_docs(
+        js::str("Bundle to update; it must already exist (see list_scripts)."),
+        js::str("The new main.ccat source, replacing the old one."),
+        js::str(
+            "Every template the bundle should have afterwards."))]] std::string
+        update_script(std::string name, std::string source,
+                      std::vector<template_cut> templates) {
+    if (!ccat_lang::safe_leaf_name(name)) {
+        throw js::bind_error("name \"" + name + "\" is not a plain file name");
+    }
+    std::error_code ec;
+    if (!std::filesystem::is_regular_file(
+            ccat_lang::bundle_main(g_ctx.script_dir, name), ec)) {
+        throw js::bind_error("unknown script bundle \"" + name +
+                             "\"; save_script creates a new one (existing: " +
+                             existing_bundles() + ")");
+    }
+    // Parsed first: a syntax error answers the model directly, rather than
+    // asking a human to read a script that cannot run.
+    const std::unique_ptr<ccat_lang::Program> prog = parse_or_throw(source);
+    const ccat_lang::bundle_tag tag =
+        ccat_lang::bundle_tags(g_ctx.script_dir, name);
+    const bool anchor = !tag.anchor_of.empty();
+    if (anchor) {
+        require_anchor_script(*prog);
+    }
+    const template_plan plan =
+        plan_templates(name, *prog, templates, anchor, false);
 
     if (needs_approval("update_script")) {
         if (!g_ctx.request_approval) {
@@ -1661,28 +1744,8 @@ struct template_cut {
         req.summary = "Update script \"" + name +
                       "\" (replace main.ccat and its "
                       "templates)\n\n";
-        for (const pending_cut &cut : cuts) {
-            req.summary += "cut \"" + cut.file + "\" from " +
-                           shot_phrase(cut.shot) + " at " +
-                           region_phrase(cut.region) + "\n";
-        }
-        req.summary += "keep: " + joined(kept, "none") + "\n";
-        if (!graph_pngs->empty()) {
-            req.summary += "graph keeps: " + joined(*graph_pngs, "none") + "\n";
-        }
-        req.summary += "delete: " + joined(to_delete, "none") + "\n\n";
+        describe_templates(plan, &req);
         req.summary += source;
-        // One picture fits in the bubble, so it is the frame the first cut
-        // comes from, with only the regions taken from that same frame drawn on
-        // it. Any cuts from other frames are named in the summary above.
-        if (!cuts.empty()) {
-            req.screen_png = cuts.front().frame_png;
-            for (const pending_cut &cut : cuts) {
-                if (cut.shot == cuts.front().shot) {
-                    req.highlight.push_back(cut.region);
-                }
-            }
-        }
         const llm::approval_decision decision = g_ctx.request_approval(req);
         if (!decision.approved) {
             throw js::bind_error(decision.guidance.empty()
@@ -1692,278 +1755,147 @@ struct template_cut {
         }
     }
 
-    // Approved: the script first, then the templates it names, then the
-    // leftovers. Nothing above this point touched the disk, so a refusal leaves
+    // Approved. Nothing above this point touched the disk, so a refusal leaves
     // it byte-for-byte what it was.
-    const std::filesystem::path main_path =
-        ccat_lang::bundle_main(g_ctx.script_dir, name);
-    {
-        std::ofstream out(main_path, std::ios::binary | std::ios::trunc);
-        out.write(source.data(), static_cast<std::streamsize>(source.size()));
-        out.close();
-        if (!out) {
-            throw js::bind_error("could not write " + name + "/main.ccat");
-        }
+    write_bundle(name, source, plan);
+    std::string reply =
+        "updated \"" + name + "/main.ccat\" (" +
+        std::to_string(prog->stmts.size()) + " statements, " +
+        std::to_string(source.size()) +
+        " chars); templates: " + std::to_string(plan.cuts.size()) + " cut, " +
+        std::to_string(plan.kept.size()) + " kept, " +
+        std::to_string(plan.to_delete.size()) + " deleted; run it with run(\"" +
+        name + "/main.ccat\")";
+    if (!tag.edge_of.empty()) {
+        reply += "\n" + graph_check(tag.edge_of);
     }
-    for (const pending_cut &cut : cuts) {
-        const std::filesystem::path path = g_ctx.script_dir / name / cut.file;
-        try {
-            if (!cv::imwrite(path.string(), cut.crop)) {
-                throw js::bind_error("could not write " + name + "/" +
-                                     cut.file);
-            }
-        } catch (const cv::Exception &e) {
-            throw js::bind_error("could not write " + name + "/" + cut.file +
-                                 ": " + e.what());
-        }
-    }
-    for (const std::string &file : to_delete) {
-        std::filesystem::remove(g_ctx.script_dir / name / file, ec);
-        if (ec) {
-            throw js::bind_error("could not delete " + name + "/" + file +
-                                 ": " + ec.message());
-        }
-    }
-    return "updated \"" + name + "/main.ccat\" (" +
-           std::to_string(prog->stmts.size()) + " statements, " +
-           std::to_string(source.size()) +
-           " chars); templates: " + std::to_string(cuts.size()) + " cut, " +
-           std::to_string(kept.size()) + " kept, " +
-           std::to_string(to_delete.size()) + " deleted; run it with run(\"" +
-           name + "/main.ccat\")";
+    return reply;
 }
 CPP_REFLECT_TOOL(update_script)
 
-[[= js::quiet{.text = js::str("Read graph {name}")}]][[= js::doc{
+[[= js::quiet{.text = js::str("Save anchor {graph}.{anchor}")}]][[= js::doc{
     .text = js::str(
-        "Returns a graph's graph.json exactly as written, prefixed by a header: "
-        "what the graph holds, which of its templates are on disk, and how many "
-        "golden shots each anchor has. The JSON is what you pass back as "
-        "update_graph's graph_json, so edit it from what this returns rather "
-        "than from memory: change one anchor or one edge by editing that text "
-        "and submitting the whole thing. A graph.json that does not load comes "
-        "back the same way, with its problems listed in place of the header, so "
-        "a broken file can still be read and fixed.")}]]
+        "Saves one screen of a game's graph as anchor bundle <graph>.<anchor>: "
+        "golden.md (what the screen is), main.ccat (whether it is showing) and "
+        "the templates that script names, under one approval. The script may "
+        "only judge -- has, if/elif/else, log, return true/false -- because "
+        "every anchor runs on every locate. A new anchor is first checked "
+        "against the latest screenshot: when an existing anchor already "
+        "recognises it, nothing is saved and you are told which one, so reuse "
+        "it. Saving an existing anchor replaces all three, like "
+        "update_script. The first anchor of a graph must be \"entry\", the "
+        "screen every navigation can start from. Join two anchors with an "
+        "edge by save_script(\"<graph>.<from>-<to>\", ...).")}]]
     [[= js::param_docs(
-        js::str("Graph bundle name, as list_scripts showed it (a bundle with a "
-                "graph.json is marked [graph])."))]] std::string
-        read_graph(std::string name) {
-    require_bundle(name);
-    require_graph_json(name);
-    std::ifstream in(graph_json_path(name), std::ios::binary);
-    if (!in) {
-        throw js::bind_error("could not read " +
-                             graph_json_path(name).string());
+        js::str("Graph name, [a-z0-9_]+, e.g. the game: \"shuaitu\"."),
+        js::str("Anchor name, [a-z0-9_]+: the screen, e.g. \"main_city\"."),
+        js::str("golden.md: front matter between --- lines (kind: page | "
+                "transient | popup, default page; a popup needs close: <bundle "
+                "that closes it>), then one natural-language description of "
+                "the screen."),
+        js::str("main.ccat: judges the screen and returns true or false."),
+        js::str("Every template the anchor should have afterwards, as in "
+                "update_script."))]] std::string
+        save_anchor(std::string graph, std::string anchor, std::string golden,
+                    std::string source, std::vector<template_cut> templates) {
+    if (!ccat_lang::graph_part_name(graph) ||
+        !ccat_lang::graph_part_name(anchor)) {
+        throw js::bind_error("graph \"" + graph + "\" and anchor \"" + anchor +
+                             "\" must both be [a-z0-9_]+");
     }
-    const std::string text{std::istreambuf_iterator<char>(in),
-                           std::istreambuf_iterator<char>()};
-    const ccat_lang::loaded_graph loaded =
-        ccat_lang::load_graph(g_ctx.script_dir, name);
-    if (!loaded.ok) {
-        return "graph.json in \"" + name + "\" does not load:\n" +
-               loaded.error + "\n---\n" + text;
+    const std::string bundle = graph + "." + anchor;
+    std::string error;
+    if (!ccat_lang::parse_golden_md(golden, &error)) {
+        throw js::bind_error("golden.md: " + error);
     }
-    return ccat_lang::graph_summary(loaded) + "\n---\n" + text;
-}
-CPP_REFLECT_TOOL(read_graph)
-
-[[= js::quiet{.text = js::str("Update graph {name}")}]][[= js::doc{
-    .text = js::str(
-        "Writes a graph bundle's graph.json, replacing whatever was there, "
-        "under one approval. The whole file is checked before anything is "
-        "written: every anchor template must be a PNG in that bundle already "
-        "(save_template_box cuts one), every edge's script bundle must exist and "
-        "parse (save_script), root must name an anchor, and every anchor must be "
-        "reachable. A file that fails is not written at all and the whole list "
-        "of problems comes back, so fix them and submit again. This does not "
-        "touch main.ccat or any template.")}]]
-    [[= js::param_docs(
-        js::str("Graph bundle name; it must already exist (see save_script), and "
-                "its graph.json is replaced or created."),
-        js::str("The complete graph.json text, normally read_graph's text with "
-                "your edit in it."))]] std::string
-        update_graph(std::string name, std::string graph_json) {
-    if (!ccat_lang::safe_leaf_name(name)) {
-        throw js::bind_error("name \"" + name +
-                             "\" is not a plain file name");
-    }
+    const std::unique_ptr<ccat_lang::Program> prog = parse_or_throw(source);
+    require_anchor_script(*prog);
     std::error_code ec;
-    if (!std::filesystem::is_regular_file(
-            ccat_lang::bundle_main(g_ctx.script_dir, name), ec)) {
-        throw js::bind_error("unknown script bundle \"" + name +
-                             "\"; save_script creates a new one (existing: " +
-                             existing_bundles() + ")");
+    const bool is_new = !std::filesystem::is_regular_file(
+        g_ctx.script_dir / bundle / "golden.md", ec);
+    const template_plan plan =
+        plan_templates(bundle, *prog, templates, true, is_new);
+
+    // One screen, one anchor: a second anchor for it would make locate
+    // ambiguous there. Only a new one is checked -- an existing anchor
+    // recognising its own screen is the point.
+    if (is_new && ccat_lang::scan_graph(g_ctx.script_dir, graph).exists) {
+        if (g_ctx.cfg == nullptr) {
+            throw js::bind_error(
+                "no app config to run the existing anchors with");
+        }
+        cv::Mat frame;
+        if (!frame_mat(std::nullopt, &frame, &error)) {
+            throw js::bind_error("cannot check for a duplicate anchor: " +
+                                 error);
+        }
+        const ccat_lang::locate_hit hit =
+            locate_on_frame(&require_adb(), g_ctx.cfg, graph, frame, &error);
+        using ccat_lang::locate_kind;
+        if (hit.kind == locate_kind::page ||
+            hit.kind == locate_kind::transient ||
+            hit.kind == locate_kind::interrupt) {
+            throw js::bind_error("this screen is already anchor " + hit.id +
+                                 " of graph " + graph +
+                                 "; reuse it instead of saving " + anchor);
+        }
+        if (hit.kind != locate_kind::unknown) {
+            throw js::bind_error(
+                "cannot check for a duplicate anchor: " +
+                (hit.detail.empty() ? error : hit.detail));
+        }
     }
-    // Checked first, and against the disk the edges and templates live on: a
-    // submission refused here leaves graph.json byte for byte as it was.
-    const ccat_lang::loaded_graph checked =
-        ccat_lang::load_graph_text(g_ctx.script_dir, name, graph_json);
-    if (!checked.ok) {
-        throw js::bind_error("graph.json not written: " + checked.error);
-    }
-    if (needs_approval("update_graph")) {
+
+    if (needs_approval("save_anchor")) {
         if (!g_ctx.request_approval) {
             throw js::bind_error(
-                "no human available to approve updating the graph");
+                "no human available to approve saving the anchor");
         }
         llm::approval_request req;
-        req.tool = "update_graph";
-        req.summary = "Write \"" + name + "/graph.json\":\n\n" + graph_json;
+        req.tool = "save_anchor";
+        req.summary = std::string(is_new ? "Save new" : "Replace") +
+                      " anchor \"" + bundle + "\"\n\n";
+        describe_templates(plan, &req);
+        req.summary += "golden.md:\n" + golden + "\n\nmain.ccat:\n" + source;
         const llm::approval_decision decision = g_ctx.request_approval(req);
         if (!decision.approved) {
             throw js::bind_error(decision.guidance.empty()
-                                     ? "user rejected updating the graph"
-                                     : "user rejected updating the graph: " +
+                                     ? "user rejected saving the anchor"
+                                     : "user rejected saving the anchor: " +
                                            decision.guidance);
         }
     }
-    const std::filesystem::path path = graph_json_path(name);
-    std::filesystem::create_directories(path.parent_path(), ec);
-    std::ofstream out(path, std::ios::binary | std::ios::trunc);
-    out.write(graph_json.data(), static_cast<std::streamsize>(graph_json.size()));
-    out.close();
-    if (!out) {
-        throw js::bind_error("could not write " + name + "/graph.json");
-    }
-    return "updated \"" + name + "/graph.json\" (" +
-           std::to_string(checked.graph.anchors.size()) + " anchors, " +
-           std::to_string(checked.graph.edges.size()) + " edges, " +
-           std::to_string(checked.graph.interrupts.size()) +
-           " interrupts); root=" + checked.graph.root +
-           "; run it with run_script(\"goto(\\\"" + name + ":" +
-           checked.graph.root + "\\\")\")";
-}
-CPP_REFLECT_TOOL(update_graph)
 
-[[= js::quiet{.text = js::str("Save golden for {anchor}")}]][[= js::doc{
-    .text = js::str(
-        "Saves a golden shot for an anchor: a crop of one of your screenshots, "
-        "showing the screen that anchor is, which is later checked to locate as "
-        "that anchor and no other. Save one per anchor once the graph walks "
-        "around it, and cut the box as wide as you can -- the part you leave out "
-        "is a part a conflicting anchor could hide in, and a whole-screen box "
-        "leaves nothing out. The crop and a small sidecar saying where on the "
-        "screen it came from go in <graph>/golden/<anchor>/; an existing shot is "
-        "never overwritten, so saving the same number twice keeps both. While "
-        "human approval is on, the box is shown to the user and nothing is "
-        "written unless they approve it.")}]]
-    [[= js::param_docs(
-        js::str("Graph bundle name; it must already have a graph.json and the "
-                "anchor in it (see update_graph)."),
-        js::str("Anchor to save for, as graph.json spelled it."),
-        js::str("Which screenshot to cut from: the number its caption showed. "
-                "Omit for the most recent one."),
-        js::str("The box to cut, in that screenshot's pixels. The widest you "
-                "can make it."))]] std::string
-        save_golden(std::string name, std::string anchor,
-                    std::optional<int> shot, box box) {
-    const ccat_lang::loaded_graph loaded = require_graph(name);
-    if (!ccat_lang::safe_leaf_name(anchor) ||
-        anchor.find(':') != std::string::npos) {
-        throw js::bind_error("anchor \"" + anchor +
-                             "\" is not a plain name");
-    }
-    const auto declared = std::find_if(
-        loaded.graph.anchors.begin(), loaded.graph.anchors.end(),
-        [&](const ccat_lang::anchor_def &_a) { return _a.id == anchor; });
-    if (declared == loaded.graph.anchors.end()) {
-        std::vector<std::string> ids;
-        for (const ccat_lang::anchor_def &a : loaded.graph.anchors) {
-            ids.push_back(a.id);
-        }
-        throw js::bind_error(
-            "graph \"" + name + "\" has no anchor \"" + anchor + "\" (it has: " +
-            join_names(ids) + "); declare it with update_graph first");
-    }
-    std::string error;
-    const screen_state *frame = frame_for(shot, &error);
-    if (frame == nullptr) {
-        throw js::bind_error(error);
-    }
-    const cv::Mat buf(1, static_cast<int>(frame->png.size()), CV_8UC1,
-                      const_cast<char *>(frame->png.data()));
-    const cv::Mat img = cv::imdecode(buf, cv::IMREAD_COLOR);
-    if (img.empty()) {
-        // Only reachable if a stored PNG got corrupted, which no tool can do.
-        throw js::bind_error("the stored screenshot is not a decodable picture");
-    }
-    const llm::region region = to_region(box);
-    if (!region_on_screen(img.cols, img.rows, region, &error)) {
-        throw js::bind_error(error);
-    }
-    const llm::box px = region_bounds(region);
-    if (needs_approval("save_golden")) {
-        if (!g_ctx.request_approval) {
-            throw js::bind_error(
-                "no human available to approve saving the golden shot");
-        }
-        llm::approval_request req;
-        req.tool = "save_golden";
-        req.summary = "Save golden shot for anchor \"" + anchor + "\" in \"" +
-                      name + "\" from " + shot_phrase(shot) + " at " +
-                      region_phrase(region);
-        req.highlight.push_back(region);
-        req.screen_png = frame->png;
-        const llm::approval_decision decision = g_ctx.request_approval(req);
-        if (!decision.approved) {
-            throw js::bind_error(
-                decision.guidance.empty()
-                    ? "user rejected saving the golden shot"
-                    : "user rejected saving the golden shot: " +
-                          decision.guidance);
-        }
-    }
-    const std::filesystem::path dir =
-        g_ctx.script_dir / name / "golden" / anchor;
-    std::error_code ec;
-    std::filesystem::create_directories(dir, ec);
-    // Never over an existing shot: a bad one is worth deleting by hand rather
-    // than losing a screen that cannot be reached again today.
-    const std::string base = std::to_string(shot.value_or(g_next_shot));
-    std::string file = base + ".png";
-    for (int n = 2; std::filesystem::is_regular_file(dir / file, ec); ++n) {
-        file = base + "-" + std::to_string(n) + ".png";
-    }
-    ccat_lang::golden_meta meta;
-    meta.screen_w = img.cols;
-    meta.screen_h = img.rows;
-    meta.x = px.x;
-    meta.y = px.y;
-    meta.w = px.w;
-    meta.h = px.h;
-    try {
-        if (!cv::imwrite((dir / file).string(), crop_region(img, region))) {
-            throw js::bind_error("could not write " + anchor + "/" + file);
-        }
-    } catch (const cv::Exception &e) {
-        throw js::bind_error("could not write " + anchor + "/" + file + ": " +
-                             e.what());
-    }
-    std::filesystem::path meta_path = dir / file;
-    meta_path.replace_extension(".json");
-    {
-        const std::string text = ccat_lang::golden_meta_to_text(meta);
-        std::ofstream out(meta_path, std::ios::binary | std::ios::trunc);
-        out.write(text.data(), static_cast<std::streamsize>(text.size()));
-        out.close();
-        if (!out) {
-            throw js::bind_error("could not write " + anchor + "/" +
-                                 meta_path.filename().string());
-        }
-    }
-    int shots = 0;
-    for (const auto &entry : std::filesystem::directory_iterator(dir, ec)) {
-        if (entry.is_regular_file(ec) && entry.path().extension() == ".png") {
-            ++shots;
-        }
-    }
-    return "saved golden shot \"" + anchor + "/" + file + "\" (" +
-           std::to_string(shots) +
-           " for this anchor); a golden must locate as its own anchor -- two "
-           "anchors matching one screen is a graph bug, and an anchor whose "
-           "shots stop locating is one that moved";
+    write_bundle(bundle, source, plan);
+    write_text(bundle, "golden.md", golden);
+    return "saved anchor \"" + bundle + "\" (golden.md, main.ccat, " +
+           std::to_string(plan.cuts.size() + plan.kept.size()) +
+           " templates)\n" + graph_check(graph);
 }
-CPP_REFLECT_TOOL(save_golden)
+CPP_REFLECT_TOOL(save_anchor)
+
+[[= js::quiet{.text = js::str("Read graph {name}")}]][[= js::doc{
+    .text = js::str(
+        "Returns a screen graph as its bundles describe it: every anchor "
+        "(bundle <graph>.<anchor> with a golden.md) with its kind and the first "
+        "line of its description, every edge (bundle <graph>.<a>-<b>), and "
+        "every problem that would stop goto from using it. Read an anchor's or "
+        "an edge's script with read_script.")}]]
+    [[= js::param_docs(
+        js::str("Graph name, the part before the dot (list_scripts marks its "
+                "<graph>.entry bundle [graph ...])."))]] std::string
+        read_graph(std::string name) {
+    const ccat_lang::scanned_graph scanned =
+        ccat_lang::scan_graph(g_ctx.script_dir, name);
+    if (!scanned.exists) {
+        throw js::bind_error("no graph \"" + name + "\": it has no " + name +
+                             ".entry anchor; save_anchor creates one "
+                             "(existing graphs: " +
+                             existing_graphs() + ")");
+    }
+    return ccat_lang::graph_summary(scanned);
+}
+CPP_REFLECT_TOOL(read_graph)
 
 [[= js::doc{.text = js::str("Deletes a saved script bundle: its main.ccat and "
                             "every template in the "
@@ -2120,7 +2052,7 @@ bool approval_gate_required(const approval_config &_gates,
     if (_tool == "run_script") {
         return _gates.gates.run_script;
     }
-    if (_tool == "save_script") {
+    if (_tool == "save_script" || _tool == "save_anchor") {
         return _gates.gates.save_script;
     }
     if (_tool == "save_template") {
@@ -2128,15 +2060,6 @@ bool approval_gate_required(const approval_config &_gates,
     }
     if (_tool == "update_script") {
         return _gates.gates.update_script;
-    }
-    // A graph.json rewrite and a golden shot are the same acts as an update and
-    // a template cut, so they ride the same two flags rather than adding their
-    // own fields to every config file.
-    if (_tool == "update_graph") {
-        return _gates.gates.update_script;
-    }
-    if (_tool == "save_golden") {
-        return _gates.gates.save_template;
     }
     if (_tool == "delete_script") {
         return _gates.gates.delete_script;

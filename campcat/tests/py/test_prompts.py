@@ -8,6 +8,7 @@ def test_operator_prompt_drops_the_script_language():
     text = operator.operator_prompt()
     assert "author_script" in text
     assert "verbatim" in text
+    assert "goto(" in text
     assert "wait_until" not in text
     assert "read_script" not in text
 
@@ -17,9 +18,14 @@ def test_scripter_prompt_keeps_the_cheatsheet():
     assert "wait_until" in text
     assert "saved" in text
     # The graph half: the workflow that builds one, and the language it uses.
-    assert "update_graph" in text
-    assert "save_golden" in text
+    assert "save_anchor" in text
+    assert "golden.md" in text
     assert "goto(" in text
+    assert "update_graph" not in text
+    assert "save_golden" not in text
+    assert "graph.json" not in text
+    # Building the graph comes before scripting on it.
+    assert text.index("## graph_workflow") < text.index("## script_workflow")
 
 
 def test_prompt_override_covers_only_the_operator(monkeypatch):

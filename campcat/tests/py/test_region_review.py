@@ -255,14 +255,20 @@ def test_neighbourhood_is_clipped_at_the_frame_edge():
     assert region_review.neighbourhood((90, 70, 10, 10), (100, 80)) == (26, 6, 74, 74)
 
 
-def test_golden_review_sends_a_thumbnail(monkeypatch):
-    big = _png(1000, 800)
-    _, model, _ = _drive(monkeypatch, [
-        _call("save_golden", {"name": "g", "anchor": "a", "box": dict(BOX), "expect": "city"}),
+def test_save_anchor_reviews_each_template_cut(monkeypatch):
+    calls, model, _ = _drive(monkeypatch, [
+        _call("save_anchor", {
+            "graph": "g", "anchor": "a", "golden": "---\n---\ncity",
+            "source": "return false", "templates": [
+                {"name": "a.png", "cut": dict(BOX), "expect": "the city tab"},
+            ]}),
         _say("verdict: ok\nreason: fine"),
         _say("Done."),
-    ], None, name="save_golden", images={"mark": big})
-    assert _image_size(_reviews(model)[0].content[2]) == (400, 320)
+    ], None, name="save_anchor")
+    assert len(_reviews(model)) == 1
+    assert calls[-1] == ("save_anchor", {
+        "graph": "g", "anchor": "a", "golden": "---\n---\ncity",
+        "source": "return false", "templates": [{"name": "a.png", "cut": dict(BOX)}]})
 
 
 def test_template_review_uses_its_shot(monkeypatch):

@@ -52,8 +52,8 @@ if (has(claim)) { tap(claim) } else { log("no claim") }
 | `log("msg")` | one log line | nothing |
 | `home` | HOME + force-stop recents | adb failure |
 | `run("other.ccat")` | another script, relative to this file | unreadable; cyclic; deeper than 16; callee error |
-| `goto("g:a")` | walk graph `g` to anchor `a` | graph invalid; `a` is not a place to stay; still not there after replan and one recover; adb failure |
-| `at("g:a")` | condition only: one screenshot, true when that anchor matches | not a statement; an invalid graph is an error, not `false` |
+| `goto("g:a")` | walk graph `g` to anchor `a` | graph invalid; `a` is not a page; an anchor script fails or two match; three failed hops; adb failure |
+| `at("g:a")` | condition only: one screenshot, true when the screen locates as `a` | not a statement; an invalid graph, a failing anchor script or two matching anchors is an error, not `false` |
 
 **A named file that is missing fails the statement**, which is why `tap`, `tap_offset`, `swipe`, `wait_until` and
 `run` need their files to exist first. `has(...)` is the exception (below): a template that is not there is exactly
@@ -65,7 +65,8 @@ a failure is `false` instead of stopping the script. See **Conditions that ask t
 `update_script` checks exactly this list: every template a `tap`, `tap_offset`, `swipe` or `wait_until` names must be
 in the declared template set, and it refuses the update naming the ones that are not. A condition counts the same way
 -- `if (tap("x.png"))` really taps, so its template has to be declared -- but `has(...)` does not, because a template
-that is not there is the `false` it reports. `run()` targets are not checked; absolute paths are not bundle files, so
+that is not there is the `false` it reports. An anchor's (see **Graphs**) does count: a `has` it can never match
+means it never recognises its screen. `run()` targets are not checked; absolute paths are not bundle files, so
 they are not either.
 
 After a tap or swipe the script waits `max(tap_delay_ms, action_gap_ms)` (config, 1000 ms), so you rarely need `wait`
@@ -202,73 +203,107 @@ the swipe duration come from config; a script cannot change them.
 
 ## Graphs
 
-A graph is a bundle that holds `graph.json` next to `main.ccat`. Its name is the bundle
-name. Anchors are screens. Edges are other bundles that only perform the action between
-two anchors; `goto` checks the screen before and after, so the edge does not.
+A graph `G` is the screens of one game, kept as ordinary bundles. Names are `[a-z0-9_]+`.
 
-```json
-{
-  "root": "desktop",
-  "recover": "shuaitu.recover",
-  "anchors": {
-    "desktop": { "must": ["desktop_folder.png"] },
-    "main_city": { "must": ["recruit_button.png"] }
-  },
-  "edges": [
-    { "from": "desktop", "to": "main_city", "script": "shuaitu.desktop-main", "timeout_ms": 60000 }
-  ],
-  "interrupts": [
-    { "anchor": "notice", "script": "shuaitu.close-notice" }
-  ]
-}
+| Bundle | Is | Recognised by |
+|---|---|---|
+| `G.entry` | the start anchor | named `entry`, holds `golden.md` |
+| `G.<anchor>` | an anchor: one screen | holds `golden.md` |
+| `G.<a>-<b>` | the edge from `a` to `b` | both `a` and `b` are anchors of `G` |
+| `G.<other>` | a plain task or skill | none of the above |
+
+`G` is a graph when `G.entry/golden.md` exists. A bundle named `G.<a>-<b>` whose ends are both
+anchors is always an edge, so do not give a task that name. A bundle named just `G` is not
+needed; when there is one it is a plain bundle, for example the game's default task.
+
+### Anchors
+
+`golden.md` is front matter, then a description of the screen:
+
+```text
+---
+kind: page
+---
+Main city map: avatar and the task book top left, a row of resources along the top,
+five buttons along the bottom. Buildings, resource numbers and chat change.
 ```
 
-- `must` is the templates that all have to match. `must_not` is the ones that must not.
-  An entry is a file name, or `{"png", "roi"}` with `roi` normalized `[x, y, w, h]`.
-- `transient: true` is a loading screen. `goto` waits it out. It is not a destination.
-- An interrupt anchor is a popup. `goto` closes it before planning. It is not a destination.
-- `timeout_ms` is how long to wait for the edge's `to` after the edge script returns.
-  Default 20000, at most 600000. This is not the `wait_until` cap.
-- `recover` runs once, after three failed attempts, then `goto` tries again. No `recover`
-  means the third failure is the error.
-- Every stable anchor must be reachable from `root`. A bad `graph.json` names every
-  problem and does not run.
+- `kind` is `page` (the default, a screen you can stay on), `transient` (a loading or
+  transition screen: `goto` waits it out, it is never a destination) or `popup` (it can
+  cover any screen: `goto` closes it first).
+- A `popup` also needs `close: <bundle>`, the bundle that closes it.
+- The description says what is fixed on the screen and what changes. It is stored for
+  locating by meaning later; nothing reads it yet.
 
-`goto("g:a")` takes one screenshot, decides where it is, and runs the next edge on the
-shortest path. Landing on a different anchor replans without counting a failure. Three
-failures, then one recover. The error lists the hops. `if (goto("g:a"))` is false when
-it cannot get there; a dead device is still an error. `at("g:a")` is the same locate,
-as a condition, and does not walk.
+The anchor's `main.ccat` only judges whether its screen is showing:
 
-An edge, a popup script and the recover script must not call `goto`. That is
-`goto inside a graph script`.
+```ccat
+if (has("neizheng.png")) { return true }
+return false
+```
 
-Rules for a graph that stays reliable:
+It may use `defs`, `has`, `if` / `elif` / `else`, `return`, `log` and comments, and needs at least
+one `return` -- with none it would answer true on every screen. Every anchor runs on every
+locate, so actions, waits, `run`, `loop`, `do`, `goto` and `at` are refused. Its templates
+live in its own bundle.
 
-1. One edge, one bundle, named `<graph>.<from>-<to>`. Actions only. No "where am I".
+### Edges
+
+An edge's `main.ccat` performs the move from `a` to `b`. It may branch -- a cold start and a
+warm start take different paths -- but it never checks its own ends, because the engine
+does, and it must not call `goto` (`goto inside a graph script`). A move slower than 20 s
+waits for itself: `wait_until` on a template of `b`, or `loop` + `wait_until` for a long load.
+
+### Locating
+
+A locate takes one screenshot and runs every anchor script against that one frame:
+
+1. `popup` anchors first, in name order; the first that answers true is the result.
+2. Then every `page` and `transient` anchor. None true is unknown, one is the result, two
+   or more is an error naming them (`ambiguous: a; b`).
+3. An anchor script that fails is an error naming that anchor.
+
+### `goto`, `at` and `run` of an edge
+
+`goto("G:a")` locates, then:
+
+- a popup runs its `close` bundle and locates again (at most 10 popups);
+- loading or unknown waits, looking every 200 ms for up to 20 s;
+- the target is success.
+
+Otherwise it runs the first hop of the shortest path (fewest hops; ties go to the edge
+name), then looks every 200 ms for 20000 ms: the far end finishes the hop, a popup is
+closed, another page replans without counting a failure, and still on the start or
+unknown at the timeout is a failure. A failing edge script, a timeout and no path each
+count one failure; the third is the error, listing every hop. `if (goto("G:a"))` is false
+when it cannot get there; a dead device is still an error.
+
+`at("G:a")` is one locate, as a condition: true when the result is `a`. An invalid graph
+or an ambiguous locate is an error, not `false`.
+
+`run("G.a-b/main.ccat")` is one checked hop: it locates (closing popups), fails with
+`run G.a-b: not at a (at <x>)` without running anything when the screen is not `a`, runs the
+edge, then waits 20000 ms for `b`. A timeout or another page is a failure that names the
+last screen seen. It does not replan or retry. Inside `goto` the edge body runs without
+this second check.
+
+### Checks
+
+Every `goto` / `at` loads the graph and refuses an invalid one, naming every problem:
+`G.entry` exists and is a `page`; every `golden.md` parses, and a popup's `close` bundle
+parses; every anchor script parses and only judges; every `has` template is in its bundle;
+every edge joins two `page` anchors, parses and has no `goto`; every `page` anchor is
+reachable from `entry`. Saving an anchor or an edge reports the same list.
+
+### Rules for a graph that stays reliable
+
+1. One screen, one anchor. Two anchors true on one screen are told apart by a `has` on what
+   only one of them shows (`if (has("other.png")) { return false }`) -- never a lower threshold.
 2. An edge must be safe to run again. Spending or claiming goes in the task, after `goto`.
 3. Do not `tap_at` when a `tap` missed. Let it fail.
-4. Do not `loop` + `has` + `wait` for a screen. Wait with the edge's `timeout_ms`, and
-   mark a loading screen `transient`.
+4. In a task, do not `loop` + `has` + `wait` for a screen: `goto` it. Only an edge waits
+   for itself.
 5. A task is `goto` to the start, the action, then a result anchor (`wait_until` or `at`).
-6. Two anchors that match the same screenshot need a `must_not` or a `roi`.
-7. `run` the recover bundle, then `goto` each anchor, to recheck the whole graph.
-
-### Golden shots
-
-`<graph>/golden/<anchor>/<n>.png` plus `<n>.json` records a screen that anchor was seen
-on. The PNG is a crop, and the sidecar says where on the screen it was cut from:
-
-```json
-{ "screen_w": 2560, "screen_h": 1440, "x": 0, "y": 0, "w": 2560, "h": 1440 }
-```
-
-Checking it pastes the crop back at `(x, y)` on a frame of `screen_w x screen_h` and runs
-the same locate `goto` does. The crop must come out as its own anchor and no other: two
-anchors matching one screen is a graph that cannot navigate, which is what a golden shot
-is for. Everything outside the crop is a flat fill, so a crop smaller than the screen has
-a blind spot -- cut the whole screen when you can. A missing or unreadable sidecar, and a
-crop whose size disagrees with it, are reported too.
 
 ## `$Debug`
 

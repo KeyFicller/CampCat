@@ -131,9 +131,7 @@ void collect_run_targets(const Stmt &_s, std::vector<std::string> *_out) {
 /// say.
 struct bundle_scan {
     bool parsed = false;
-    std::vector<std::string> deps; ///< run() and graph.json, sorted
-    std::vector<std::string> run_deps;
-    std::vector<std::string> graph_deps;
+    std::vector<std::string> deps; ///< run() targets, sorted
     std::string why; ///< set when !parsed
 };
 
@@ -185,34 +183,6 @@ bundle_scan scan_bundle(const std::filesystem::path &_script_dir,
             out.deps.push_back(owner);
         }
     }
-    out.run_deps = out.deps;
-    std::sort(out.run_deps.begin(), out.run_deps.end());
-    out.run_deps.erase(
-        std::unique(out.run_deps.begin(), out.run_deps.end()),
-        out.run_deps.end());
-    out.deps = out.run_deps;
-
-    std::string graph_err;
-    const std::optional<std::vector<std::string>> scripts =
-        graph_script_names(_script_dir / _name / "graph.json", &graph_err);
-    if (!scripts) {
-        out.parsed = false;
-        out.why = "cannot check graph.json: " + graph_err;
-        return out;
-    }
-    for (const std::string &script : *scripts) {
-        if (script != _name &&
-            std::binary_search(_known.begin(), _known.end(), script)) {
-            out.graph_deps.push_back(script);
-        }
-    }
-    std::sort(out.graph_deps.begin(), out.graph_deps.end());
-    out.graph_deps.erase(
-        std::unique(out.graph_deps.begin(), out.graph_deps.end()),
-        out.graph_deps.end());
-
-    out.deps.insert(out.deps.end(), out.graph_deps.begin(),
-                    out.graph_deps.end());
     std::sort(out.deps.begin(), out.deps.end());
     out.deps.erase(std::unique(out.deps.begin(), out.deps.end()),
                    out.deps.end());
@@ -292,8 +262,19 @@ delete_status check_bundle_deletable(const std::filesystem::path &_script_dir,
                         (existing.empty() ? "none yet" : existing) + ")");
     }
 
-    const std::vector<std::string> known = bundle_names(_script_dir);
     std::vector<std::string> referrers;
+    const bundle_tag tag = bundle_tags(_script_dir, name);
+    if (!tag.anchor_of.empty()) {
+        const std::string id = name.substr(tag.anchor_of.size() + 1);
+        for (const graph_edge &e :
+             scan_graph(_script_dir, tag.anchor_of).graph.edges) {
+            if (e.from == id || e.to == id) {
+                referrers.push_back(e.script);
+            }
+        }
+    }
+
+    const std::vector<std::string> known = bundle_names(_script_dir);
     for (const std::string &other : known) {
         if (other == name) {
             continue;
@@ -309,6 +290,9 @@ delete_status check_bundle_deletable(const std::filesystem::path &_script_dir,
             referrers.push_back(other);
         }
     }
+    std::sort(referrers.begin(), referrers.end());
+    referrers.erase(std::unique(referrers.begin(), referrers.end()),
+                    referrers.end());
     if (!referrers.empty()) {
         const bool one = referrers.size() == 1;
         return fail(delete_status::referenced,
@@ -493,9 +477,6 @@ struct rename_plan {
     std::vector<std::string> edits;     ///< parallel to referrers
     std::vector<std::string>
         old_texts; ///< parallel to referrers, for the write guard
-    std::vector<std::string> graph_referrers;
-    std::vector<std::string> graph_edits;
-    std::vector<std::string> graph_olds;
 };
 
 rename_status plan_rename(const std::filesystem::path &_script_dir,
@@ -527,6 +508,20 @@ rename_status plan_rename(const std::filesystem::path &_script_dir,
                         (existing.empty() ? "none yet" : existing) + ")");
     }
 
+    // A graph's shape is its bundle names, so a rename would silently drop or
+    // add an anchor or an edge.
+    const bundle_tag from_tag = bundle_tags(_script_dir, _name);
+    if (!from_tag.anchor_of.empty() || !from_tag.edge_of.empty()) {
+        return fail(rename_status::bad_name,
+                    _name + " is part of graph " + from_tag.anchor_of +
+                        from_tag.edge_of +
+                        "; delete it and create the new one instead");
+    }
+    if (!bundle_tags(_script_dir, _new_name).edge_of.empty()) {
+        return fail(rename_status::bad_name,
+                    "\"" + _new_name + "\" would be read as a graph edge");
+    }
+
     // Compared by exact spelling rather than existence: on a case-insensitive
     // filesystem `exists` would call a case-only rename a collision, and a
     // directory of that exact name is occupied whether or not it holds a
@@ -552,13 +547,8 @@ rename_status plan_rename(const std::filesystem::path &_script_dir,
             return fail(rename_status::scan_failed,
                         "cannot find the scripts that use it: " + scan.why);
         }
-        if (std::binary_search(scan.run_deps.begin(), scan.run_deps.end(),
-                               _name)) {
+        if (std::binary_search(scan.deps.begin(), scan.deps.end(), _name)) {
             referrers.push_back(other);
-        }
-        if (std::binary_search(scan.graph_deps.begin(), scan.graph_deps.end(),
-                               _name)) {
-            _out->graph_referrers.push_back(other);
         }
     }
 
@@ -595,29 +585,6 @@ rename_status plan_rename(const std::filesystem::path &_script_dir,
         _out->old_texts.push_back(std::move(text));
         _out->edits.push_back(*rewritten);
     }
-
-    for (const std::string &referrer : _out->graph_referrers) {
-        const std::filesystem::path path =
-            _script_dir / referrer / "graph.json";
-        std::ifstream in(path, std::ios::binary);
-        if (!in) {
-            return fail(rename_status::rewrite_failed,
-                        "cannot rewrite " + path.string() +
-                            ": could not read it");
-        }
-        const std::string text{std::istreambuf_iterator<char>(in),
-                               std::istreambuf_iterator<char>()};
-        std::string why;
-        const std::optional<std::string> rewritten =
-            rewrite_graph_scripts(text, _name, _new_name, &why);
-        if (!rewritten) {
-            return fail(rename_status::rewrite_failed,
-                        "cannot rewrite " + path.string() + ": " +
-                            (why.empty() ? "it does not name the bundle" : why));
-        }
-        _out->graph_olds.push_back(text);
-        _out->graph_edits.push_back(*rewritten);
-    }
     return rename_status::ok;
 }
 
@@ -633,11 +600,6 @@ rename_status check_bundle_renamable(const std::filesystem::path &_script_dir,
         _script_dir, std::string(_name), std::string(_new_name), &plan, _err);
     if (status == rename_status::ok && _referrers != nullptr) {
         *_referrers = plan.referrers;
-        _referrers->insert(_referrers->end(), plan.graph_referrers.begin(),
-                           plan.graph_referrers.end());
-        std::sort(_referrers->begin(), _referrers->end());
-        _referrers->erase(std::unique(_referrers->begin(), _referrers->end()),
-                          _referrers->end());
     }
     return status;
 }
@@ -673,24 +635,6 @@ rename_status rename_bundle(const std::filesystem::path &_script_dir,
             stale.push_back(plan.referrers[i] + " (" + err + ")");
         }
     }
-    for (std::size_t i = 0; i < plan.graph_referrers.size(); ++i) {
-        const std::filesystem::path path =
-            _script_dir / plan.graph_referrers[i] / "graph.json";
-        std::ifstream in(path, std::ios::binary);
-        const std::string disk{std::istreambuf_iterator<char>(in),
-                               std::istreambuf_iterator<char>()};
-        if (!in || disk != plan.graph_olds[i]) {
-            stale.push_back(plan.graph_referrers[i] + "/graph.json");
-            continue;
-        }
-        std::ofstream out(path, std::ios::binary | std::ios::trunc);
-        out.write(plan.graph_edits[i].data(),
-                  static_cast<std::streamsize>(plan.graph_edits[i].size()));
-        out.close();
-        if (!out) {
-            stale.push_back(plan.graph_referrers[i] + "/graph.json");
-        }
-    }
     if (!stale.empty()) {
         // The move stands: the bundle is intact, these scripts still name the
         // old one.
@@ -704,11 +648,6 @@ rename_status rename_bundle(const std::filesystem::path &_script_dir,
 
     if (_rewritten != nullptr) {
         *_rewritten = plan.referrers;
-        _rewritten->insert(_rewritten->end(), plan.graph_referrers.begin(),
-                           plan.graph_referrers.end());
-        std::sort(_rewritten->begin(), _rewritten->end());
-        _rewritten->erase(std::unique(_rewritten->begin(), _rewritten->end()),
-                          _rewritten->end());
     }
     return rename_status::ok;
 }

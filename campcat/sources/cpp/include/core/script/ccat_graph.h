@@ -1,6 +1,8 @@
 #pragma once
 
-#include "core/template_matcher.h"
+#include "core/script/ccat_ast.h"
+
+#include <opencv2/core.hpp>
 
 #include <filesystem>
 #include <functional>
@@ -11,50 +13,80 @@
 
 namespace campcat::ccat_lang {
 
-/**
- * @brief One template in an anchor signature. `roi` is normalized `[x, y, w, h]`
- * against the frame; empty means the whole frame.
- */
-struct anchor_template {
-    std::string png;
-    bool has_roi = false;
-    double x = 0;
-    double y = 0;
-    double w = 0;
-    double h = 0;
+enum class anchor_kind {
+    page,      ///< a screen you can stay on
+    transient, ///< a loading / transition screen
+    popup      ///< a popup over any screen, closed by `close`
 };
 
+/// What an anchor's `golden.md` says: its front matter, then its description.
+struct golden_doc {
+    anchor_kind kind = anchor_kind::page;
+    std::string close;       ///< popup only: the bundle that closes it
+    std::string description; ///< the body after the front matter, trimmed
+};
+
+/**
+ * @brief Parse `golden.md`. A UTF-8 BOM and CRLF line ends are accepted.
+ * @return nullopt, with `*_err` set, when the front matter is missing or not
+ * closed, a key is unknown, `kind` is not one of the three, or a popup has no
+ * `close`.
+ */
+std::optional<golden_doc> parse_golden_md(std::string_view _text,
+                                          std::string *_err);
+
+/**
+ * @brief Every reason `_program` cannot be an anchor script; empty when it can.
+ *
+ * Locating runs every anchor script, so one may only judge the screen: `has`,
+ * `if` / `elif` / `else`, `return`, `log`, and at least one `return` -- a
+ * script with none answers true on every screen.
+ */
+std::vector<std::string> anchor_script_problems(const Program &_program);
+
+/// `[a-z0-9_]+`: a graph or anchor name, so `G.<a>-<b>` splits one way only.
+bool graph_part_name(std::string_view _s);
+
+/// One anchor script's answer on one frame.
+struct anchor_check {
+    bool here = false;
+    std::string error; ///< non-empty when the script failed; `here` is then false
+};
+
+/// Bundle `G.<id>` holding a `golden.md`.
 struct anchor_def {
     std::string id;
-    std::vector<anchor_template> must;
-    std::vector<anchor_template> must_not;
-    bool transient = false;
+    anchor_kind kind = anchor_kind::page;
+    std::string close;
+    std::string description;
 };
 
+/// Bundle `G.<from>-<to>` where both ends are anchors of `G`.
 struct graph_edge {
     std::string from;
     std::string to;
     std::string script;
-    int timeout_ms = 20000;
 };
 
-struct graph_interrupt {
-    std::string anchor;
-    std::string script;
+/// One game's screen graph, read from the `G.*` bundles. No file of its own.
+struct screen_graph {
+    std::string name;
+    std::vector<anchor_def> anchors; ///< sorted by id
+    std::vector<graph_edge> edges;   ///< sorted by script
+};
+
+struct scanned_graph {
+    bool exists = false; ///< `G.entry/golden.md` is there
+    screen_graph graph;  ///< whatever could be read, even with problems
+    std::vector<std::string> problems;
 };
 
 /**
- * @brief One game's screen graph, loaded from `<library>/<name>/graph.json`.
+ * @brief Read graph `_name` from `_library`, listing every problem instead of
+ * stopping at the first. For views and checks that must show a graph mid-build.
  */
-struct screen_graph {
-    std::string name;
-    std::filesystem::path dir;
-    std::string root;
-    std::string recover;
-    std::vector<anchor_def> anchors;
-    std::vector<graph_edge> edges;
-    std::vector<graph_interrupt> interrupts;
-};
+scanned_graph scan_graph(const std::filesystem::path &_library,
+                         std::string_view _name);
 
 struct loaded_graph {
     bool ok = false;
@@ -63,23 +95,13 @@ struct loaded_graph {
     std::string error;
 };
 
-/**
- * @brief Load and statically check a graph. A failure lists every problem.
- *
- * @param[in] _library The script library (`config_home`).
- * @param[in] _name    Bundle directory name; also the graph's name.
- */
+/// `scan_graph`, but `ok` only when the graph exists and has no problem.
+/// `goto` / `at` / running an edge use this one.
 loaded_graph load_graph(const std::filesystem::path &_library,
                         std::string_view _name);
 
-/**
- * @brief The same, for text that is not on disk yet.
- *
- * `update_graph` checks a submission with this before it writes anything, so a
- * refusal leaves the file alone.
- */
-loaded_graph load_graph_text(const std::filesystem::path &_library,
-                             std::string_view _name, std::string_view _text);
+/// Every `G` with a `G.entry/golden.md`, sorted.
+std::vector<std::string> graph_names(const std::filesystem::path &_library);
 
 /// `"graph:anchor"` with a single colon and a safe name on each side.
 bool split_anchor_ref(std::string_view _ref, std::string *_graph,
@@ -90,7 +112,7 @@ enum class locate_kind {
     transient,  ///< a loading / transition anchor
     interrupt,  ///< a popup anchor, checked before pages
     unknown,
-    ambiguous,  ///< two page anchors match; the graph cannot tell them apart
+    ambiguous,  ///< two page anchors answer true; the graph cannot tell them apart
     error
 };
 
@@ -100,27 +122,31 @@ struct locate_hit {
     std::string detail;
 };
 
+using anchor_check_fn =
+    std::function<anchor_check(const anchor_def &, const cv::Mat &)>;
+
 /**
- * @brief Score `_frame` against every anchor. One frame, no capture.
+ * @brief Run every anchor's check on `_frame`. One frame, no capture.
  *
- * Interrupt anchors are tried in declaration order and the first hit wins.
- * Two matching page anchors is `ambiguous`.
+ * Popups are tried by name and the first hit wins. Two page / transient hits is
+ * `ambiguous`; a check that fails is `error` naming the anchor.
  */
-locate_hit locate(const screen_graph &_graph, const template_matcher &_matcher,
+locate_hit locate(const screen_graph &_graph, const anchor_check_fn &_check,
                   const cv::Mat &_frame);
 
 /**
- * @brief The four budgets `goto` uses. Defaults are the language's; tests pass
- * shorter ones. Not read from config.
+ * @brief The budgets `goto` and a direct edge run use. Defaults are the
+ * language's; tests pass shorter ones. Not read from config.
  *
- * `unknown_ms == 0` and `timeout_ms == 0` take one look and then give up, so a
- * test does not sleep. A `graph.json` timeout must be at least 1.
+ * `unknown_ms == 0` and `edge_timeout_ms == 0` take one look and then give up,
+ * so a test does not sleep.
  */
 struct nav_limits {
     int unknown_ms = 20000;
     int poll_ms = 200;
     int max_failures = 3;
     int max_interrupts = 10;
+    int edge_timeout_ms = 20000;
 };
 
 struct bundle_run {
@@ -134,6 +160,7 @@ struct nav_io {
     /// a dead device.
     std::function<bool(cv::Mat *)> capture;
     std::function<bool()> should_stop;
+    anchor_check_fn check;
     std::function<bundle_run(const std::string &)> run_bundle;
     std::function<void(const std::string &)> log;
 };
@@ -148,96 +175,35 @@ struct nav_result {
 /**
  * @brief Walk `_graph` until `locate` reports `_target`.
  *
- * Failures replan from a fresh locate. After `max_failures` the recover bundle
- * runs once, if the graph has one. The error names the hops that were tried.
+ * Failures replan from a fresh locate; `max_failures` of them is an error that
+ * names every hop that was tried.
  */
 nav_result navigate(const screen_graph &_graph, const std::string &_target,
-                    const template_matcher &_matcher, const nav_io &_io,
-                    nav_limits _limits = {});
-
-/// Bundle names a `graph.json` names as `script` or `recover`.
-/// `nullopt` when the file is not JSON; `_err` says why. A missing file is an
-/// empty list.
-std::optional<std::vector<std::string>>
-graph_script_names(const std::filesystem::path &_graph_json, std::string *_err);
+                    const nav_io &_io, nav_limits _limits = {});
 
 /**
- * @brief PNG names a `graph.json` declares in `must` / `must_not`, sorted and
- * without duplicates.
- *
- * A graph keeps its own templates, so `update_script` must count these as
- * declared or the declared set deletes the anchors. `nullopt` when the file is
- * not JSON (`_err` says why) -- a caller must not read that as "nothing to
- * keep". A missing file is an empty list.
+ * @brief One hop with both ends checked: not at `from` fails without running
+ * the script; after it, `to` must appear within `edge_timeout_ms`. No replan,
+ * no retry.
  */
-std::optional<std::vector<std::string>>
-graph_template_names(const std::filesystem::path &_graph_json,
-                     std::string *_err);
+nav_result run_edge(const screen_graph &_graph, const graph_edge &_edge,
+                    const nav_io &_io, nav_limits _limits = {});
 
 /// What `list_scripts` says about a bundle beyond its description.
 struct bundle_tag {
-    bool graph = false;
-    int anchors = 0;
+    std::string anchor_of; ///< the graph whose anchor this bundle is
+    anchor_kind kind = anchor_kind::page;
+    std::string edge_of;   ///< the graph whose edge this bundle is
+    int anchors = 0;       ///< on `G.entry` only: the graph's counts
     int edges = 0;
-    std::string edge_of; ///< the graph whose edge this bundle is, else empty
 };
 
-/**
- * @brief Tag one bundle. Reads `graph.json` for the counts, and, for anything
- * else, looks for a graph that names this bundle as an edge.
- */
+/// Tag one bundle from its name and the `golden.md` files next to it.
 bundle_tag bundle_tags(const std::filesystem::path &_library,
                        std::string_view _name);
 
-/**
- * @brief The header `read_graph` puts above a loaded graph's own text: what the
- * graph holds, which of its templates are on disk, and how many golden shots
- * each anchor has.
- *
- * `_loaded` must be a graph that loaded `ok`.
- */
-std::string graph_summary(const loaded_graph &_loaded);
-
-/**
- * @brief Replace exact `script` / `recover` bundle names.
- * @return The rewritten text, or nullopt when nothing matched or the text is
- * not JSON (`_err` set).
- */
-std::optional<std::string> rewrite_graph_scripts(std::string_view _text,
-                                                 std::string_view _from,
-                                                 std::string_view _to,
-                                                 std::string *_err);
-
-/// Empty when every golden shot locates as its own anchor.
-///
-/// A golden shot is a crop plus a `<n>.json` sidecar saying where on the screen
-/// it was cut from; the check pastes the crop back onto a blank frame of the
-/// recorded size and runs `locate` on that. The pasted-back position is what
-/// keeps a normalized `roi` meaning the same region it did on the real screen.
-/// Outside the crop the frame is blank, so a conflict out there cannot be seen:
-/// cut the widest box you can, and a whole screen has no blind spot. A crop
-/// with no sidecar, or one that will not parse, is a mismatch of its own.
-std::vector<std::string>
-golden_mismatches(const screen_graph &_graph,
-                  const template_matcher &_matcher);
-
-/**
- * @brief Where a golden crop sat on the screen it was cut from, in the screen's
- * pixels.
- */
-struct golden_meta {
-    int screen_w = 0;
-    int screen_h = 0;
-    int x = 0;
-    int y = 0;
-    int w = 0;
-    int h = 0;
-};
-
-std::string golden_meta_to_text(const golden_meta &_meta);
-
-/// `nullopt` when the text is not a sidecar this program wrote; `_err` says why.
-std::optional<golden_meta> golden_meta_from_text(std::string_view _text,
-                                                 std::string *_err);
+/// What `read_graph` shows: anchors with kind and first description line,
+/// edges, and every problem.
+std::string graph_summary(const scanned_graph &_scanned);
 
 } // namespace campcat::ccat_lang

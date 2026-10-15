@@ -20,15 +20,15 @@ import tools
 
 MAX_ROUNDS = 3
 
-# kind, and the shape a single region takes. update_script has one region per
-# template entry, read off that entry's cut.
+# kind, and the shape a single region takes. update_script and save_anchor have
+# one region per template entry, read off that entry's cut.
 REGION_TOOLS = {
     "tap": ("tap", "box"),
     "tap_circle": ("tap", "circle"),
     "save_template_box": ("template", "box"),
     "save_template_circle": ("template", "circle"),
-    "save_golden": ("golden", "box"),
     "update_script": ("template", None),
+    "save_anchor": ("template", None),
 }
 
 EXPECT_DOC = (
@@ -58,10 +58,6 @@ REVIEW_CRITERIA = {
         "expectation names and nothing behind it -- no background, no "
         "neighbouring element -- and must not cut the control off. For a "
         "circle, the corners outside the disc are ignored."
-    ),
-    "golden": (
-        "The region proves which screen this is: it must be as wide as it can "
-        "be and show what makes this screen recognisable."
     ),
 }
 
@@ -120,7 +116,7 @@ def with_expect(offered: list) -> list:
             continue
         try:
             params = tool["function"]["parameters"]
-            if name == "update_script":
+            if name in ("update_script", "save_anchor"):
                 items = params["properties"]["templates"]["items"]
                 items.setdefault("properties", {})["expect"] = {
                     "type": "string", "description": EXPECT_DOC}
@@ -249,14 +245,6 @@ def review_render(state: ReviewState) -> dict:
     context = marked_b64
     if not frame:
         note = "second picture: the whole frame"
-    elif state.get("kind") == "golden":
-        thumb = session.thumbnail_png(marked_b64)
-        if thumb:
-            context = thumb
-            note = (f"second picture: the whole {frame[0]}x{frame[1]} frame, "
-                    f"scaled down; give coordinates in frame pixels")
-        else:
-            note = f"second picture: the whole {frame[0]}x{frame[1]} frame"
     else:
         box = neighbourhood(_bounds(region, shape), frame)
         cut = session.crop_png(marked_b64, box)
@@ -403,7 +391,7 @@ def review(name: str, args: dict) -> tuple[dict, str, str]:
         return _strip(args), "", ""
     if _human_repeat(name, args):
         return _strip(args), "", ""
-    if name == "update_script":
+    if name in ("update_script", "save_anchor"):
         return _review_update(args)
     _kind, shape = spec
     region = args.get(shape) if isinstance(args.get(shape), dict) else None

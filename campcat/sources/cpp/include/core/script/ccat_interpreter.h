@@ -79,6 +79,23 @@ public:
     automation_cycle_result run(const Program &_program,
                                 const std::function<bool()> &_should_stop);
 
+    /**
+     * @brief Run anchor bundle `_bundle` against `_frame`: every `has` in it
+     * reads that one frame, never the device.
+     */
+    anchor_check check_anchor(const std::string &_bundle, const cv::Mat &_frame,
+                              const std::function<bool()> &_should_stop);
+
+    /**
+     * @brief Which anchor of graph `_graph` `_frame` is. Reads the graph as it
+     * stands, problems and all, so a graph mid-build can still be asked.
+     * @return `locate_kind::error` with `*_err` set when the graph does not
+     * exist.
+     */
+    locate_hit locate_frame(const std::string &_graph, const cv::Mat &_frame,
+                            const std::function<bool()> &_should_stop,
+                            std::string *_err);
+
 private:
     /**
      * @brief Dispatch polymorphic Stmt variants recursively honoring
@@ -191,6 +208,10 @@ private:
     bundle_run run_graph_bundle(const std::string &_bundle,
                                 const std::function<bool()> &_should_stop);
 
+    /// The device, the anchor scripts and the bundles of graph `_graph`.
+    nav_io graph_io(const std::string &_graph,
+                    const std::function<bool()> &_should_stop);
+
     stmt_exec_outcome
     exec_program_stmts(const Program &_program,
                        const std::function<bool()> &_should_stop);
@@ -206,9 +227,11 @@ private:
     std::vector<std::filesystem::path> m_run_stack;
     int m_match_debug_seq = 0;
     bool m_match_debug_enabled = false;
-    /// Set while an edge, popup or recover bundle is running, so it cannot
+    /// Set while an edge, popup-close or anchor bundle is running, so it cannot
     /// call `goto` and re-enter the navigator.
     bool m_in_graph_script = false;
+    /// Set by `check_anchor`: screenshots come from here instead of the device.
+    const cv::Mat *m_frame = nullptr;
     std::unordered_map<std::string, screen_graph> m_graphs;
 };
 
