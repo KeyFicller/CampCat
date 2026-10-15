@@ -15,7 +15,9 @@ namespace campcat::llm_protocol {
 ///    `memorize` asks the sidecar to fold the session into them.
 /// 7: `turn` and `memorize` carry `provider`, the model provider the host's
 ///    settings selected.
-constexpr int k_protocol_version = 7;
+/// 8: the host may send `interrupt` in place of a `tool_result` to stop the
+///    turn, and `result` may carry `interrupted`.
+constexpr int k_protocol_version = 8;
 
 /**
  * @brief One decoded line from the sidecar's stdout.
@@ -31,6 +33,7 @@ struct message {
 
     // result
     bool ok = false;
+    bool interrupted = false; ///< the user sent a new message; default false
     std::string text;
     std::string error;
 
@@ -100,6 +103,14 @@ std::string build_tool_result(std::string_view _call_id, bool _ok,
  * @brief Build one `reset` request line, dropping the sidecar's history.
  */
 std::string build_reset_request(long _id);
+
+/**
+ * @brief Build one `interrupt` line for the turn `_id` (no trailing newline).
+ *
+ * Sent in place of the `tool_result` the sidecar is waiting on. The sidecar
+ * stops that turn and answers with a `result` whose `interrupted` is true.
+ */
+std::string build_interrupt_request(long _id);
 
 /**
  * @brief Build one `memorize` request line: fold this session into the memory.

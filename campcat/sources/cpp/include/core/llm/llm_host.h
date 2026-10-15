@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <deque>
@@ -23,9 +24,10 @@ namespace campcat {
  */
 struct llm_result {
     bool ok = false;
-    std::string text;  ///< model output when `ok`
-    std::string error; ///< human-readable failure detail
-    int turns = -1;    ///< turns the sidecar retains; 0 after a reset
+    bool interrupted = false; ///< user sent a new message; the text stays
+    std::string text;         ///< model output when `ok`
+    std::string error;        ///< human-readable failure detail
+    int turns = -1;           ///< turns the sidecar retains; 0 after a reset
 };
 
 /// @brief One step of the turn in flight, in the order it happened.
@@ -160,6 +162,18 @@ public:
      */
     std::string event_image_png(long _image_id) const;
 
+    /**
+     * @brief A copy of the turn's timeline, images included.
+     *
+     * The worker takes this as it finishes a turn, then clears the live
+     * stream for the next one. The UI fills the bubble from the copy.
+     */
+    struct timeline {
+        std::vector<llm_event> events;
+        std::deque<std::pair<long, std::string>> images;
+    };
+    timeline copy_timeline() const;
+
     /// True once the sidecar reported the model is reasoning.
     bool is_thinking() const;
 
@@ -174,6 +188,31 @@ public:
 
     /// Terminate the child if running. Safe to call repeatedly.
     void stop();
+
+    /**
+     * @brief Ask the turn in flight to stop at its next tool.
+     *
+     * The tool already running finishes. The next `tool_result` is replaced
+     * with `interrupt`. A model call already on the wire is not cancelled.
+     * Cleared when the queued message is taken, so the next turn is not born
+     * stopped.
+     */
+    void request_interrupt();
+
+    /// Drop a pending interrupt. The worker calls this as it takes the queued
+    /// message.
+    void clear_interrupt();
+
+    /// True from `request_interrupt` until `clear_interrupt`.
+    bool interrupt_pending() const;
+
+    /**
+     * @brief Reject the question the worker is blocked on, once.
+     *
+     * Unlike `cancel_approval`, this does not refuse later questions: the
+     * session is continuing, and the next turn may ask again.
+     */
+    void release_approval();
 
     /**
      * @brief The question the worker is blocked on, if any.
@@ -276,6 +315,10 @@ private:
     long m_tool_image_id = 0;
 
     bool m_thinking = false;
+
+    /// Set by the UI when the user sends a message during a turn. The worker
+    /// reads it in `exchange` and clears it when that message is taken.
+    std::atomic<bool> m_interrupt{false};
 
     // Human approval. A separate mutex/cv from `m_mu`/`m_cv`: that pair is the
     // sidecar reader's predicate, and sharing it would have both sides waking

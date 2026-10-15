@@ -14,6 +14,7 @@ from langgraph.graph import END, StateGraph
 
 import agent.memorier as memorier
 import session
+import tools
 
 
 # Only the scripter sees these. Anything the host sends that is not listed here
@@ -313,8 +314,12 @@ def run_scripter(args: dict, host_tools: list) -> str:
             out = _scripter_graph().invoke(state, {"callbacks": callbacks})
         else:
             out = _scripter_graph().invoke(state)
+    except tools.TurnInterrupted:
+        raise
     except Exception as exc:  # noqa: BLE001 - the operator hears it as a tool error
         return "error: " + str(exc)
+    if out.get("interrupted"):
+        raise tools.TurnInterrupted()
     if out.get("error"):
         return "error: " + str(out["error"])
     reply = (out.get("reply") or "").strip()
@@ -353,8 +358,17 @@ def _scripter_invoke(state: dict) -> dict:
 
 def _apply_scripter_tools(state: dict) -> dict:
     import graph
-    messages = graph._run_host_tools(list(state.get("messages") or []))
-    return {"messages": messages, "tool_rounds": state.get("tool_rounds", 0) + 1}
+    messages, interrupted = graph._run_host_tools(list(state.get("messages") or []))
+    out = {"messages": messages, "tool_rounds": state.get("tool_rounds", 0) + 1}
+    if interrupted:
+        out["interrupted"] = True
+    return out
+
+
+def _route_after_scripter_tools(state: dict) -> str:
+    if state.get("interrupted"):
+        return "scripter_commit"
+    return "scripter_invoke"
 
 
 def _scripter_commit(state: dict) -> dict:
@@ -381,7 +395,11 @@ def build_scripter_graph():
         graph.route_after_invoke,
         {"run_tools": "scripter_tools", "commit": "scripter_commit"},
     )
-    compiled.add_edge("scripter_tools", "scripter_invoke")
+    compiled.add_conditional_edges(
+        "scripter_tools",
+        _route_after_scripter_tools,
+        {"scripter_invoke": "scripter_invoke", "scripter_commit": "scripter_commit"},
+    )
     compiled.add_edge("scripter_commit", END)
     return compiled.compile()
 

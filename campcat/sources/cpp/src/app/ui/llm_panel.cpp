@@ -85,6 +85,9 @@ struct llm_turn {
     std::string user_text;
     std::vector<llm_item> items; ///< what happened, in the order it happened
     bool pending = false; ///< sent but unanswered; drives the waiting bubble
+    bool queued = false;  ///< shown, not yet handed to the worker
+    bool frozen = false;  ///< stop growing; the user already sent the next one
+    bool interrupted = false; ///< the turn was cut by that next message
     bool ok = false;
     std::string error;
 };
@@ -95,6 +98,9 @@ struct handoff {
     bool is_reset = false;
     bool is_memory = false;
     campcat::llm_result res;
+    /// Timeline at the moment the turn finished. The live stream is cleared
+    /// for the next turn before the UI may read it.
+    campcat::llm_host::timeline timeline;
 };
 
 // UI-thread state: never touched by the worker.
@@ -145,9 +151,18 @@ ImGui::MarkdownConfig &md_config() {
 
 // Worker state.
 std::atomic<bool> g_running{false};
+/// True while Clear conversation is in flight. Send stays disabled: a message
+/// queued under a reset would be wiped when the log is dropped.
+std::atomic<bool> g_resetting{false};
+/// The worker sets this after it clears the stream for a queued message. The
+/// UI then marks that message as the turn in flight.
+std::atomic<bool> g_promote{false};
+/// Latest message the user sent while a turn was running. Empty when none.
+std::mutex g_queue_mu;
+std::string g_next_prompt;
 /// True while the worker is consolidating memory rather than answering a turn.
-/// Only changes what the Send button's tooltip says; the disable itself is
-/// `g_running`.
+/// Only changes the Send button's tooltip. A message sent during the pass
+/// discards the notes.
 /// Set and cleared inside the worker that does the consolidating, so there is
 /// no path that can leave it stuck on.
 std::atomic<bool> g_memorizing{false};
@@ -157,7 +172,10 @@ std::thread g_thread;
 std::thread g_shutdown_thread;
 campcat::llm_host g_host;
 std::mutex g_done_mu;
-handoff g_done;
+/// More than one job can finish before the UI draws: a turn that ended on its
+/// own, then the message that was queued behind it. A single slot would drop
+/// the first result into the second bubble.
+std::deque<handoff> g_done;
 
 /// UI-thread only. Time of the last LLM request, which is what "idle" is
 /// measured from: an agent nobody is talking to is an agent that can tidy up.
@@ -442,10 +460,11 @@ float g_footer_h = 160.0F;
 
 /// Queue the outgoing turn the moment it is sent, so the log shows the user's
 /// message while the reply is still in flight.
-void append_user_turn(std::string _prompt) {
+void append_user_turn(std::string _prompt, bool _queued = false) {
     llm_turn t;
     t.user_text = std::move(_prompt);
     t.pending = true;
+    t.queued = _queued;
 
     g_turns.push_back(std::move(t));
     while (static_cast<int>(g_turns.size()) > k_turn_cap) {
@@ -455,10 +474,21 @@ void append_user_turn(std::string _prompt) {
     g_pin_bottom = true;
 }
 
-/// The turn still waiting for its reply, if any.
-llm_turn *pending_turn() {
+/// The turn the worker is answering. A queued message is on screen already
+/// but is not this turn until the worker takes it.
+llm_turn *in_flight_turn() {
     for (auto it = g_turns.rbegin(); it != g_turns.rend(); ++it) {
-        if (it->pending) {
+        if (it->pending && !it->queued) {
+            return &*it;
+        }
+    }
+    return nullptr;
+}
+
+/// The message waiting to be sent, if the user typed one during a turn.
+llm_turn *queued_turn() {
+    for (auto it = g_turns.rbegin(); it != g_turns.rend(); ++it) {
+        if (it->queued) {
             return &*it;
         }
     }
@@ -466,19 +496,53 @@ llm_turn *pending_turn() {
 }
 
 /// Fill the waiting turn with the reply. UI thread only.
-void fill_reply(const campcat::llm_result &_res) {
-    llm_turn *t = pending_turn();
+/// Same growth rules as `sync_items`, reading a finished copy rather than the
+/// live stream. Image bytes come from the copy: the host may already have
+/// dropped them for the next turn.
+void apply_snap(llm_turn &_t, const campcat::llm_host::timeline &_tl) {
+    for (size_t i = 0; i < _tl.events.size(); ++i) {
+        const campcat::llm_event &e = _tl.events[i];
+        if (i < _t.items.size()) {
+            if (e.type == campcat::llm_event::kind::text &&
+                _t.items[i].text != e.text) {
+                _t.items[i].text = e.text;
+            }
+            continue;
+        }
+        llm_item it;
+        it.type = e.type;
+        it.text = e.text;
+        it.ok = e.ok;
+        it.image_id = e.image_id;
+        if (e.type == campcat::llm_event::kind::image) {
+            for (const auto &image : _tl.images) {
+                if (image.first == e.image_id) {
+                    it.png = image.second;
+                    break;
+                }
+            }
+            it.tex_dropped = it.png.empty();
+        }
+        _t.items.push_back(std::move(it));
+    }
+}
+
+void fill_reply(const campcat::llm_result &_res,
+                const campcat::llm_host::timeline &_tl) {
+    llm_turn *t = in_flight_turn();
     if (t == nullptr) {
         return;
     }
-    // Once more, because a tool image can arrive in the same frame the turn
-    // finished, which the per-frame pump would have missed.
-    sync_items(*t);
+    // Once more, from the copy taken as the turn finished. The live stream
+    // may already belong to the next message.
+    apply_snap(*t, _tl);
     t->pending = false;
+    t->frozen = false;
+    t->interrupted = _res.ok && _res.interrupted;
     t->ok = _res.ok;
     if (!_res.ok) {
         t->error = _res.error;
-    } else if (!_res.text.empty()) {
+    } else if (!t->interrupted && !_res.text.empty()) {
         // The timeline is what was streamed, and it normally ends with the
         // reply. An empty one means the stream never reached us; keeping the
         // result here is what stops the answer going missing.
@@ -497,12 +561,87 @@ void fill_reply(const campcat::llm_result &_res) {
 
 /// Mirror the in-flight stream into the waiting turn so its bubble grows.
 void pump_stream() {
-    llm_turn *t = pending_turn();
-    if (t == nullptr) {
+    llm_turn *t = in_flight_turn();
+    // Frozen once the user has sent the next message: the bubble stays on
+    // what had already arrived. The finished copy lands in `fill_reply`.
+    if (t == nullptr || t->frozen) {
+        g_thinking = g_host.is_thinking();
         return;
     }
     sync_items(*t);
     g_thinking = g_host.is_thinking();
+}
+
+/// Hand a finished turn to the UI, timeline included, before the stream is
+/// cleared for whatever runs next.
+void post_turn(campcat::llm_result _res) {
+    handoff done;
+    done.has = true;
+    done.res = std::move(_res);
+    done.timeline = g_host.copy_timeline();
+    std::lock_guard<std::mutex> lk(g_done_mu);
+    g_done.push_back(std::move(done));
+}
+
+/// The message the user sent while a turn was running, if there is one.
+/// Clears the interrupt flag: the message is about to become a turn of its own.
+std::optional<std::string> take_queued() {
+    std::lock_guard<std::mutex> lk(g_queue_mu);
+    if (g_next_prompt.empty()) {
+        return std::nullopt;
+    }
+    std::string prompt = std::move(g_next_prompt);
+    g_next_prompt.clear();
+    g_host.clear_interrupt();
+    return prompt;
+}
+
+/// Run `_prompt`, then any message the user sends while it runs. One thread:
+/// the next message does not start another. `adb` lives for the whole loop.
+/// `_promote` is false for the turn the UI just started itself.
+void run_prompt_loop(campcat::shell_state *_st, const campcat::app_config &_cfg,
+                     std::string _prompt, bool _promote) {
+    const std::string addr = campcat::mumu_adb_address(
+        _cfg.mumu.tool_path, _cfg.mumu.device_index);
+    campcat::adb_client adb(_cfg.adb.path,
+                            addr.empty() ? _cfg.adb.serial : addr);
+    adb.connect_remote(addr);
+    campcat::llm::tool_context ctx;
+    ctx.adb = &adb;
+    ctx.adb_busy = [] { return g_adb_busy.load(); };
+    // Both read live rather than folded here: the settings popup can change
+    // them mid-turn, and a gate that keeps asking after it was switched off
+    // is the bug this avoids. `snapshot_cfg` is the thread-safe read, and
+    // `_st` outlives the thread (it is a `main` local). `_cfg` stays this
+    // thread's snapshot: it is what the adb client was built from.
+    ctx.needs_approval = [_st](std::string_view _tool) {
+        return campcat::llm::approval_gate_required(
+            _st->snapshot_cfg().approval, _tool);
+    };
+    ctx.box_snap = [_st] { return _st->snapshot_cfg().box_snap; };
+    ctx.cfg = &_cfg;
+    ctx.script_dir = std::filesystem::path(_cfg.config_home);
+    ctx.start_emulator = [_st](const std::function<bool()> &_should_stop) {
+        return _st->start_mumu_blocking(_should_stop);
+    };
+    g_host.set_tool_context(ctx);
+    while (true) {
+        if (_promote) {
+            g_host.clear_stream();
+            g_promote.store(true);
+        }
+        _promote = true;
+        campcat::llm_result res = g_host.run_turn(
+            _cfg.config_home, _cfg.llm.provider, _prompt);
+        post_turn(std::move(res));
+        std::optional<std::string> next = take_queued();
+        if (!next.has_value()) {
+            break;
+        }
+        _prompt = std::move(*next);
+    }
+    g_host.set_tool_context({}); // `adb` dies with this function
+    g_running.store(false);
 }
 
 /// Run one turn on the worker.
@@ -513,73 +652,45 @@ void start_turn(campcat::shell_state &_st, const campcat::app_config &_cfg,
     }
     g_running.store(true);
     // The whole snapshot, by value: the script tools need the interpreter's
-    // config
-    // (`tool_context::cfg`), and `_cfg` is a per-frame copy in the caller's
-    // frame, so a pointer to it would dangle the moment the frame ends. `_st`
-    // outlives the thread instead (it is a `main` local, and this thread is
-    // joined by `llm_panel_shutdown_gl`), so the shell is held by pointer: it
-    // is where the emulator launch the model may ask for lives.
+    // config (`tool_context::cfg`), and `_cfg` is a per-frame copy in the
+    // caller's frame, so a pointer to it would dangle the moment the frame
+    // ends. `_st` outlives the thread (it is a `main` local, and this thread
+    // is joined by `llm_panel_shutdown_gl`).
     g_thread = std::thread([st = &_st, cfg_snapshot = _cfg,
                             prompt = std::move(_prompt)]() {
-        // A per-turn client, built the way the automation cycle builds one.
-        // Every tool runs on this thread, so nothing here races the UI.
-        const std::string addr = campcat::mumu_adb_address(
-            cfg_snapshot.mumu.tool_path, cfg_snapshot.mumu.device_index);
-        campcat::adb_client adb(cfg_snapshot.adb.path,
-                                addr.empty() ? cfg_snapshot.adb.serial : addr);
-        adb.connect_remote(addr);
-        campcat::llm::tool_context ctx;
-        ctx.adb = &adb;
-        ctx.adb_busy = [] { return g_adb_busy.load(); };
-        // Both read live rather than folded here: the settings popup can change
-        // them mid-turn, and a gate that keeps asking after it was switched off
-        // is the bug this avoids. `snapshot_cfg` is the thread-safe read, and
-        // `st` outlives the thread (see below). `cfg` itself stays the turn's
-        // snapshot: it is what the adb client was built from.
-        ctx.needs_approval = [st](std::string_view _tool) {
-            return campcat::llm::approval_gate_required(
-                st->snapshot_cfg().approval, _tool);
-        };
-        ctx.box_snap = [st] { return st->snapshot_cfg().box_snap; };
-        ctx.cfg = &cfg_snapshot;
-        ctx.script_dir = std::filesystem::path(cfg_snapshot.config_home);
-        ctx.start_emulator = [st](const std::function<bool()> &_should_stop) {
-            return st->start_mumu_blocking(_should_stop);
-        };
-        g_host.set_tool_context(ctx);
-        campcat::llm_result res = g_host.run_turn(
-            cfg_snapshot.config_home, cfg_snapshot.llm.provider, prompt);
-        g_host.set_tool_context({}); // `adb` dies with this lambda
-        {
-            std::lock_guard<std::mutex> lk(g_done_mu);
-            g_done = handoff{};
-            g_done.has = true;
-            g_done.res = std::move(res);
-        }
-        g_running.store(false);
+        run_prompt_loop(st, cfg_snapshot, prompt, false);
     });
 }
 
 /// Consolidate the session into the long-term notes, on the worker.
-void start_memorize(std::filesystem::path _config_home, std::string _provider) {
+/// A message sent while this runs discards the notes and becomes the next turn.
+void start_memorize(campcat::shell_state &_st, const campcat::app_config &_cfg) {
     if (g_thread.joinable()) {
         g_thread.join();
     }
     g_running.store(true);
     g_memorizing.store(true);
-    g_thread = std::thread([config_home = std::move(_config_home),
-                            provider = std::move(_provider)]() {
+    g_thread = std::thread([st = &_st, cfg_snapshot = _cfg]() {
         campcat::llm_result res = g_host.memorize(
-            config_home, provider, campcat::k_memorize_timeout_ms);
+            cfg_snapshot.config_home, cfg_snapshot.llm.provider,
+            campcat::k_memorize_timeout_ms);
         g_memorizing.store(false);
-        {
+        // Checked before the queue is taken: taking it clears the flag.
+        const bool dropped = g_host.interrupt_pending();
+        if (!dropped) {
+            handoff done;
+            done.has = true;
+            done.is_memory = true;
+            done.res = std::move(res);
             std::lock_guard<std::mutex> lk(g_done_mu);
-            g_done = handoff{};
-            g_done.has = true;
-            g_done.is_memory = true;
-            g_done.res = std::move(res);
+            g_done.push_back(std::move(done));
         }
-        g_running.store(false);
+        std::optional<std::string> next = take_queued();
+        if (!next.has_value()) {
+            g_running.store(false);
+            return;
+        }
+        run_prompt_loop(st, cfg_snapshot, std::move(*next), true);
     });
 }
 
@@ -588,6 +699,7 @@ void start_reset(std::filesystem::path _config_home, std::string _provider) {
         g_thread.join();
     }
     g_running.store(true);
+    g_resetting.store(true);
     g_thread = std::thread([config_home = std::move(_config_home),
                             provider = std::move(_provider)]() {
         // Keep the session before forgetting it: `reset` is what drops the
@@ -604,12 +716,14 @@ void start_reset(std::filesystem::path _config_home, std::string _provider) {
         }
         campcat::llm_result res = g_host.reset(config_home.parent_path());
         {
+            handoff done;
+            done.has = true;
+            done.is_reset = true;
+            done.res = std::move(res);
             std::lock_guard<std::mutex> lk(g_done_mu);
-            g_done = handoff{};
-            g_done.has = true;
-            g_done.is_reset = true;
-            g_done.res = std::move(res);
+            g_done.push_back(std::move(done));
         }
+        g_resetting.store(false);
         g_running.store(false);
     });
 }
@@ -619,11 +733,11 @@ void consume_handoff() {
     handoff h;
     {
         std::lock_guard<std::mutex> lk(g_done_mu);
-        if (!g_done.has) {
+        if (g_done.empty()) {
             return;
         }
-        h = std::move(g_done);
-        g_done = handoff{};
+        h = std::move(g_done.front());
+        g_done.pop_front();
     }
 
     // Every finished request restarts the idle clock, consolidation included:
@@ -643,7 +757,7 @@ void consume_handoff() {
     }
 
     if (!h.is_reset) {
-        fill_reply(h.res);
+        fill_reply(h.res, h.timeline);
         if (h.res.ok) {
             // Reported by the sidecar on a successful turn only: a result
             // without the field parses as 0, so a failure must not zero this.
@@ -680,6 +794,29 @@ void send_current(campcat::shell_state &_st, campcat::app_config &_cfg) {
     // the previous request's leftovers.
     g_host.clear_stream();
     start_turn(_st, _cfg, prompt);
+}
+
+/// Show `_prompt` now and stop the turn in flight at its next tool. A second
+/// send before that tool replaces the message; the earlier one is not sent.
+void queue_prompt(std::string _prompt) {
+    if (llm_turn *live = in_flight_turn()) {
+        live->frozen = true;
+    }
+    if (llm_turn *queued = queued_turn()) {
+        queued->user_text = _prompt;
+    } else {
+        append_user_turn(std::move(_prompt), true);
+        // append moved from the parameter; the queue still needs the text.
+        _prompt = g_turns.back().user_text;
+    }
+    {
+        std::lock_guard<std::mutex> lk(g_queue_mu);
+        g_next_prompt = std::move(_prompt);
+    }
+    g_host.request_interrupt();
+    campcat::llm::request_script_stop();
+    campcat::llm::request_emulator_stop();
+    g_host.release_approval();
 }
 
 /// "Thinking" (when the sidecar says so) plus 1..3 dots on the frame clock, so
@@ -796,6 +933,8 @@ void draw_turn(llm_turn &_t, int _index) {
         _t.items.back().type == campcat::llm_event::kind::text;
     if (_t.pending && !has_text) {
         ImGui::TextDisabled("%s", waiting_label().c_str());
+    } else if (_t.interrupted) {
+        ImGui::TextDisabled("Interrupted");
     } else if (failed) {
         WITH_FONT(bold, { ImGui::TextColored(k_err_col, "Request failed"); });
         ImGui::TextWrapped("%s", _t.error.c_str());
@@ -1534,6 +1673,14 @@ void llm_panel_draw_panel(campcat::shell_state &_st, campcat::app_config &_cfg,
                           bool _adb_busy) {
     // Finished work is folded in on the UI thread, which owns g_turns.
     consume_handoff();
+    // The worker cleared the stream for a message that was only queued. It is
+    // the turn in flight now, so the pump below writes into it and not into
+    // the one that just finished.
+    if (g_promote.exchange(false)) {
+        if (llm_turn *queued = queued_turn()) {
+            queued->queued = false;
+        }
+    }
 
     // An automation cycle or the scheduler is using adb, so tools must refuse
     // rather than contend with it.
@@ -1589,7 +1736,7 @@ void llm_panel_draw_panel(campcat::shell_state &_st, campcat::app_config &_cfg,
     if (!g_running.load() && !awaiting && !g_turns.empty() &&
         is_blank(g_input) && !g_config_home.empty() &&
         ImGui::GetTime() - g_last_llm > k_idle_seconds) {
-        start_memorize(g_config_home, g_provider);
+        start_memorize(_st, _cfg);
     }
 
     // The button is square like the gear: the icon carries the meaning, so no
@@ -1626,7 +1773,10 @@ void llm_panel_draw_panel(campcat::shell_state &_st, campcat::app_config &_cfg,
     }
 
     ImGui::SameLine();
-    const bool can_send = awaiting || (!busy && !is_blank(g_input));
+    // A turn in flight still accepts a message: that message is how the user
+    // stops it. Clear conversation does not, because the reset drops the log.
+    const bool can_send =
+        awaiting || (!g_resetting.load() && !is_blank(g_input));
     if (!can_send) {
         ImGui::BeginDisabled();
     }
@@ -1710,6 +1860,10 @@ void llm_panel_draw_panel(campcat::shell_state &_st, campcat::app_config &_cfg,
                                    g_staged_region);
             clear_staged();
             g_input.clear(); // consumed as the answer, not as a prompt
+        } else if (busy) {
+            const std::string prompt = g_input;
+            g_input.clear();
+            queue_prompt(prompt);
         } else {
             send_current(_st, _cfg);
         }

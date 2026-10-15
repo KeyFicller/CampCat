@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 
-PROTOCOL_VERSION = 7
+PROTOCOL_VERSION = 8
 
 
 def encode(obj: dict) -> str:
@@ -42,12 +42,15 @@ def build_chunk(rid: object, text: str = "", thinking: bool = False) -> dict:
 
 
 def build_result(rid: object, ok: bool, text: str = "", error: str = "",
-                 turns: int | None = None) -> dict:
+                 turns: int | None = None, interrupted: bool = False) -> dict:
     """`turns` is omitted from the JSON when None, so messages that carry no
-    conversation state keep their original shape."""
+    conversation state keep their original shape. `interrupted` is omitted
+    when false: the host reads a missing field as false."""
     msg = {"type": "result", "id": rid, "ok": ok, "text": text, "error": error}
     if turns is not None:
         msg["turns"] = turns
+    if interrupted:
+        msg["interrupted"] = True
     return msg
 
 

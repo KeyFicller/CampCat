@@ -102,7 +102,8 @@ def handle_request(req: dict) -> Iterator[dict]:
         yield protocol.build_error_result(rid, str(out["error"]))
         return
     yield protocol.build_result(
-        rid, True, str(out.get("reply", "")), turns=out.get("turns")
+        rid, True, str(out.get("reply", "")), turns=out.get("turns"),
+        interrupted=bool(out.get("interrupted")),
     )
 
 

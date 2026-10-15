@@ -116,6 +116,7 @@ void llm_host::handle_line(const std::string &_line) {
         std::lock_guard<std::mutex> lk(m_mu);
         if (msg.id == m_pending_id) {
             m_result.ok = msg.ok;
+            m_result.interrupted = msg.interrupted;
             m_result.text = msg.text;
             m_result.error = msg.error;
             m_result.turns = msg.turns;
@@ -459,9 +460,25 @@ llm_result llm_host::exchange(const std::string &_request_line,
         }
 
         const llm_protocol::message call = m_tool_call;
+        const long id = m_pending_id;
         m_has_tool = false;
+        // A message the user already sent stops the turn here: the tool has
+        // not started, so it does not run. The sidecar is blocked in this
+        // call and reads `interrupt` instead of a result.
+        const bool stop_first = m_interrupt.load();
         lk.unlock();
-        const std::string reply = run_tool(call);
+        std::string reply;
+        if (stop_first) {
+            reply = llm_protocol::build_interrupt_request(id);
+        } else {
+            reply = run_tool(call);
+            // The tool that was already running finishes, then the same line
+            // replaces its result. Checked after, so a stop that arrives
+            // mid-tool is not lost.
+            if (m_interrupt.load()) {
+                reply = llm_protocol::build_interrupt_request(id);
+            }
+        }
         // Time spent waiting on a human does not count against the request
         // budget: the worker was blocked inside service_approval, so wait_until
         // never ran, and without this top-up the next wait_until would time out
@@ -550,6 +567,14 @@ llm_result llm_host::memorize(const std::filesystem::path &_config_home,
     const llm_result out = exchange(request, _timeout_ms);
     if (!out.ok) {
         return out;
+    }
+    // The user sent a message while this pass ran. The notes stay as they
+    // were; the message is the next turn. No `interrupt` line: a memorize
+    // request has no tool call to replace.
+    if (m_interrupt.load()) {
+        r.ok = true;
+        r.text = current;
+        return r;
     }
 
     // Nothing new since the last pass: the sidecar hands the notes straight
@@ -697,6 +722,27 @@ void llm_host::teardown() {}
 #endif // _WIN32
 
 void llm_host::stop() { teardown(); }
+
+void llm_host::request_interrupt() { m_interrupt.store(true); }
+
+void llm_host::clear_interrupt() { m_interrupt.store(false); }
+
+bool llm_host::interrupt_pending() const { return m_interrupt.load(); }
+
+llm_host::timeline llm_host::copy_timeline() const {
+    std::lock_guard<std::mutex> lk(m_mu);
+    return timeline{m_events, m_event_images};
+}
+
+void llm_host::release_approval() {
+    std::lock_guard<std::mutex> lk(m_approval_mu);
+    if (!m_approval_pending || m_approval_answered || m_approval_cancelled) {
+        return;
+    }
+    m_approval_approved = false;
+    m_approval_cancelled = true;
+    m_approval_cv.notify_all();
+}
 
 llm::approval_decision
 llm_host::service_approval(const llm::approval_request &_req) {

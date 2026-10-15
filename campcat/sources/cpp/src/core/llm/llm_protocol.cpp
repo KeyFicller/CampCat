@@ -95,6 +95,13 @@ std::string build_reset_request(long _id) {
     return j.dump();
 }
 
+std::string build_interrupt_request(long _id) {
+    nlohmann::json j;
+    j["type"] = "interrupt";
+    j["id"] = _id;
+    return j.dump();
+}
+
 std::string build_memorize_request(long _id, std::string_view _memory,
                                    std::string_view _provider) {
     nlohmann::json j;
@@ -144,6 +151,7 @@ bool parse_line(std::string_view _line, message *_out) {
         _out->type = message::kind::result;
         _out->id = j.value("id", 0L);
         _out->ok = j.value("ok", false);
+        _out->interrupted = j.value("interrupted", false);
         _out->text = j.value("text", std::string());
         _out->error = j.value("error", std::string());
         _out->turns = j.value("turns", 0);

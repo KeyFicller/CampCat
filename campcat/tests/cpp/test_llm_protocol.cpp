@@ -13,8 +13,10 @@
 
 namespace {
 
+using campcat::llm_protocol::build_interrupt_request;
 using campcat::llm_protocol::build_memorize_request;
 using campcat::llm_protocol::build_turn_request;
+using campcat::llm_protocol::parse_line;
 
 nlohmann::json turn_with(const std::string &_provider) {
     return nlohmann::json::parse(
@@ -38,6 +40,32 @@ TEST(LlmProtocol, ProviderIsPresentEvenWhenEmpty) {
 
     ASSERT_TRUE(j.contains("provider"));
     EXPECT_EQ(j["provider"], "");
+}
+
+TEST(LlmProtocol, InterruptNamesTheTurn) {
+    const nlohmann::json j = nlohmann::json::parse(build_interrupt_request(4));
+
+    EXPECT_EQ(j["type"], "interrupt");
+    EXPECT_EQ(j["id"], 4);
+}
+
+TEST(LlmProtocol, ResultInterruptedDefaultsFalse) {
+    campcat::llm_protocol::message msg;
+    ASSERT_TRUE(parse_line(
+        R"({"type":"result","id":1,"ok":true,"text":"hi"})", &msg));
+
+    EXPECT_TRUE(msg.ok);
+    EXPECT_FALSE(msg.interrupted);
+}
+
+TEST(LlmProtocol, ResultInterruptedTrueIsRead) {
+    campcat::llm_protocol::message msg;
+    ASSERT_TRUE(parse_line(
+        R"({"type":"result","id":1,"ok":true,"text":"hi","interrupted":true})",
+        &msg));
+
+    EXPECT_TRUE(msg.interrupted);
+    EXPECT_EQ(msg.text, "hi");
 }
 
 TEST(LlmProtocol, MemorizeCarriesTheSelectedProvider) {

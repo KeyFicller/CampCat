@@ -45,6 +45,7 @@ class TurnState(TypedDict, total=False):
     reply: str      # response: model output
     turns: int      # response: turns retained in the conversation
     error: str
+    interrupted: bool  # the user sent a new message; commit, then stop
 
 
 def precheck(state: TurnState) -> dict:
@@ -153,21 +154,47 @@ def _host_result(name: str, args: dict) -> tuple[object, list]:
     return content, [session.picture_of(name, image)]
 
 
-def _run_host_tools(messages: list) -> list:
+def _interrupted_from(calls: list, start: int) -> list:
+    """Tool results for `calls[start:]`: the one in flight, and the ones not sent."""
+    return [
+        ToolMessage(content=tools.INTERRUPTED_TEXT, tool_call_id=call.get("id", ""))
+        for call in calls[start:]
+    ]
+
+
+def _run_calls(calls: list, run_one) -> tuple[list, list, bool]:
+    """Run `calls` until one is interrupted.
+
+    `run_one(call)` returns `(content, pictures)` or raises `TurnInterrupted`.
+    An interrupt fills that call and every call after it, and stops the batch.
+    """
+    results: list = []
+    pictures: list = []
+    for index, call in enumerate(calls):
+        try:
+            content, pics = run_one(call)
+        except tools.TurnInterrupted:
+            results.extend(_interrupted_from(calls, index))
+            return results, pictures, True
+        results.append(ToolMessage(content=content, tool_call_id=call.get("id", "")))
+        pictures.extend(pics)
+    return results, pictures, False
+
+
+def _run_host_tools(messages: list) -> tuple[list, bool]:
     """Run every tool call on the last message on the host.
 
     `author_script` is not special here. The scripter uses this, and a handoff
     tool it emits has to reach the host as an unknown tool rather than start
-    another scripter.
+    another scripter. The bool is true when the user interrupted the batch.
     """
     calls = getattr(messages[-1], "tool_calls", None) or []
-    results: list = []
-    pictures: list = []
-    for call in calls:
-        content, pics = _host_result(call.get("name", ""), call.get("args") or {})
-        results.append(ToolMessage(content=content, tool_call_id=call.get("id", "")))
-        pictures.extend(pics)
-    return session.demote_pictures(messages + results + pictures)
+
+    def run_one(call: dict) -> tuple[object, list]:
+        return _host_result(call.get("name", ""), call.get("args") or {})
+
+    results, pictures, interrupted = _run_calls(calls, run_one)
+    return session.demote_pictures(messages + results + pictures), interrupted
 
 
 def run_tools(state: TurnState) -> dict:
@@ -179,34 +206,45 @@ def run_tools(state: TurnState) -> dict:
     """
     messages = list(state.get("messages") or [])
     calls = getattr(messages[-1], "tool_calls", None) or []
-    results: list = []
     # The pictures are held back and appended after every result, never between
     # them. Once a round asks for more than one tool, a user turn wedged in
     # mid-way makes the provider read the round as having answered only the
     # calls before it and reject the whole request (400 "insufficient tool
     # messages following tool_calls message").
-    pictures: list = []
     host_tools = state.get("tools") or []
-    for call in calls:
+
+    def run_one(call: dict) -> tuple[object, list]:
         name = call.get("name", "")
         args = call.get("args") or {}
         if name == operator.AUTHOR_SCRIPT_NAME:
             # The screen belongs to the device. A shot the scripter took is the
             # one a later tap in this turn is checked against, so the operator
-            # has to see it before that tap.
+            # has to see it before that tap. An interrupt inside the scripter
+            # propagates, and the calls after this one are filled in by
+            # `_run_calls`.
             before = session._LATEST_NUM
             content = scripter.run_scripter(args, host_tools)
-            results.append(ToolMessage(content=content, tool_call_id=call.get("id", "")))
+            pics: list = []
             if session._LATEST_NUM != before:
                 frame = session.latest_frame()
                 if frame is not None:
-                    pictures.append(frame)
-            continue
-        content, pics = _host_result(name, args)
-        results.append(ToolMessage(content=content, tool_call_id=call.get("id", "")))
-        pictures.extend(pics)
-    return {"messages": session.demote_pictures(messages + results + pictures),
-            "tool_rounds": state.get("tool_rounds", 0) + 1}
+                    pics.append(frame)
+            return content, pics
+        return _host_result(name, args)
+
+    results, pictures, interrupted = _run_calls(calls, run_one)
+    out: dict = {"messages": session.demote_pictures(messages + results + pictures),
+                 "tool_rounds": state.get("tool_rounds", 0) + 1}
+    if interrupted:
+        out["interrupted"] = True
+    return out
+
+
+def route_after_tools(state: TurnState) -> str:
+    """Another model round, unless the user already sent the next message."""
+    if state.get("interrupted"):
+        return "commit"
+    return "invoke"
 
 
 def route_after_invoke(state: TurnState) -> str:
@@ -258,8 +296,13 @@ def build_graph():
         route_after_invoke,
         {"run_tools": "run_tools", "commit": "commit"},
     )
-    # Another model turn, with the results now in the message list.
-    graph.add_edge("run_tools", "invoke")
+    # Another model turn, with the results now in the message list. An
+    # interrupt commits what finished and does not call the model again.
+    graph.add_conditional_edges(
+        "run_tools",
+        route_after_tools,
+        {"invoke": "invoke", "commit": "commit"},
+    )
     graph.add_edge("commit", END)
     return graph.compile()
 

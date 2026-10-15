@@ -14,6 +14,15 @@ from uuid import uuid4
 import protocol
 import transport
 
+# Written into the history for the call that was in flight and for every call
+# in the same model message that had not been sent yet. The next request stays
+# valid: a tool call without a result is rejected by the provider.
+INTERRUPTED_TEXT = "interrupted by the user"
+
+
+class TurnInterrupted(Exception):
+    """The host stopped this turn. The in-flight call has no tool_result."""
+
 
 def call_cpp(name: str, args: dict) -> dict:
     """Run one tool on the host and return its `tool_result` message.
@@ -34,9 +43,12 @@ def call_cpp(name: str, args: dict) -> dict:
         msg = transport.read_message()
         if msg is None:
             raise RuntimeError("host closed the stream during a tool call")
+        if msg.get("type") == "interrupt" and msg.get("id") == transport.get_current_rid():
+            raise TurnInterrupted()
         if msg.get("type") == "tool_result" and msg.get("call_id") == call_id:
             return msg
-        # `log` lines are the host narrating to itself. Anything else belongs to
-        # the request loop, which is blocked inside this very call.
+        # `log` lines are the host narrating to itself. An `interrupt` for
+        # another request, and anything else, belongs to the request loop,
+        # which is blocked inside this very call.
         if msg.get("type") != "log":
             transport.push_back(msg)
