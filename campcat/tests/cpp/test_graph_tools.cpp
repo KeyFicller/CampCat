@@ -342,4 +342,49 @@ TEST_F(GraphTools, UpdateScriptRefusesAFlatCut) {
     EXPECT_FALSE(exists("g.task/flat.png"));
 }
 
+TEST_F(GraphTools, ATemplatePathThatLeavesTheBundleIsRefused) {
+    const auto borrowed = call(
+        "save_script",
+        R"({"name": "side", "source": "tap(\"../g.a/a.png\")\n"})");
+    EXPECT_FALSE(borrowed.ok);
+    EXPECT_NE(borrowed.error.find("\"../g.a/a.png\""), std::string::npos)
+        << borrowed.error;
+    EXPECT_NE(borrowed.error.find("outside this bundle"), std::string::npos)
+        << borrowed.error;
+    EXPECT_FALSE(exists("side/main.ccat"));
+
+    // `has` is not a required template on a task, so it used to slip through.
+    const auto probed = call(
+        "save_script",
+        R"({"name": "side", "source": "if (has(\"../g.a/a.png\")) { log(\"x\") }\n"})");
+    EXPECT_FALSE(probed.ok);
+    EXPECT_NE(probed.error.find("outside this bundle"), std::string::npos)
+        << probed.error;
+
+    // A def is already substituted when the script is parsed.
+    const auto hidden = call(
+        "save_script",
+        R"({"name": "side", "source": "defs { icon = \"../g.a/a.png\" }\ntap(icon)\n"})");
+    EXPECT_FALSE(hidden.ok);
+    EXPECT_NE(hidden.error.find("\"../g.a/a.png\""), std::string::npos)
+        << hidden.error;
+
+    const auto reused = call(
+        "save_script",
+        R"({"name": "side", "source": "run(\"../g.task/main.ccat\")\n"})");
+    EXPECT_TRUE(reused.ok) << reused.error;
+    EXPECT_TRUE(exists("side/main.ccat"));
+
+    const std::string before = read_file(m_dir / "g.task" / "main.ccat");
+    const auto updated = call("update_script", R"({
+        "name": "g.task",
+        "source": "tap(\"/tmp/a.png\")\n",
+        "templates": []
+    })");
+    EXPECT_FALSE(updated.ok);
+    EXPECT_NE(updated.error.find("outside this bundle"), std::string::npos)
+        << updated.error;
+    EXPECT_EQ(read_file(m_dir / "g.task" / "main.ccat"), before);
+}
+
 } // namespace

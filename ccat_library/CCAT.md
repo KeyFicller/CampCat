@@ -15,12 +15,14 @@ Every statement that names a PNG takes its own fresh screenshot. `//` comments t
 device.
 
 A PNG path or a message may be a quoted string, a string `def`, or a bare word (letters, digits, `_`, `.`, `-`), so
-`tap(ok.png)` is legal but spaces need quotes. Absolute paths are used as is; relative ones resolve against the
-directory of the `.ccat` file being run. Strings are `"..."` with `\n`, `\t`, `\\`, `\"`; any other `\x` is `x`.
+`tap(ok.png)` is legal but spaces need quotes. A relative path resolves against the directory of the
+`.ccat` file being run. Strings are `"..."` with `\n`, `\t`, `\\`, `\"`; any other `\x` is `x`.
 Scripts you save live in a bundle, `ccat_library/<name>/main.ccat` with their templates beside it; run one with
 `run("<name>/main.ccat")`. A `run` path resolves like any other relative one -- against the calling script's own
 directory -- so a script that is itself saved in a bundle reaches another one as `run("../<name>/main.ccat")`:
 without the `../`, `<name>/main.ccat` means a directory inside its own bundle.
+A PNG path is a file name in that same bundle (`tap("a.png")`). One with `/` or `..` is
+refused when the script is saved; cut the picture into this bundle instead.
 
 **`<name>` is a skill.** The first line of `main.ccat` is its one-line description when it starts with `//`:
 `// taps the login button and waits for the feed`. `list_scripts` shows every bundle with its description; read one

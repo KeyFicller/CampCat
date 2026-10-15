@@ -1,8 +1,10 @@
 """Check a region against its own crop before the host acts on it.
 
-One model call per round, with no tools: the crop at full size, and either the
-area around it or a thumbnail of the whole frame. The caller sends whatever
-region comes back. A check that cannot run lets the original call through.
+One model call per round, with no tools: the crop at full size, and the area
+around it. A correction is kept, not trusted: when there is more than one,
+a last call sees every crop and picks one. Corrections drift, so a pick that
+cannot be read keeps the first proposal. A check that cannot run lets the
+original call through.
 """
 
 from __future__ import annotations
@@ -49,6 +51,16 @@ REVIEW_PROMPT = (
     "in this frame."
 )
 
+PICK_PROMPT = (
+    "You see every crop considered for one region, in order. 1 is the first "
+    "proposal; each later one is a correction of the one before it, and "
+    "corrections drift, so a later crop is not a better one. Pick the crop "
+    "that best matches the expectation: the control it names, tight around "
+    "it, nothing extra, and not cut off. Answer in exactly this form:\n"
+    "pick: <the number>\n"
+    "reason: one sentence"
+)
+
 REVIEW_CRITERIA = {
     "tap": "The region is to be tapped: it must sit on the element the expectation names.",
     "template": (
@@ -81,6 +93,7 @@ class ReviewState(TypedDict, total=False):
     frame_size: tuple
     verdict: str
     reason: str
+    candidates: list
 
 
 def neighbourhood(bounds: tuple[int, int, int, int],
@@ -154,6 +167,20 @@ def parse_review(text: str, shape: str) -> tuple[str, dict | None, str]:
     if verdict == "adjust" and not isinstance(region, dict):
         return "skip", None, text.strip()
     return verdict, region, reason
+
+
+def parse_pick(text: str, count: int) -> int | None:
+    """The 1-based crop a pick names, or None when the line is missing or off."""
+    for line in text.strip().splitlines():
+        line = line.strip()
+        if not line.lower().startswith("pick:"):
+            continue
+        try:
+            number = int(line.split(":", 1)[1].strip())
+        except ValueError:
+            return None
+        return number if 1 <= number <= count else None
+    return None
 
 
 def remember_human_region(content: str) -> None:
@@ -288,6 +315,8 @@ def review_judge(state: ReviewState) -> dict:
     out: dict = {"verdict": verdict, "reason": reason, "rounds": rounds}
     if verdict == "adjust" and _inside(region, state["shape"], state.get("frame_size")):
         out["region"] = region
+        out["candidates"] = list(state.get("candidates") or []) + [
+            {"region": region, "note": reason}]
     elif verdict == "adjust":
         # Off the frame, or no box: the previous region stands, and the loop stops.
         out["verdict"] = "ok"
@@ -303,7 +332,56 @@ def _after_render(state: ReviewState) -> str:
 def _after_judge(state: ReviewState) -> str:
     if state.get("verdict") == "adjust" and state.get("rounds", 0) < MAX_ROUNDS:
         return "render"
+    # A correction is a candidate, not the answer: the last call picks among
+    # them. One candidate means nothing moved, so there is nothing to pick.
+    if (state.get("verdict") in ("ok", "adjust")
+            and len(state.get("candidates") or []) > 1):
+        return "pick"
     return "end"
+
+
+def review_pick(state: ReviewState) -> dict:
+    """The crop that best matches the expectation, from every one considered."""
+    candidates = state.get("candidates") or []
+    first = candidates[0]["region"]
+    extra = {} if state.get("shot") is None else {"shot": state["shot"]}
+    lines = [
+        REVIEW_CRITERIA[state["kind"]],
+        f"expectation: {state.get('expect') or '(none given)'}",
+    ]
+    pictures = []
+    for index, candidate in enumerate(candidates, 1):
+        crop = tools.call_cpp("view_crop", {"region": candidate["region"], **extra})
+        if not crop.get("ok"):
+            return {"region": first, "verdict": "ok",
+                    "reason": str(crop.get("error", "")) or "could not compare"}
+        pictures.append(_picture(crop.get("image_b64") or ""))
+        lines.append(
+            f"{index}. {json.dumps(candidate['region'], separators=(',', ':'))}"
+            f" — {candidate.get('note') or ''}")
+    lines.append("The pictures follow in that order.")
+    try:
+        model = models.build_chat_model()
+        response = model.invoke([
+            SystemMessage(content=PICK_PROMPT),
+            HumanMessage(content=[
+                {"type": "text", "text": "\n".join(lines)}, *pictures]),
+        ])
+    except tools.TurnInterrupted:
+        raise
+    except Exception as exc:  # noqa: BLE001 - an unreadable pick keeps the proposal
+        return {"region": first, "verdict": "ok", "reason": str(exc)}
+    text = session.content_text(getattr(response, "content", response))
+    number = parse_pick(text, len(candidates))
+    if number is None:
+        return {"region": first, "verdict": "ok",
+                "reason": "unreadable pick; kept the first proposal"}
+    reason = ""
+    for line in text.splitlines():
+        if line.strip().lower().startswith("reason:"):
+            reason = line.split(":", 1)[1].strip()
+    return {"region": candidates[number - 1]["region"], "verdict": "ok",
+            "reason": reason}
 
 
 _GRAPH = None
@@ -315,11 +393,14 @@ def _graph():
         compiled = StateGraph(ReviewState)
         compiled.add_node("review_render", review_render)
         compiled.add_node("review_judge", review_judge)
+        compiled.add_node("review_pick", review_pick)
         compiled.set_entry_point("review_render")
         compiled.add_conditional_edges(
             "review_render", _after_render, {"judge": "review_judge", "end": END})
         compiled.add_conditional_edges(
-            "review_judge", _after_judge, {"render": "review_render", "end": END})
+            "review_judge", _after_judge,
+            {"render": "review_render", "pick": "review_pick", "end": END})
+        compiled.add_edge("review_pick", END)
         _GRAPH = compiled.compile()
     return _GRAPH
 
@@ -331,6 +412,7 @@ def _one(kind: str, shape: str, region: dict, shot, expect: str,
     out = graph.run_subgraph(_graph(), {
         "kind": kind, "shape": shape, "region": region, "shot": shot,
         "expect": expect, "label": label or expect, "rounds": 0,
+        "candidates": [{"region": dict(region), "note": "proposal"}],
     })
     verdict = out.get("verdict")
     if verdict == "reject":
@@ -338,7 +420,11 @@ def _one(kind: str, shape: str, region: dict, shot, expect: str,
     if verdict == "skip":
         return region, f" (self-check skipped: {out.get('reason') or 'unreadable'})", ""
     final = out.get("region") or region
-    return final, _moved(shape, region, final, out.get("reason") or ""), ""
+    note = _moved(shape, region, final, out.get("reason") or "")
+    if not note and len(out.get("candidates") or []) > 1:
+        note = (f" (self-check kept the first of {len(out['candidates'])}: "
+                f"{out.get('reason') or ''})")
+    return final, note, ""
 
 
 def _human_repeat(name: str, args: dict) -> bool:

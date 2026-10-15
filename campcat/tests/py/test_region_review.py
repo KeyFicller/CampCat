@@ -140,24 +140,38 @@ def test_adjust_then_ok_sends_the_new_region_and_says_so(monkeypatch):
         _call("tap", {"region": dict(BOX), "expect": "btn"}),
         _say('verdict: adjust\nbox: {"x":2,"y":2,"w":3,"h":3}\nreason: tight'),
         _say("verdict: ok\nreason: fine"),
+        _say("pick: 2\nreason: tighter"),
         _say("Done."),
     ], None)
     assert calls[-1] == ("tap", {"region": {"x": 2, "y": 2, "w": 3, "h": 3}})
     assert "self-check moved box 1,2 3x4 to 2,2 3x3" in _tap_text()[0]
 
 
-def test_three_adjusts_stop_and_use_the_last(monkeypatch):
-    third = {"x": 4, "y": 4, "w": 2, "h": 2}
+def test_three_adjusts_then_the_pick_chooses(monkeypatch):
     calls, model, _ = _drive(monkeypatch, [
         _call("tap", {"region": dict(BOX), "expect": "btn"}),
         _say('verdict: adjust\nbox: {"x":2,"y":2,"w":3,"h":3}\nreason: a'),
         _say('verdict: adjust\nbox: {"x":3,"y":3,"w":2,"h":2}\nreason: b'),
         _say('verdict: adjust\nbox: {"x":4,"y":4,"w":2,"h":2}\nreason: c'),
+        _say("pick: 2\nreason: the second one"),
         _say("Done."),
     ], None)
-    assert len(_reviews(model)) == 3
-    assert [c[0] for c in calls].count("view_crop") == 3
-    assert calls[-1][1]["region"] == third
+    assert len(_reviews(model)) == 4
+    # Three looks while correcting, then one crop per candidate for the pick.
+    assert [c[0] for c in calls].count("view_crop") == 7
+    assert calls[-1][1]["region"] == {"x": 2, "y": 2, "w": 3, "h": 3}
+
+
+def test_an_unreadable_pick_keeps_the_first_proposal(monkeypatch):
+    calls, _, _ = _drive(monkeypatch, [
+        _call("tap", {"region": dict(BOX), "expect": "btn"}),
+        _say('verdict: adjust\nbox: {"x":2,"y":2,"w":3,"h":3}\nreason: tight'),
+        _say("verdict: ok\nreason: fine"),
+        _say("nope"),
+        _say("Done."),
+    ], None)
+    assert calls[-1][1]["region"] == BOX
+    assert "kept the first of 2" in _tap_text()[0]
 
 
 def test_reject_never_reaches_the_host(monkeypatch):

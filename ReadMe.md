@@ -61,7 +61,9 @@ flowchart TD
     review_render -->|裁得出图| review_judge
     review_render -->|裁不出| reviewEnd([结束])
     review_judge -->|adjust 且未满 3 轮| review_render
-    review_judge -->|不是 adjust，或已满 3 轮| reviewEnd
+    review_judge -->|有不止一个候选| review_pick
+    review_judge -->|其余| reviewEnd
+    review_pick --> reviewEnd
   end
 
   subgraph diagnose["模板排查"]

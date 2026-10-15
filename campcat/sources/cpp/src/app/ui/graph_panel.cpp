@@ -143,29 +143,13 @@ std::string_view edge_label(std::string_view _graph, std::string_view _script) {
     return _script;
 }
 
-/// What the node says about one anchor: its kind (double-click opens the
-/// anchor's script), a popup's close bundle, the first line of its description,
-/// and its templates, a name per line so each one previews on hover.
+/// What the node says about one anchor: its templates, a name per line so each
+/// one previews on hover.
 std::vector<body_line> body_lines_for(const screen_graph &_graph,
                                       const anchor_def &_anchor,
                                       const std::filesystem::path &_home) {
     const std::string bundle = _graph.name + "." + _anchor.id;
     std::vector<body_line> out;
-    body_line kind;
-    kind.text = _anchor.kind == anchor_kind::popup       ? "popup"
-                : _anchor.kind == anchor_kind::transient ? "transient"
-                                                         : "page";
-    kind.open_script = bundle;
-    out.push_back(std::move(kind));
-    if (_anchor.kind == anchor_kind::popup) {
-        body_line close;
-        close.text = "close: " + std::string(edge_label(_graph.name, _anchor.close));
-        close.open_script = _anchor.close;
-        out.push_back(std::move(close));
-    }
-    const std::string first =
-        _anchor.description.substr(0, _anchor.description.find('\n'));
-    out.push_back({first.empty() ? "(no description)" : first, first.empty()});
     for (const std::string &png :
          campcat::ccat_lang::bundle_templates(_home, bundle)) {
         body_line line;

@@ -600,6 +600,43 @@ void collect_required_templates(const ccat_lang::Stmt &_s,
     }
 }
 
+/// A template path that is not a file name in this bundle. `run("../other/...")`
+/// is a different statement and is not collected here.
+bool template_leaves_bundle(const std::string &_path) {
+    return _path.find('/') != std::string::npos ||
+           _path.find("..") != std::string::npos;
+}
+
+/// Refuses a script whose PNG paths reach outside its own bundle. `has` counts
+/// too: borrowing another bundle's template is the same coupling as tapping it.
+void require_local_templates(const ccat_lang::Program &_prog) {
+    std::vector<std::string> paths;
+    for (const auto &stmt : _prog.stmts) {
+        collect_required_templates(*stmt, &paths, true);
+    }
+    std::vector<std::string> bad;
+    for (const std::string &path : paths) {
+        if (!template_leaves_bundle(path) ||
+            std::find(bad.begin(), bad.end(), path) != bad.end()) {
+            continue;
+        }
+        bad.push_back(path);
+    }
+    if (!bad.empty()) {
+        std::string listed;
+        for (const std::string &path : bad) {
+            if (!listed.empty()) {
+                listed += ", ";
+            }
+            listed += "\"" + path + "\"";
+        }
+        throw js::bind_error(
+            "template " + listed +
+            " is outside this bundle; cut it into this bundle and use the "
+            "file name");
+    }
+}
+
 adb_api &require_adb() {
     if (g_ctx.adb == nullptr) {
         throw js::bind_error("no adb session");
@@ -1100,6 +1137,7 @@ std::string graph_check(const std::string &_graph) {
         save_script(std::string name, std::string source) {
     const std::unique_ptr<ccat_lang::Program> prog =
         check_new_bundle(name, source);
+    require_local_templates(*prog);
     if (needs_approval("save_script")) {
         if (!g_ctx.request_approval) {
             throw js::bind_error(
@@ -1411,6 +1449,7 @@ template_plan plan_templates(const std::string &_bundle,
                              const ccat_lang::Program &_prog,
                              const std::vector<template_cut> &_templates,
                              bool _anchor, bool _new_bundle) {
+    require_local_templates(_prog);
     // The declared names, checked before anything is resolved against the disk,
     // so a duplicate is reported as a duplicate and not as whatever the first
     // entry happened to be missing.
