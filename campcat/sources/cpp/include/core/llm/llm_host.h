@@ -14,6 +14,7 @@
 #include <vector>
 
 #include "core/llm/llm_fuse.h"
+#include "core/llm/llm_memory.h"
 #include "core/llm/llm_protocol.h"
 #include "core/llm/llm_tools.h"
 #include "core/process.h"
@@ -129,7 +130,7 @@ public:
      * be slow, but the shutdown call must not be.
      */
     llm_result memorize(const std::filesystem::path &_config_home,
-                        const std::string &_provider,
+                        const std::string &_provider, llm::memory_kind _kind,
                         int _timeout_ms);
 
     /**

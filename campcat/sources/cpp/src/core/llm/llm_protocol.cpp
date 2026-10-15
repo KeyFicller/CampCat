@@ -52,6 +52,7 @@ std::string base64_encode(const unsigned char *_data, std::size_t _len) {
 std::string build_turn_request(long _id, std::string_view _text,
                                std::string_view _tools_json,
                                std::string_view _memory,
+                               std::string_view _scripter_memory,
                                std::string_view _provider,
                                int _max_tool_rounds) {
     nlohmann::json j;
@@ -64,6 +65,7 @@ std::string build_turn_request(long _id, std::string_view _text,
         j["tools"] = nlohmann::json::parse(_tools_json, nullptr, false);
     }
     j["memory"] = std::string(_memory);
+    j["scripter_memory"] = std::string(_scripter_memory);
     j["provider"] = std::string(_provider);
     j["max_tool_rounds"] = _max_tool_rounds;
     return j.dump();
@@ -105,12 +107,14 @@ std::string build_interrupt_request(long _id) {
 }
 
 std::string build_memorize_request(long _id, std::string_view _memory,
-                                   std::string_view _provider) {
+                                   std::string_view _provider,
+                                   std::string_view _agent) {
     nlohmann::json j;
     j["type"] = "memorize";
     j["id"] = _id;
     j["memory"] = std::string(_memory);
     j["provider"] = std::string(_provider);
+    j["agent"] = std::string(_agent);
     return j.dump();
 }
 

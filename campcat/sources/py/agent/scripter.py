@@ -343,7 +343,9 @@ def run_scripter(args: dict, host_tools: list,
 def _scripter_build(state: dict) -> dict:
     """The scripter's request: its own prompt and history, plus the brief."""
     memorier.compact_scripter()
-    messages: list[object] = [SystemMessage(content=scripter_prompt())]
+    messages: list[object] = [SystemMessage(content=(
+        scripter_prompt() + memorier.scripter_memory_block(session.scripter_memory())
+    ))]
     messages.extend(session.scripter_history())
     frame = session.latest_frame()
     if frame is not None:

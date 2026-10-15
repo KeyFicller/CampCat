@@ -114,11 +114,27 @@ _CONTEXT: int | None = None
 # dozens of tool rounds never enter the operator's prompt or its cache prefix.
 _SCRIPTER_MESSAGES: list = []
 _SCRIPTER_TURN_MARK = "scripter-turn"
+# How many of _SCRIPTER_MESSAGES are already folded into the scripter notes.
+_SCRIPTER_MEMORIZED_UPTO = 0
+# Pitfalls the host sent with this turn. Empty until a turn sets them.
+_SCRIPTER_MEMORY = ""
+
+
+def set_scripter_memory(text: str) -> None:
+    """Remember the scripter notes the host sent with this turn."""
+    global _SCRIPTER_MEMORY
+    _SCRIPTER_MEMORY = text
+
+
+def scripter_memory() -> str:
+    """The scripter notes for the turn now being served."""
+    return _SCRIPTER_MEMORY
 
 
 def reset() -> None:
     """Drop every turn. The next request starts a fresh conversation."""
     global _LATEST_NUM, _LATEST_B64, _LATEST_TIME, _MEMORIZED_UPTO, _TURN_PREV_SHOT
+    global _SCRIPTER_MEMORIZED_UPTO, _SCRIPTER_MEMORY
     global _TURN_SEQ, _LLM_CALLS, _TOOL_CALLS, _CONTEXT
     import agent.memorier as memorier
     _MESSAGES.clear()
@@ -130,6 +146,8 @@ def reset() -> None:
     memorier._MW = None
     memorier._SCRIPTER_MW = None
     _MEMORIZED_UPTO = 0
+    _SCRIPTER_MEMORIZED_UPTO = 0
+    _SCRIPTER_MEMORY = ""
     _TURN_SEQ = 0
     _LLM_CALLS = 0
     _TOOL_CALLS = 0

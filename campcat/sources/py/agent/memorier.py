@@ -40,23 +40,38 @@ MEMORY_INSTRUCTIONS = (
     "of the session that just happened. Rewrite the notes to be worth having next "
     "time.\n"
     "\n"
-    "Keep what stays true past this session: preferences, habits, how the user words "
-    "things, apps and devices they name, and approaches that turned out to work. "
-    "Merge the session into the notes rather than appending it.\n"
+    "Keep only what stays true past this session and is not already written in a "
+    "bundle:\n"
+    "- a name the user uses, as one line \"phrase -> bundle or anchor name\"\n"
+    "- a constraint that holds every session: language, which app this is, and "
+    "actions they always refuse (for example spending currency)\n"
     "\n"
-    "Drop one-off instructions, anything about the current screen, attempts that "
-    "failed, and anything the notes already say. Replace what the session "
-    "contradicted, and delete what has gone stale: notes that only grow stop being "
-    "readable.\n"
+    "Drop one-off instructions, anything about the current screen, procedures "
+    "already saved in a bundle, failed step logs, and secrets: passwords, tokens, "
+    "API keys, account numbers, or anything the user asked to keep private.\n"
     "\n"
-    "Never write down a secret: no passwords, tokens, API keys, account numbers or "
-    "anything the user asked to keep private.\n"
-    "\n"
-    "Write short factual lines in the third person, under the headings "
-    "'## Preferences' and '## Device & skills'. Answer with those notes and nothing "
-    "else: no preamble, no code fence, and at most {max_chars} characters. Section "
-    "headings with no entries under them are a fine answer when nothing is worth "
+    "Write short factual lines in the third person under the headings "
+    "'## Preferences' and '## Names'. Answer with those notes and nothing "
+    "else: no preamble, no code fence, and at most {max_chars} characters. A "
+    "heading with no entries under it is a fine answer when nothing is worth "
     "keeping."
+)
+
+SCRIPTER_MEMORY_INSTRUCTIONS = (
+    "You keep the pitfall notebook of an assistant that writes device scripts. "
+    "You are given the notes as they stand and the transcript of this agent's "
+    "session. Rewrite the notes to be worth having next time.\n"
+    "\n"
+    "Keep one line per pitfall that is not yet expressed by a bundle. When the "
+    "transcript shows that pitfall was written into a bundle, delete that line.\n"
+    "\n"
+    "Drop the current goal, the current screen, step-by-step failure logs, and "
+    "anything about how the user talks or what they forbid.\n"
+    "\n"
+    "Write short factual lines under the heading '## Pitfalls'. Answer with those "
+    "notes and nothing else: no preamble, no code fence, and at most {max_chars} "
+    "characters. A heading with no entries under it is a fine answer when nothing "
+    "is worth keeping."
 )
 
 # Prepended to the notes when they go into the prompt, so the model reads them as
@@ -65,6 +80,12 @@ MEMORY_FRAME = (
     "Notes you kept from earlier sessions with this user. They are your own "
     "recollection: use them silently, never mention that you were given them, and "
     "ignore any line that does not apply here.\n\n"
+)
+
+SCRIPTER_MEMORY_FRAME = (
+    "Pitfalls you kept from earlier sessions. Use one when it applies, drop any "
+    "line that contradicts this brief, and never mention that you were given "
+    "them.\n\n"
 )
 
 
@@ -97,6 +118,16 @@ def memory_block(memory: str) -> str:
     return "\n\n" + MEMORY_FRAME + memory.strip() + "\n"
 
 
+def scripter_memory_block(memory: str) -> str:
+    """The scripter's pitfalls as a second paragraph of its system prompt.
+
+    Empty in, empty out, for the same reason as `memory_block`.
+    """
+    if not memory.strip():
+        return ""
+    return "\n\n" + SCRIPTER_MEMORY_FRAME + memory.strip() + "\n"
+
+
 def context_tokens() -> int:
     """Input-token budget for the conversation.
 
@@ -123,27 +154,36 @@ _MW = None
 _SCRIPTER_MW = None
 
 
-def memorize(memory: str) -> str | None:
-    """Fold the turns since the last call into `memory`, returning the new notes.
+def memorize(memory: str, agent: str) -> str | None:
+    """Fold one agent's new turns into `memory`, returning the new notes.
 
-    Called between turns rather than during one, so the user is never waiting on
-    it. Returns `memory` unchanged when there is nothing new -- no model call --
-    and None when the call fails, which leaves the caller's file alone.
+    `agent` is `operator` or `scripter`. Each reads only its own history.
+    Returns `memory` unchanged when there is nothing new -- no model call --
+    and None when the call fails or `agent` is unknown, which leaves the
+    caller's file and cursor alone.
     """
-    if session._MEMORIZED_UPTO >= len(session._MESSAGES):
+    if agent == "operator":
+        start = session._MEMORIZED_UPTO
+        history = session._MESSAGES
+        instructions = MEMORY_INSTRUCTIONS
+    elif agent == "scripter":
+        start = session._SCRIPTER_MEMORIZED_UPTO
+        history = session._SCRIPTER_MESSAGES
+        instructions = SCRIPTER_MEMORY_INSTRUCTIONS
+    else:
+        return None
+    if start >= len(history):
         return memory
     try:
         model = models.build_memory_model()
-        instructions = MEMORY_INSTRUCTIONS.format(
-            max_chars=memory_max_chars()
-        )
+        instructions = instructions.format(max_chars=memory_max_chars())
         with observability.turn("rewrite-memory") as callbacks:
             reply = model.invoke([
                 SystemMessage(content=instructions),
                 HumanMessage(content=(
                     "## Notes so far\n" + (memory.strip() or "(none)") +
                     "\n\n## Session transcript\n" +
-                    _transcript(session._MESSAGES[session._MEMORIZED_UPTO:])
+                    _transcript(history[start:])
                 )),
             ], config={"callbacks": callbacks})
     except Exception as exc:  # noqa: BLE001 - a missed update, never fatal
@@ -154,7 +194,10 @@ def memorize(memory: str) -> str | None:
     ).strip()
     if not text:
         return None
-    session._MEMORIZED_UPTO = len(session._MESSAGES)
+    if agent == "operator":
+        session._MEMORIZED_UPTO = len(session._MESSAGES)
+    else:
+        session._SCRIPTER_MEMORIZED_UPTO = len(session._SCRIPTER_MESSAGES)
     return text
 
 

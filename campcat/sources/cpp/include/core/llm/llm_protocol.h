@@ -17,7 +17,8 @@ namespace campcat::llm_protocol {
 ///    settings selected.
 /// 8: the host may send `interrupt` in place of a `tool_result` to stop the
 ///    turn, and `result` may carry `interrupted`.
-constexpr int k_protocol_version = 8;
+/// 9: `turn` carries `scripter_memory`, and `memorize` carries `agent`.
+constexpr int k_protocol_version = 9;
 
 /**
  * @brief One decoded line from the sidecar's stdout.
@@ -109,12 +110,14 @@ std::string base64_encode(const unsigned char *_data, std::size_t _len);
  * @param[in] _tools_json OpenAI tools array; empty to offer no tools.
  * @param[in] _memory Long-term notes about this user, read off disk by the
  * host. Sent even when empty, so the field's shape never moves.
+ * @param[in] _scripter_memory The scripter's own notes. Sent even when empty.
  * @param[in] _provider Which model provider the sidecar should build, from the
  * host's settings. Sent even when empty, for the same reason as `_memory`.
  */
 std::string build_turn_request(long _id, std::string_view _text,
                                std::string_view _tools_json,
                                std::string_view _memory,
+                               std::string_view _scripter_memory,
                                std::string_view _provider,
                                int _max_tool_rounds);
 
@@ -156,9 +159,11 @@ std::string build_interrupt_request(long _id);
  * @param[in] _memory The notes as they stand now; empty when there are none.
  * @param[in] _provider Which model provider the sidecar should build, so the
  * consolidation runs on the model the settings selected.
+ * @param[in] _agent `operator` or `scripter`: which notebook this pass rewrites.
  */
 std::string build_memorize_request(long _id, std::string_view _memory,
-                                   std::string_view _provider);
+                                   std::string_view _provider,
+                                   std::string_view _agent);
 
 /**
  * @brief Parse one sidecar line. Never throws.

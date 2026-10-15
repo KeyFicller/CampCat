@@ -45,11 +45,41 @@ bool read_unlocked(const std::filesystem::path &_path, std::string *_out) {
 
 } // namespace
 
-std::filesystem::path memory_path(const std::filesystem::path &_config_home) {
-    return _config_home / "memory.md";
+std::filesystem::path memory_path(const std::filesystem::path &_config_home,
+                                  memory_kind _kind) {
+    const char *name =
+        _kind == memory_kind::scripter_notes ? "scripter.md" : "operator.md";
+    return _config_home / name;
 }
 
-bool read_memory(const std::filesystem::path &_config_home, std::string *_out) {
+const char *memory_agent_name(memory_kind _kind) {
+    return _kind == memory_kind::scripter_notes ? "scripter" : "operator";
+}
+
+/// Caller holds `file_mutex()`. `operator.md` wins when both names exist.
+static bool adopt_legacy_operator_file(const std::filesystem::path &_config_home) {
+    const std::filesystem::path current =
+        memory_path(_config_home, memory_kind::operator_notes);
+    const std::filesystem::path legacy = _config_home / "memory.md";
+    std::error_code ec;
+    const bool current_exists = std::filesystem::exists(current, ec);
+    if (ec) {
+        return false;
+    }
+    ec.clear();
+    const bool legacy_exists = std::filesystem::exists(legacy, ec);
+    if (ec) {
+        return false;
+    }
+    if (current_exists || !legacy_exists) {
+        return true;
+    }
+    std::filesystem::rename(legacy, current, ec);
+    return !ec;
+}
+
+bool read_memory(const std::filesystem::path &_config_home, memory_kind _kind,
+                 std::string *_out) {
     if (_out == nullptr) {
         return false;
     }
@@ -59,10 +89,14 @@ bool read_memory(const std::filesystem::path &_config_home, std::string *_out) {
     }
 
     std::lock_guard<std::mutex> lk(file_mutex());
-    return read_unlocked(memory_path(_config_home), _out);
+    if (_kind == memory_kind::operator_notes &&
+        !adopt_legacy_operator_file(_config_home)) {
+        return false;
+    }
+    return read_unlocked(memory_path(_config_home, _kind), _out);
 }
 
-bool write_memory(const std::filesystem::path &_config_home,
+bool write_memory(const std::filesystem::path &_config_home, memory_kind _kind,
                   const std::string &_text) {
     if (_config_home.empty() || _text.empty() ||
         _text.size() > k_memory_max_chars) {
@@ -70,7 +104,7 @@ bool write_memory(const std::filesystem::path &_config_home,
     }
 
     std::lock_guard<std::mutex> lk(file_mutex());
-    const std::filesystem::path p = memory_path(_config_home);
+    const std::filesystem::path p = memory_path(_config_home, _kind);
 
     // Refuse to replace notes we could not read: an unreadable file must not
     // become an empty one.
@@ -111,7 +145,7 @@ bool write_memory(const std::filesystem::path &_config_home,
     return true;
 }
 
-bool clear_memory(const std::filesystem::path &_config_home) {
+bool clear_memory(const std::filesystem::path &_config_home, memory_kind _kind) {
     if (_config_home.empty()) {
         return false;
     }
@@ -119,7 +153,7 @@ bool clear_memory(const std::filesystem::path &_config_home) {
     std::error_code ec;
     // A file that was never there reports no error, which is the success we
     // want.
-    std::filesystem::remove(memory_path(_config_home), ec);
+    std::filesystem::remove(memory_path(_config_home, _kind), ec);
     return !ec;
 }
 

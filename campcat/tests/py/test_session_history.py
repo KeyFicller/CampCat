@@ -90,7 +90,7 @@ def test_memorize_ignores_scripter_history(monkeypatch):
             return AIMessage(content="## Preferences\nkept")
 
     monkeypatch.setattr(models, "build_memory_model", lambda: _Model())
-    notes = memorier.memorize("")
+    notes = memorier.memorize("", "operator")
     assert notes == "## Preferences\nkept"
     assert "operator said hello" in seen["text"]
     assert "scripter secret handoff" not in seen["text"]

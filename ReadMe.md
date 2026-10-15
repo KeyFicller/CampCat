@@ -26,7 +26,7 @@
 
 **先建图，再挂任务** —— 模型先把游戏的屏幕建成一张图：每个屏幕是一个锚点（`save_anchor` 写下画面描述和只做判断的脚本），屏幕之间的每次跳转是一条边（一个 `G.a-b` 技能包）；`goto` 沿图走到目标，每一跳都检查两端。任务脚本以 `goto` 开头，挂在图上。所以这条路线的终点是路径一的「图加上图上的任务」：确定的、可调度、可复用的那份。
 
-**跨会话记忆** —— 记录用户习惯和游戏内黑话，落在 `ccat_library/memory.md`。
+**跨会话记忆** —— operator 的叫法和约束在 `ccat_library/operator.md`，scripter 的坑在 `ccat_library/scripter.md`。
 
 **LangGraph** —— 一轮对话是下面的回合图。`author_script` 和 `diagnose_template`、以及每次带区域的工具，都在工具节点里另起一张图，不挂在父图上。
 

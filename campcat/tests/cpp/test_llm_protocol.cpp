@@ -22,7 +22,8 @@ using campcat::llm_protocol::parse_line;
 
 nlohmann::json turn_with(const std::string &_provider) {
     return nlohmann::json::parse(build_turn_request(
-        1, "hi", "", "notes", _provider, campcat::llm::k_default_max_tool_rounds));
+        1, "hi", "", "notes", "", _provider,
+        campcat::llm::k_default_max_tool_rounds));
 }
 
 TEST(LlmProtocol, TurnCarriesTheSelectedProvider) {
@@ -74,7 +75,7 @@ TEST(LlmProtocol, MemorizeCarriesTheSelectedProvider) {
     // Consolidation builds a model too, so a Qwen-only setup fails here unless
     // the provider comes along.
     const nlohmann::json j =
-        nlohmann::json::parse(build_memorize_request(2, "notes", "qwen"));
+        nlohmann::json::parse(build_memorize_request(2, "notes", "qwen", "operator"));
 
     EXPECT_EQ(j["type"], "memorize");
     EXPECT_EQ(j["provider"], "qwen");
@@ -176,8 +177,98 @@ TEST(LlmProtocol, ToolCallCarriesUsage) {
 
 TEST(LlmProtocol, TurnCarriesTheRoundCap) {
     const nlohmann::json j =
-        nlohmann::json::parse(build_turn_request(1, "hi", "", "notes", "qwen", 20));
+        nlohmann::json::parse(build_turn_request(1, "hi", "", "notes", "", "qwen", 20));
     EXPECT_EQ(j["max_tool_rounds"], 20);
+}
+
+TEST(LlmProtocol, TurnCarriesScripterMemoryEvenWhenEmpty) {
+    const nlohmann::json j = nlohmann::json::parse(build_turn_request(
+        1, "hi", "", "notes", "", "qwen", 20));
+    EXPECT_EQ(j["memory"], "notes");
+    ASSERT_TRUE(j.contains("scripter_memory"));
+    EXPECT_EQ(j["scripter_memory"], "");
+    EXPECT_EQ(j["max_tool_rounds"], 20);
+}
+
+TEST(LlmProtocol, MemorizeNamesTheAgent) {
+    const nlohmann::json j = nlohmann::json::parse(
+        build_memorize_request(2, "notes", "qwen", "scripter"));
+    EXPECT_EQ(j["type"], "memorize");
+    EXPECT_EQ(j["agent"], "scripter");
+    EXPECT_EQ(j["memory"], "notes");
+}
+
+TEST(LlmMemory, TheTwoFilesStayApart) {
+    const std::filesystem::path dir =
+        std::filesystem::temp_directory_path() / "campcat_memory_apart";
+    std::filesystem::remove_all(dir);
+    std::filesystem::create_directories(dir);
+    std::string missing;
+    ASSERT_TRUE(campcat::llm::read_memory(
+        dir, campcat::llm::memory_kind::scripter_notes, &missing));
+    EXPECT_TRUE(missing.empty());
+    EXPECT_TRUE(campcat::llm::write_memory(
+        dir, campcat::llm::memory_kind::operator_notes, "keep"));
+    EXPECT_TRUE(campcat::llm::write_memory(
+        dir, campcat::llm::memory_kind::scripter_notes, "pit"));
+    EXPECT_FALSE(campcat::llm::write_memory(
+        dir, campcat::llm::memory_kind::scripter_notes, ""));
+    EXPECT_FALSE(campcat::llm::write_memory(
+        dir, campcat::llm::memory_kind::scripter_notes, std::string(4001, 'x')));
+    std::string op;
+    ASSERT_TRUE(campcat::llm::read_memory(
+        dir, campcat::llm::memory_kind::operator_notes, &op));
+    EXPECT_EQ(op, "keep");
+    EXPECT_TRUE(campcat::llm::clear_memory(
+        dir, campcat::llm::memory_kind::scripter_notes));
+    ASSERT_TRUE(campcat::llm::read_memory(
+        dir, campcat::llm::memory_kind::operator_notes, &op));
+    EXPECT_EQ(op, "keep");
+    std::filesystem::remove_all(dir);
+}
+
+TEST(LlmMemory, LegacyMemoryFileIsRenamedOnce) {
+    const std::filesystem::path dir =
+        std::filesystem::temp_directory_path() / "campcat_memory_rename";
+    std::filesystem::remove_all(dir);
+    std::filesystem::create_directories(dir);
+    {
+        std::ofstream out(dir / "memory.md");
+        out << "keep";
+    }
+    std::string op;
+    ASSERT_TRUE(campcat::llm::read_memory(
+        dir, campcat::llm::memory_kind::operator_notes, &op));
+    EXPECT_EQ(op, "keep");
+    EXPECT_TRUE(std::filesystem::exists(dir / "operator.md"));
+    EXPECT_FALSE(std::filesystem::exists(dir / "memory.md"));
+    {
+        std::ofstream out(dir / "memory.md");
+        out << "stale";
+    }
+    ASSERT_TRUE(campcat::llm::read_memory(
+        dir, campcat::llm::memory_kind::operator_notes, &op));
+    EXPECT_EQ(op, "keep");
+    EXPECT_TRUE(std::filesystem::exists(dir / "memory.md"));
+    std::filesystem::remove_all(dir);
+}
+
+TEST(LlmMemory, AnUnreadableFileIsNotReplaced) {
+    const std::filesystem::path dir =
+        std::filesystem::temp_directory_path() / "campcat_memory_unread";
+    std::filesystem::remove_all(dir);
+    std::filesystem::create_directories(dir);
+    EXPECT_TRUE(campcat::llm::write_memory(
+        dir, campcat::llm::memory_kind::operator_notes, "keep"));
+    std::filesystem::create_directory(
+        campcat::llm::memory_path(dir, campcat::llm::memory_kind::scripter_notes));
+    EXPECT_FALSE(campcat::llm::write_memory(
+        dir, campcat::llm::memory_kind::scripter_notes, "new"));
+    std::string op;
+    ASSERT_TRUE(campcat::llm::read_memory(
+        dir, campcat::llm::memory_kind::operator_notes, &op));
+    EXPECT_EQ(op, "keep");
+    std::filesystem::remove_all(dir);
 }
 
 TEST(AppConfig, MissingFuseFieldsKeepTheDefaults) {

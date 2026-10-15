@@ -531,18 +531,24 @@ llm_result llm_host::run_turn(const std::filesystem::path &_config_home,
     // Read fresh every turn rather than cached: the file is small, and editing
     // it outside the app then has to show up on the very next request.
     std::string memory;
-    if (!llm::read_memory(_config_home, &memory)) {
-        // Unreadable is not empty, but it is also no reason to refuse the turn:
-        // the model just goes without notes this time, and `memorize` will
-        // refuse to overwrite the file it cannot read.
+    if (!llm::read_memory(_config_home, llm::memory_kind::operator_notes,
+                          &memory)) {
         memory.clear();
         record_note(
-            "long-term memory file is unreadable; continuing without it");
+            "operator long-term memory file is unreadable; continuing without it");
+    }
+    std::string scripter_memory;
+    if (!llm::read_memory(_config_home, llm::memory_kind::scripter_notes,
+                          &scripter_memory)) {
+        scripter_memory.clear();
+        record_note(
+            "scripter long-term memory file is unreadable; continuing without it");
     }
 
     const long id = next_request_id();
     std::string request = llm_protocol::build_turn_request(
-        id, _prompt, llm::tools_json(), memory, _provider, _max_tool_rounds);
+        id, _prompt, llm::tools_json(), memory, scripter_memory, _provider,
+        _max_tool_rounds);
     request.push_back('\n');
     const llm_result turn = exchange(request, k_request_timeout_ms);
     // This turn may have replaced the screenshot; take it back for the next one
@@ -554,12 +560,13 @@ llm_result llm_host::run_turn(const std::filesystem::path &_config_home,
 
 llm_result llm_host::memorize(const std::filesystem::path &_config_home,
                               const std::string &_provider,
-                              int _timeout_ms) {
+                              llm::memory_kind _kind, int _timeout_ms) {
     llm_result r;
 
     std::string current;
-    if (!llm::read_memory(_config_home, &current)) {
-        r.error = "long-term memory file is unreadable; not overwriting it";
+    if (!llm::read_memory(_config_home, _kind, &current)) {
+        r.error = std::string(llm::memory_agent_name(_kind)) +
+                  " long-term memory file is unreadable; not overwriting it";
         return r;
     }
 
@@ -570,7 +577,8 @@ llm_result llm_host::memorize(const std::filesystem::path &_config_home,
     }
 
     const long id = next_request_id();
-    std::string request = llm_protocol::build_memorize_request(id, current, _provider);
+    std::string request = llm_protocol::build_memorize_request(
+        id, current, _provider, llm::memory_agent_name(_kind));
     request.push_back('\n');
     const llm_result out = exchange(request, _timeout_ms);
     if (!out.ok) {
@@ -593,10 +601,10 @@ llm_result llm_host::memorize(const std::filesystem::path &_config_home,
         return r;
     }
 
-    if (!llm::write_memory(_config_home, out.text)) {
-        r.error =
-            "long-term memory was not written (unreadable, empty, or over " +
-            std::to_string(llm::k_memory_max_chars) + " characters)";
+    if (!llm::write_memory(_config_home, _kind, out.text)) {
+        r.error = std::string(llm::memory_agent_name(_kind)) +
+                  " long-term memory was not written (unreadable, empty, or over " +
+                  std::to_string(llm::k_memory_max_chars) + " characters)";
         return r;
     }
     r.ok = true;
@@ -720,7 +728,7 @@ llm_result llm_host::run_turn(const std::filesystem::path &,
 }
 
 llm_result llm_host::memorize(const std::filesystem::path &, const std::string &,
-                              int) {
+                              llm::memory_kind, int) {
     llm_result r;
     r.error = "the LLM sidecar is not supported on Windows";
     return r;

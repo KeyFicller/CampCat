@@ -52,7 +52,7 @@ def handle_request(req: dict) -> Iterator[dict]:
     if rtype == "memorize":
         # The conversation is already here, so only the current notes cross the
         # wire; the reply carries the rewritten ones back for the host to write.
-        notes = memorier.memorize(req.get("memory") or "")
+        notes = memorier.memorize(req.get("memory") or "", req.get("agent") or "")
         if notes is None:
             yield protocol.build_error_result(
                 rid, "memory not updated", **session.usage_fields())
@@ -62,6 +62,8 @@ def handle_request(req: dict) -> Iterator[dict]:
     if rtype != "turn":
         yield protocol.build_log("warn", f"ignoring unknown message type: {rtype}")
         return
+
+    session.set_scripter_memory(req.get("scripter_memory") or "")
 
     out: dict = {}
     buf: list[str] = []

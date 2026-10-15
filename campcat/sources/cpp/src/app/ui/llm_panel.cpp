@@ -192,9 +192,13 @@ std::filesystem::path g_config_home;
 /// provider, and only the draw call sees the config.
 std::string g_provider = "deepseek";
 
+/// The page the memory window is showing.
+campcat::llm::memory_kind g_mem_kind = campcat::llm::memory_kind::operator_notes;
 /// The Long-term memory window, and the copy it displays.
 bool g_mem_open = false;
 std::string g_mem_buf;
+/// Characters in the page being shown. The status line keeps its own count.
+int g_mem_page_chars = 0;
 
 /// The sidecar's own count of the turns it still holds verbatim, taken from
 /// each successful reply. Deliberately not `g_turns.size()`: that counts
@@ -210,10 +214,14 @@ double g_memory_read_at = 0.0;
 /// (Re)read the memory file into the window's buffer.
 void reload_memory() {
     std::string text;
-    if (!campcat::llm::read_memory(g_config_home, &text)) {
+    if (!campcat::llm::read_memory(g_config_home, g_mem_kind, &text)) {
         text = "(the memory file could not be read)";
-    } else if (text.empty()) {
-        text = "(no memory yet)";
+        g_mem_page_chars = 0;
+    } else {
+        g_mem_page_chars = static_cast<int>(text.size());
+        if (text.empty()) {
+            text = "(no memory yet)";
+        }
     }
     g_mem_buf = std::move(text);
 }
@@ -228,42 +236,44 @@ void refresh_memory_chars() {
     }
     g_memory_read_at = now;
     std::string text;
-    if (campcat::llm::read_memory(g_config_home, &text)) {
+    if (campcat::llm::read_memory(g_config_home,
+                                  campcat::llm::memory_kind::operator_notes,
+                                  &text)) {
         g_memory_chars = static_cast<int>(text.size());
     }
 }
 
-/// Read-only view of the notes, with the one destructive action behind a
-/// confirmation: the app never edits them here, so there is nothing to save.
-void draw_memory_window() {
-    if (!g_mem_open) {
-        return;
+/// Read-only view of one notebook. Switching pages reloads that file.
+void draw_memory_page(campcat::llm::memory_kind _kind) {
+    if (g_mem_kind != _kind) {
+        g_mem_kind = _kind;
+        reload_memory();
     }
-    ImGui::SetNextWindowSize(ImVec2(620.0F, 440.0F), ImGuiCond_FirstUseEver);
-    if (!ImGui::Begin("Long-term memory", &g_mem_open)) {
-        ImGui::End();
-        return;
-    }
+    const bool scripter = _kind == campcat::llm::memory_kind::scripter_notes;
+    const char *popup =
+        scripter ? "clear_scripter_memory" : "clear_operator_memory";
+    const char *ask = scripter ? "Delete the scripter long-term memory file?"
+                               : "Delete the operator long-term memory file?";
 
-    // Shown selectable on purpose: the point of it is that the user can open
-    // the file in an editor of their own instead of fighting this box.
     ImGui::TextUnformatted(
-        campcat::llm::memory_path(g_config_home).string().c_str());
+        campcat::llm::memory_path(g_config_home, _kind).string().c_str());
     ImGui::TextDisabled("Kept in this file. Written when the conversation goes "
                         "idle, and before "
                         "it is cleared.");
+    ImGui::Text("%d/%d", g_mem_page_chars,
+                static_cast<int>(campcat::llm::k_memory_max_chars));
     if (ImGui::Button("Reload")) {
         reload_memory();
     }
     ImGui::SameLine();
     if (ImGui::Button("Clear memory")) {
-        ImGui::OpenPopup("clear_memory_confirm");
+        ImGui::OpenPopup(popup);
     }
-    if (ImGui::BeginPopupModal("clear_memory_confirm", nullptr,
+    if (ImGui::BeginPopupModal(popup, nullptr,
                                ImGuiWindowFlags_AlwaysAutoResize)) {
-        ImGui::TextUnformatted("Delete the long-term memory file?");
+        ImGui::TextUnformatted(ask);
         if (ImGui::Button("Delete", ImVec2(120.0F, 0.0F))) {
-            if (!campcat::llm::clear_memory(g_config_home)) {
+            if (!campcat::llm::clear_memory(g_config_home, _kind)) {
                 campcat::automation_log::emit("[llm] memory file not deleted");
             }
             reload_memory();
@@ -280,6 +290,31 @@ void draw_memory_window() {
     ImGui::InputTextMultiline("##memory", &g_mem_buf,
                               ImGui::GetContentRegionAvail(),
                               ImGuiInputTextFlags_ReadOnly);
+}
+
+/// Read-only view of the notes, with the one destructive action behind a
+/// confirmation: the app never edits them here, so there is nothing to save.
+void draw_memory_window() {
+    if (!g_mem_open) {
+        return;
+    }
+    ImGui::SetNextWindowSize(ImVec2(620.0F, 440.0F), ImGuiCond_FirstUseEver);
+    if (!ImGui::Begin("Long-term memory", &g_mem_open)) {
+        ImGui::End();
+        return;
+    }
+
+    if (ImGui::BeginTabBar("##memory_books")) {
+        if (ImGui::BeginTabItem("Operator")) {
+            draw_memory_page(campcat::llm::memory_kind::operator_notes);
+            ImGui::EndTabItem();
+        }
+        if (ImGui::BeginTabItem("Scripter")) {
+            draw_memory_page(campcat::llm::memory_kind::scripter_notes);
+            ImGui::EndTabItem();
+        }
+        ImGui::EndTabBar();
+    }
     ImGui::End();
 }
 
@@ -666,6 +701,25 @@ void start_turn(campcat::shell_state &_st, const campcat::app_config &_cfg,
     });
 }
 
+/// Operator first, then scripter. A failed operator pass still writes scripter.
+/// A message queued during the first pass skips the second. `*_operator_out`
+/// is the operator pass, which is what the status line counts.
+void memorize_both(const std::filesystem::path &_home, const std::string &_provider,
+                   int _timeout_ms, campcat::llm_result *_operator_out) {
+    *_operator_out = g_host.memorize(
+        _home, _provider, campcat::llm::memory_kind::operator_notes, _timeout_ms);
+    // operator 失败也要写 scripter。只有用户已经发来新消息才停。
+    if (g_host.interrupt_pending()) {
+        return;
+    }
+    campcat::llm_result scripter = g_host.memorize(
+        _home, _provider, campcat::llm::memory_kind::scripter_notes, _timeout_ms);
+    if (!scripter.ok) {
+        campcat::automation_log::emit("[llm] scripter memory not saved: " +
+                                      scripter.error);
+    }
+}
+
 /// Consolidate the session into the long-term notes, on the worker.
 /// A message sent while this runs discards the notes and becomes the next turn.
 void start_memorize(campcat::shell_state &_st, const campcat::app_config &_cfg) {
@@ -675,9 +729,9 @@ void start_memorize(campcat::shell_state &_st, const campcat::app_config &_cfg) 
     g_running.store(true);
     g_memorizing.store(true);
     g_thread = std::thread([st = &_st, cfg_snapshot = _cfg]() {
-        campcat::llm_result res = g_host.memorize(
-            cfg_snapshot.config_home, cfg_snapshot.llm.provider,
-            campcat::k_memorize_timeout_ms);
+        campcat::llm_result res;
+        memorize_both(cfg_snapshot.config_home, cfg_snapshot.llm.provider,
+                      campcat::k_memorize_timeout_ms, &res);
         g_memorizing.store(false);
         // Checked before the queue is taken: taking it clears the flag.
         const bool dropped = g_host.interrupt_pending();
@@ -711,8 +765,8 @@ void start_reset(std::filesystem::path _config_home, std::string _provider) {
         // point. A failed consolidation is not a reason to refuse the clear the
         // user asked for.
         g_memorizing.store(true);
-        campcat::llm_result kept = g_host.memorize(
-            config_home, provider, campcat::k_memorize_timeout_ms);
+        campcat::llm_result kept;
+        memorize_both(config_home, provider, campcat::k_memorize_timeout_ms, &kept);
         g_memorizing.store(false);
         if (!kept.ok) {
             campcat::automation_log::emit("[llm] memory not saved: " +
@@ -755,7 +809,7 @@ void consume_handoff() {
             g_memory_chars = static_cast<int>(h.res.text.size());
         }
         campcat::automation_log::emit(
-            h.res.ok ? "[llm] long-term memory updated"
+            h.res.ok ? "[llm] operator long-term memory updated"
                      : "[llm] memory not saved: " + h.res.error);
         return;
     }
@@ -1679,9 +1733,9 @@ void llm_panel_shutdown_gl() {
     // in `llm_panel_shutdown_finish`, once there is nothing left to freeze.
     if (!g_config_home.empty()) {
         g_shutdown_thread = std::thread([]() {
-            const campcat::llm_result res =
-                g_host.memorize(g_config_home, g_provider,
-                                campcat::k_shutdown_memorize_timeout_ms);
+            campcat::llm_result res;
+            memorize_both(g_config_home, g_provider,
+                          campcat::k_shutdown_memorize_timeout_ms, &res);
             if (!res.ok) {
                 campcat::automation_log::emit("[llm] memory not saved: " +
                                               res.error);
