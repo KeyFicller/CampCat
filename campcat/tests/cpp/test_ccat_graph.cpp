@@ -25,6 +25,7 @@ using campcat::ccat_lang::anchor_def;
 using campcat::ccat_lang::anchor_kind;
 using campcat::ccat_lang::bundle_run;
 using campcat::ccat_lang::bundle_tags;
+using campcat::ccat_lang::graph_action;
 using campcat::ccat_lang::graph_edge;
 using campcat::ccat_lang::graph_names;
 using campcat::ccat_lang::graph_summary;
@@ -36,6 +37,7 @@ using campcat::ccat_lang::nav_limits;
 using campcat::ccat_lang::navigate;
 using campcat::ccat_lang::parse_error;
 using campcat::ccat_lang::parse_program;
+using campcat::ccat_lang::run_action;
 using campcat::ccat_lang::run_edge;
 using campcat::ccat_lang::scan_graph;
 using campcat::ccat_lang::screen_graph;
@@ -424,6 +426,53 @@ TEST(CcatGraph, RunEdgeTimeoutAndLandedElsewhere) {
     EXPECT_EQ(off.message, "run g.a-b: landed on c");
 }
 
+TEST(CcatGraph, RunActionNotAtAnchor) {
+    screen_graph graph =
+        mem_graph({{"kucang", page}, {"wujiang", page}}, {});
+    std::vector<std::string> ran;
+    const graph_action claim{"kucang", "claim", "g.kucang.claim"};
+    const auto got =
+        run_action(graph, claim, io_of({shows("wujiang")}, &ran), quick());
+    EXPECT_FALSE(got.ok);
+    EXPECT_EQ(got.message, "run g.kucang.claim: not at kucang (at wujiang)");
+    EXPECT_TRUE(ran.empty());
+}
+
+TEST(CcatGraph, RunActionReturns) {
+    screen_graph graph =
+        mem_graph({{"kucang", page}, {"wujiang", page}}, {});
+    std::vector<std::string> ran;
+    const graph_action claim{"kucang", "claim", "g.kucang.claim"};
+    const auto got = run_action(
+        graph, claim, io_of({shows("kucang"), shows("kucang")}, &ran), quick());
+    EXPECT_TRUE(got.ok) << got.message;
+    EXPECT_EQ(ran, std::vector<std::string>{"g.kucang.claim"});
+}
+
+TEST(CcatGraph, RunActionLandsElsewhereOnce) {
+    screen_graph graph =
+        mem_graph({{"kucang", page}, {"wujiang", page}}, {});
+    std::vector<std::string> ran;
+    const graph_action claim{"kucang", "claim", "g.kucang.claim"};
+    const auto got = run_action(
+        graph, claim, io_of({shows("kucang"), shows("wujiang")}, &ran), quick());
+    EXPECT_NE(got.message.find("landed on wujiang"), std::string::npos)
+        << got.message;
+    EXPECT_EQ(ran, std::vector<std::string>{"g.kucang.claim"});
+}
+
+TEST(CcatGraph, GotoDoesNotRunAnAction) {
+    screen_graph graph =
+        mem_graph({{"entry", page}, {"kucang", page}}, {});
+    graph.actions.push_back({"kucang", "claim", "g.kucang.claim"});
+    std::vector<std::string> ran;
+    const auto got =
+        navigate(graph, "kucang", io_of({shows("entry")}, &ran), quick());
+    EXPECT_FALSE(got.ok);
+    EXPECT_NE(got.message.find("no path"), std::string::npos) << got.message;
+    EXPECT_TRUE(ran.empty());
+}
+
 TEST(CcatGraph, RunEdgeStopIsNotFailure) {
     const screen_graph graph = mem_graph({{"a", page}, {"b", page}}, {{"a", "b"}});
     std::vector<std::string> ran;
@@ -520,6 +569,24 @@ TEST(CcatGraph, RunOnAnEdgeChecksBothEnds) {
               std::string::npos)
         << wrong.message;
     EXPECT_EQ(off.adb.homes, 0) << "not one action of the edge ran";
+}
+
+TEST(CcatGraph, RunOnAnActionChecksBothEnds) {
+    toy g("run_action");
+    write_file(g.dir / "g.a.claim" / "main.ccat", "home\n");
+    device there(g);
+    there.adb.frames = {g.frame_a, g.frame_a};
+    const auto ok = there.run("run(\"g.a.claim/main.ccat\")");
+    EXPECT_TRUE(ok.ok) << ok.message;
+    EXPECT_EQ(there.adb.homes, 1);
+
+    device off(g);
+    off.adb.frames = {g.frame_b};
+    const auto wrong = off.run("run(\"g.a.claim/main.ccat\")");
+    EXPECT_FALSE(wrong.ok);
+    EXPECT_NE(wrong.message.find("not at a"), std::string::npos)
+        << wrong.message;
+    EXPECT_EQ(off.adb.homes, 0);
 }
 
 TEST(CcatGraph, RunOnPlainBundleUnchanged) {
@@ -621,6 +688,72 @@ TEST(CcatGraph, ABadReferenceDoesNotParse) {
     EXPECT_THROW(parse_program("goto(g:b)"), parse_error);
     EXPECT_THROW(parse_program("goto(\"b\")"), parse_error);
     EXPECT_THROW(parse_program("at(\"g:b\")"), parse_error);
+}
+
+TEST(CcatGraph, AnActionIsThreeNameParts) {
+    toy g("action_name");
+    write_file(g.dir / "g.a.claim" / "main.ccat", "log(\"x\")\n");
+    write_file(g.dir / "g.a.claim.extra" / "main.ccat", "log(\"x\")\n");
+    const auto claim = bundle_tags(g.dir, "g.a.claim");
+    EXPECT_EQ(claim.action_of, "g");
+    EXPECT_EQ(claim.action_on, "a");
+    EXPECT_TRUE(bundle_tags(g.dir, "g.a.claim.extra").action_of.empty());
+    const auto scanned = scan_graph(g.dir, "g");
+    ASSERT_EQ(scanned.graph.actions.size(), 1u);
+    EXPECT_EQ(scanned.graph.actions[0].script, "g.a.claim");
+    EXPECT_EQ(scanned.graph.actions[0].name, "claim");
+    EXPECT_EQ(scanned.graph.actions[0].anchor, "a");
+    const std::string text = graph_summary(scanned);
+    EXPECT_NE(text.find("actions: 1"), std::string::npos) << text;
+    EXPECT_NE(text.find("  a.claim"), std::string::npos) << text;
+    EXPECT_EQ(bundle_tags(g.dir, "g.entry").actions, 1);
+}
+
+TEST(CcatGraph, AnActionOnAMissingAnchorIsAProblem) {
+    toy g("action_missing");
+    write_file(g.dir / "g.nope.claim" / "main.ccat", "log(\"x\")\n");
+    const auto scanned = scan_graph(g.dir, "g");
+    EXPECT_TRUE(scanned.graph.actions.empty());
+    bool named = false;
+    for (const std::string &p : scanned.problems) {
+        if (p.find("g.nope.claim: anchor nope does not exist") !=
+            std::string::npos) {
+            named = true;
+        }
+    }
+    EXPECT_TRUE(named);
+}
+
+TEST(CcatGraph, AnActionOnAPopupIsNotAPage) {
+    toy g("action_popup");
+    write_file(g.dir / "g.close" / "main.ccat", "log(\"close\")\n");
+    anchor(g.dir, "g.pop", "pop.png", tex(4),
+           "---\nkind: popup\nclose: g.close\n---\nscreen\n");
+    write_file(g.dir / "g.pop.claim" / "main.ccat", "log(\"x\")\n");
+    const auto scanned = scan_graph(g.dir, "g");
+    EXPECT_TRUE(scanned.graph.actions.empty());
+    bool named = false;
+    for (const std::string &p : scanned.problems) {
+        if (p.find("g.pop.claim: anchor pop is not a page") !=
+            std::string::npos) {
+            named = true;
+        }
+    }
+    EXPECT_TRUE(named);
+}
+
+TEST(CcatGraph, GotoInAnActionIsAProblem) {
+    toy g("action_goto");
+    write_file(g.dir / "g.a.claim" / "main.ccat", "goto(\"g:b\")\n");
+    const auto scanned = scan_graph(g.dir, "g");
+    bool named = false;
+    for (const std::string &p : scanned.problems) {
+        if (p.find("g.a.claim: goto is not allowed in an action") !=
+            std::string::npos) {
+            named = true;
+        }
+    }
+    EXPECT_TRUE(named);
 }
 
 } // namespace

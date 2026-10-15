@@ -256,6 +256,15 @@ warm start take different paths -- but it never checks its own ends, because the
 does, and it must not call `goto` (`goto inside a graph script`). A move slower than 20 s
 waits for itself: `wait_until` on a template of `b`, or `loop` + `wait_until` for a long load.
 
+### Actions
+
+An action's bundle is `{graph}.{anchor}.{action}` (for example `stzb.kucang.claim`, tagged
+`[action of stzb on kucang]`). It is work that starts and ends on the same screen. The script
+may leave that screen briefly. It must not call `goto` or `at`. Templates live in the action
+bundle. `run("{graph}.{anchor}.{action}/main.ccat")` checks both ends the way an edge does,
+once, and does not retry: not on the anchor fails without running, back on it is success,
+another page or a 20000 ms timeout is a failure. Spending or claiming goes in an action.
+
 ### Locating
 
 A locate takes one screenshot and runs every anchor script against that one frame:
@@ -302,11 +311,11 @@ reachable from `entry`. Saving an anchor or an edge reports the same list.
 1. One screen, one anchor. Tell two screens apart by a template of a control only one of
    them shows. Every PNG in the bundle is drawn on that anchor in the graph editor, so do
    not save a picture of the other screen just to `return false`. Never a lower threshold.
-2. An edge must be safe to run again. Spending or claiming goes in the task, after `goto`.
+2. An edge must be safe to run again. Spending or claiming goes in an action.
 3. Do not `tap_at` when a `tap` missed. Let it fail.
 4. In a task, do not `loop` + `has` + `wait` for a screen: `goto` it. Only an edge waits
    for itself.
-5. A task is `goto` to the start, the action, then a result anchor (`wait_until` or `at`).
+5. A task is `goto` to the page, `run` the action, then a check of the result.
 
 ## `$Debug`
 

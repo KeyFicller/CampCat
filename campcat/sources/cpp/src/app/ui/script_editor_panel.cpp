@@ -4,6 +4,7 @@
 #include "app/ui/fonts.h"
 #include "app/ui/gl_texture.h"
 #include "core/script/ccat_bundle.h"
+#include "core/script/ccat_graph.h"
 
 #include <imgui.h>
 #include <misc/cpp/imgui_stdlib.h>
@@ -59,6 +60,15 @@ std::vector<std::unique_ptr<script_editor>> g_editors;
 
 /// The last scan of the bundle directory, refreshed at most once a second.
 std::vector<std::string> g_names;
+/// Graphs under that directory, and the one the list is showing.
+std::vector<std::string> g_graphs;
+std::string g_graph;
+/// Anchors and edges of `g_graph`, full bundle names. Filled with the scan,
+/// and again when the combo changes, so tagging does not run every frame.
+/// Actions hang under the anchor bundle they run on.
+std::vector<std::string> g_nodes;
+std::vector<std::string> g_edges;
+std::map<std::string, std::vector<std::string>> g_actions;
 double g_next_scan = 0.0;
 
 /// The deletion being confirmed, and -- when `g_delete_error` is set -- the
@@ -106,6 +116,31 @@ std::string clock_now() {
     return buf;
 }
 
+/// Split `g_names` into the anchors and edges of `g_graph`.
+void classify_graph(const std::filesystem::path &_dir) {
+    g_nodes.clear();
+    g_edges.clear();
+    g_actions.clear();
+    if (g_graph.empty()) {
+        return;
+    }
+    const std::string prefix = g_graph + ".";
+    for (const std::string &name : g_names) {
+        if (name.rfind(prefix, 0) != 0) {
+            continue;
+        }
+        const campcat::ccat_lang::bundle_tag tag =
+            campcat::ccat_lang::bundle_tags(_dir, name);
+        if (tag.anchor_of == g_graph) {
+            g_nodes.push_back(name);
+        } else if (tag.edge_of == g_graph) {
+            g_edges.push_back(name);
+        } else if (tag.action_of == g_graph) {
+            g_actions[prefix + tag.action_on].push_back(name);
+        }
+    }
+}
+
 /// Rescans the bundle directory, at most once a second: the set of skills is a
 /// low-frequency thing, and a directory walk on every frame is a walk per
 /// frame. Previews of files that are gone or were rewritten by the model are
@@ -121,6 +156,15 @@ void scan_scripts(const std::filesystem::path &_dir) {
     if (names != g_names) {
         g_names = std::move(names);
     }
+    g_graphs = campcat::ccat_lang::graph_names(_dir);
+    if (!g_graph.empty() &&
+        std::find(g_graphs.begin(), g_graphs.end(), g_graph) == g_graphs.end()) {
+        g_graph.clear();
+    }
+    if (g_graph.empty() && !g_graphs.empty()) {
+        g_graph = g_graphs.front();
+    }
+    classify_graph(_dir);
 
     for (auto it = g_previews.begin(); it != g_previews.end();) {
         std::error_code ec;
@@ -264,54 +308,137 @@ void draw_template_preview(const std::filesystem::path &_path,
     ImGui::EndTooltip();
 }
 
+/// Drag, hover, double-click and the right-click menu for the item just drawn.
+void script_row_actions(const std::filesystem::path &_dir,
+                        const std::string &_name, std::string *_rename,
+                        std::optional<std::string> *_to_delete) {
+    // The row is the grab handle for a drag onto the prompt box -- the whole
+    // row, because a handle of its own would squeeze the name, as with the
+    // menu below. Safe before the hover block: ImGui clears hover while a
+    // drag is live, so that block still sees what it saw before.
+    if (ImGui::BeginDragDropSource()) {
+        ImGui::SetDragDropPayload(k_script_drag_payload, _name.c_str(),
+                                  _name.size());
+        ImGui::TextUnformatted(_name.c_str());
+        ImGui::EndDragDropSource();
+    }
+    if (ImGui::IsItemHovered()) {
+        // Reading the description means opening main.ccat, so it is fetched
+        // only while the pointer is on the row, and shown over it rather
+        // than in it.
+        const std::string description =
+            campcat::ccat_lang::bundle_description(_dir, _name);
+        if (!description.empty()) {
+            ImGui::SetTooltip("%s", description.c_str());
+        }
+        if (ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
+            open_editor(_dir, _name);
+        }
+    }
+    // Behind a right click: the column is 180 wide and the row is one
+    // Selectable, so a button of its own would squeeze the name.
+    if (ImGui::BeginPopupContextItem("ctx")) {
+        if (ImGui::MenuItem("Rename")) {
+            *_rename = _name;
+        }
+        if (ImGui::MenuItem("Delete")) {
+            *_to_delete = _name;
+        }
+        ImGui::EndPopup();
+    }
+}
+
+void draw_script_row(const std::filesystem::path &_dir, const std::string &_name,
+                     const char *_label, std::string *_rename,
+                     std::optional<std::string> *_to_delete) {
+    ImGui::PushID(_name.c_str());
+    ImGui::Selectable(_label, false, ImGuiSelectableFlags_AllowDoubleClick);
+    script_row_actions(_dir, _name, _rename, _to_delete);
+    ImGui::PopID();
+}
+
+void draw_name_list(const std::filesystem::path &_dir, const char *_id,
+                    float _h, const std::vector<std::string> &_names,
+                    const std::string &_prefix, std::string *_rename,
+                    std::optional<std::string> *_to_delete) {
+    ImGui::BeginChild(_id, ImVec2(0.0F, _h));
+    if (_names.empty()) {
+        ImGui::TextDisabled("none");
+    }
+    for (const std::string &name : _names) {
+        const std::string label =
+            name.rfind(_prefix, 0) == 0 ? name.substr(_prefix.size()) : name;
+        draw_script_row(_dir, name, label.c_str(), _rename, _to_delete);
+    }
+    ImGui::EndChild();
+}
+
+/// Anchors of the open graph. One with actions is a tree; the child label is
+/// the action name, and the drag still carries the full bundle name.
+void draw_node_list(const std::filesystem::path &_dir, float _h,
+                    const std::string &_prefix, std::string *_rename,
+                    std::optional<std::string> *_to_delete) {
+    ImGui::BeginChild("graph_nodes", ImVec2(0.0F, _h));
+    if (g_nodes.empty()) {
+        ImGui::TextDisabled("none");
+    }
+    for (const std::string &name : g_nodes) {
+        const std::string label =
+            name.rfind(_prefix, 0) == 0 ? name.substr(_prefix.size()) : name;
+        const auto found = g_actions.find(name);
+        if (found == g_actions.end() || found->second.empty()) {
+            draw_script_row(_dir, name, label.c_str(), _rename, _to_delete);
+            continue;
+        }
+        ImGui::PushID(name.c_str());
+        const bool open = ImGui::TreeNodeEx(
+            "##node",
+            ImGuiTreeNodeFlags_OpenOnArrow | ImGuiTreeNodeFlags_SpanAvailWidth,
+            "%s", label.c_str());
+        script_row_actions(_dir, name, _rename, _to_delete);
+        if (open) {
+            for (const std::string &action : found->second) {
+                const std::size_t dot = action.rfind('.');
+                const std::string action_label =
+                    dot == std::string::npos ? action : action.substr(dot + 1);
+                draw_script_row(_dir, action, action_label.c_str(), _rename,
+                                _to_delete);
+            }
+            ImGui::TreePop();
+        }
+        ImGui::PopID();
+    }
+    ImGui::EndChild();
+}
+
 std::optional<std::string> draw_list(const std::filesystem::path &_dir,
                                      float _w, float _h, std::string *_rename) {
     std::optional<std::string> to_delete;
     ImGui::BeginChild("script_list", ImVec2(_w, _h), ImGuiChildFlags_Borders);
-    ImGui::SeparatorText("Available Scripts");
-    if (g_names.empty()) {
-        ImGui::TextDisabled("none yet");
+    ImGui::SetNextItemWidth(-FLT_MIN);
+    if (ImGui::BeginCombo("##llm_graph",
+                          g_graph.empty() ? "(no graph)" : g_graph.c_str())) {
+        for (const std::string &name : g_graphs) {
+            if (ImGui::Selectable(name.c_str(), name == g_graph) &&
+                name != g_graph) {
+                g_graph = name;
+                classify_graph(_dir);
+            }
+        }
+        ImGui::EndCombo();
     }
-    for (const std::string &name : g_names) {
-        ImGui::PushID(name.c_str());
-        ImGui::Selectable(name.c_str(), false,
-                          ImGuiSelectableFlags_AllowDoubleClick);
-        // The row is the grab handle for a drag onto the prompt box -- the whole
-        // row, because a handle of its own would squeeze the name, as with the
-        // menu below. Safe before the hover block: ImGui clears hover while a
-        // drag is live, so that block still sees what it saw before.
-        if (ImGui::BeginDragDropSource()) {
-            ImGui::SetDragDropPayload(k_script_drag_payload, name.c_str(),
-                                      name.size());
-            ImGui::TextUnformatted(name.c_str());
-            ImGui::EndDragDropSource();
-        }
-        if (ImGui::IsItemHovered()) {
-            // Reading the description means opening main.ccat, so it is fetched
-            // only while the pointer is on the row, and shown over it rather
-            // than in it.
-            const std::string description =
-                campcat::ccat_lang::bundle_description(_dir, name);
-            if (!description.empty()) {
-                ImGui::SetTooltip("%s", description.c_str());
-            }
-            if (ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
-                open_editor(_dir, name);
-            }
-        }
-        // Behind a right click: the column is 180 wide and the row is one
-        // Selectable, so a button of its own would squeeze the name.
-        if (ImGui::BeginPopupContextItem("ctx")) {
-            if (ImGui::MenuItem("Rename")) {
-                *_rename = name;
-            }
-            if (ImGui::MenuItem("Delete")) {
-                to_delete = name;
-            }
-            ImGui::EndPopup();
-        }
-        ImGui::PopID();
-    }
+    ImGui::SeparatorText("Nodes");
+    const ImGuiStyle &style = ImGui::GetStyle();
+    const float sep_h = ImGui::GetTextLineHeight() +
+                        style.SeparatorTextPadding.y * 2.0F +
+                        style.ItemSpacing.y;
+    const float nodes_h =
+        std::max(1.0F, (ImGui::GetContentRegionAvail().y - sep_h) * 0.5F);
+    const std::string prefix = g_graph.empty() ? std::string() : g_graph + ".";
+    draw_node_list(_dir, nodes_h, prefix, _rename, &to_delete);
+    ImGui::SeparatorText("Edges");
+    draw_name_list(_dir, "graph_edges", 0.0F, g_edges, prefix, _rename,
+                   &to_delete);
     ImGui::EndChild();
     return to_delete;
 }
@@ -467,11 +594,13 @@ void draw_editor(script_editor &_e) {
     // directly above the button row, which is the window's footer, and the code
     // takes whatever is left. ImGui advances the cursor by each item's height
     // plus one ItemSpacing, and a separator is its label plus its own padding.
+    // The Script separator is drawn first, so its height is already spent.
     const float footer = ImGui::GetFrameHeightWithSpacing();
     const float below = ImGui::GetTextLineHeight() +
                         ImGui::GetStyle().SeparatorTextPadding.y * 2.0F +
                         ImGui::GetStyle().ItemSpacing.y + k_templates_h +
                         footer;
+    ImGui::SeparatorText("Script");
     WITH_FONT(mono, { _e.editor->Render("##ccat", ImVec2(0.0F, -below)); });
 
     // Templates, read-only: the point of hovering is to see what the model cut.

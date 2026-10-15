@@ -304,7 +304,7 @@ TEST_F(GraphTools, ListScriptsMarksTheGraph) {
     const auto reply = call("list_scripts", "{}");
     ASSERT_TRUE(reply.ok) << reply.error;
     EXPECT_NE(reply.text.find("g.entry -- (no description) [graph g, 2 anchors, "
-                              "1 edges]"),
+                              "1 edges, 0 actions]"),
               std::string::npos)
         << reply.text;
     EXPECT_NE(reply.text.find("g.a -- (no description) [anchor of g, page]"),
@@ -313,6 +313,19 @@ TEST_F(GraphTools, ListScriptsMarksTheGraph) {
     EXPECT_NE(reply.text.find("[edge of g]"), std::string::npos) << reply.text;
     EXPECT_NE(reply.text.find("g.task -- a task"), std::string::npos)
         << reply.text;
+}
+
+TEST_F(GraphTools, ListScriptsMarksAnAction) {
+    write_file(m_dir / "g.a.tap" / "main.ccat", "// 领取\nlog(\"x\")\n");
+    const auto listed = call("list_scripts", "{}");
+    ASSERT_TRUE(listed.ok) << listed.error;
+    EXPECT_NE(listed.text.find("g.a.tap -- 领取 [action of g on a]"),
+              std::string::npos)
+        << listed.text;
+    const auto graph = call("read_graph", R"({"name": "g"})");
+    ASSERT_TRUE(graph.ok) << graph.error;
+    EXPECT_NE(graph.text.find("actions: 1"), std::string::npos) << graph.text;
+    EXPECT_NE(graph.text.find("  a.tap"), std::string::npos) << graph.text;
 }
 
 TEST_F(GraphTools, RenameAndDeleteKeepTheGraphWhole) {

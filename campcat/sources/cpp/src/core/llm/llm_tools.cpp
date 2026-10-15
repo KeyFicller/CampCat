@@ -1349,7 +1349,8 @@ CPP_REFLECT_TOOL(ccat_help)
         if (tag.anchors > 0) {
             suffix = " [graph " + tag.anchor_of + ", " +
                      std::to_string(tag.anchors) + " anchors, " +
-                     std::to_string(tag.edges) + " edges]";
+                     std::to_string(tag.edges) + " edges, " +
+                     std::to_string(tag.actions) + " actions]";
         } else if (!tag.anchor_of.empty()) {
             const char *kind = tag.kind == ccat_lang::anchor_kind::popup ? "popup"
                                : tag.kind == ccat_lang::anchor_kind::transient
@@ -1358,6 +1359,9 @@ CPP_REFLECT_TOOL(ccat_help)
             suffix = " [anchor of " + tag.anchor_of + ", " + kind + "]";
         } else if (!tag.edge_of.empty()) {
             suffix = " [edge of " + tag.edge_of + "]";
+        } else if (!tag.action_of.empty()) {
+            suffix = " [action of " + tag.action_of + " on " + tag.action_on +
+                     "]";
         }
         out += name + " -- " +
                (description.empty() ? std::string("(no description)")

@@ -15,8 +15,8 @@ inline constexpr const char *k_script_drag_payload = "campcat_script";
 /**
  * @brief Draw the script list column, and every script window that is open.
  *
- * The caller has already moved the cursor to the column's top-left corner, so
- * it lands where it is placed in the row. Double-clicking a row opens that
+ * The column starts with a graph combo. Under it, that graph's anchors are
+ * listed as Nodes and its edges as Edges. Double-clicking a row opens that
  * script for viewing and editing; each script gets its own window, so opening a
  * second one never costs unsaved edits.
  *

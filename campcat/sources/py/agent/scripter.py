@@ -169,9 +169,9 @@ RULES = {
         "-- and it is this sequence:\n"
         "\n"
         "1. `list_scripts`, then `read_graph(<graph>)`. A graph's bundles are tagged "
-        "`[graph <graph>, N anchors, M edges]`, `[anchor of <graph>, <kind>]` and "
-        "`[edge of <graph>]`. A new graph starts at anchor `entry`: the screen every "
-        "run can begin from, normally the desktop.\n"
+        "`[graph <graph>, N anchors, M edges, K actions]`, `[anchor of <graph>, <kind>]`, "
+        "`[edge of <graph>]` and `[action of <graph> on <anchor>]`. A new graph starts at "
+        "anchor `entry`: the screen every run can begin from, normally the desktop.\n"
         "2. Each screen: `screenshot`, then `save_anchor(graph, anchor, golden, source, "
         "templates)`, which writes golden.md, main.ccat and the templates in one step. "
         "It first runs the existing anchors on the latest screenshot: refused with "
@@ -183,7 +183,12 @@ RULES = {
         "4. Verify one edge from screen a with `run_script` and the source "
         "`run(\"<graph>.<a>-<b>/main.ccat\")`: it checks it starts on a and lands on b. "
         "Verify a whole path with `run_script` and `goto(\"<graph>:<anchor>\")`; the "
-        "error names the hops it tried and the screen it last saw."
+        "error names the hops it tried and the screen it last saw.\n"
+        "5. Work that starts and ends on the same screen -- it may leave that screen "
+        "briefly -- is an action `{graph}.{anchor}.{action}`, saved with "
+        "`save_script(\"{graph}.{anchor}.{action}\")` and `save_template`. "
+        "`stzb.kucang.claim` is tagged `[action of stzb on kucang]`. Verify with "
+        "`run_script` and `run(\"{graph}.{anchor}.{action}/main.ccat\")`."
     ),
     "graph_rules": (
         "  * The screen a run starts on has anchor id `entry`, even when the brief "
@@ -213,8 +218,12 @@ RULES = {
         "  * An edge that takes longer waits for it itself: `wait_until` on a template "
         "of b, or `loop` + `wait_until` for a long load.\n"
         "  * An edge must survive being run twice from either end: it is re-run after a "
-        "replan lands you somewhere unexpected. Anything that spends a resource or claims a "
-        "reward belongs in a task, not in an edge.\n"
+        "replan lands you somewhere unexpected. An edge only ends on a different page. "
+        "Anything that spends a resource or claims a reward belongs in an action, not "
+        "in an edge.\n"
+        "  * An action's script does not call `goto` and does not `at` on its own; it "
+        "may leave the page in between. A task is `goto` to that page, "
+        "`run(\"{graph}.{anchor}.{action}/main.ccat\")`, then a check of the result.\n"
     ),
 }
 
@@ -239,8 +248,9 @@ def _read_gold_script() -> str:
 _example = _read_gold_script()
 if _example:
     RULES["example_script"] = (
-        "Worked examples that follow every rule above -- an anchor, an edge, and a task "
-        "that walks there first. Copy their shapes:\n\n" + _example
+        "Worked examples that follow every rule above -- an anchor, an edge, an action "
+        "on that anchor, and a task that walks there and runs it. Copy their shapes:\n\n" +
+        _example
     )
 
 _CCAT_CHEATSHEET = (

@@ -475,6 +475,18 @@ arrival_out wait_arrival(const screen_graph &_graph, const graph_edge &_edge,
 
 } // namespace
 
+bool split_action_name(std::string_view _rest, std::string *_anchor,
+                       std::string *_action) {
+    const std::size_t dot = _rest.find('.');
+    if (dot == std::string_view::npos ||
+        _rest.find('.', dot + 1) != std::string_view::npos) {
+        return false;
+    }
+    *_anchor = std::string(_rest.substr(0, dot));
+    *_action = std::string(_rest.substr(dot + 1));
+    return graph_part_name(*_anchor) && graph_part_name(*_action);
+}
+
 std::string script_graph_block(const std::filesystem::path &_library,
                                const std::string &_name,
                                const Program &_program) {
@@ -496,6 +508,26 @@ std::string script_graph_block(const std::filesystem::path &_library,
             return "";
         }
         return _name + ": " + missing;
+    }
+    std::string anchor_id;
+    std::string action;
+    if (split_action_name(rest, &anchor_id, &action)) {
+        const std::string bundle = graph + "." + anchor_id;
+        if (!golden_there(_library, bundle)) {
+            return _name + ": anchor " + anchor_id + " does not exist";
+        }
+        std::string text;
+        std::string err;
+        read_text_file(_library / bundle / "golden.md", &text);
+        const auto doc = parse_golden_md(text, &err);
+        if (!doc || doc->kind != anchor_kind::page) {
+            return _name + ": anchor " + anchor_id + " is not a page";
+        }
+        if (std::any_of(_program.stmts.begin(), _program.stmts.end(),
+                        [](const auto &_s) { return contains_goto(*_s); })) {
+            return _name + ": goto is not allowed in an action";
+        }
+        return "";
     }
     if (!graph_part_name(rest) || golden_there(_library, _name)) {
         return "";
@@ -697,6 +729,39 @@ scanned_graph scan_graph(const std::filesystem::path &_library,
             problems.push_back(why);
         }
         out.graph.edges.push_back(std::move(e));
+    }
+
+    for (const std::string &rest : rests) {
+        std::string anchor_id;
+        std::string action;
+        if (!split_action_name(rest, &anchor_id, &action)) {
+            continue;
+        }
+        const std::string script = prefix + rest;
+        const anchor_def *on = find_anchor(out.graph, anchor_id);
+        if (on == nullptr) {
+            problems.push_back(script + ": anchor " + anchor_id +
+                               " does not exist");
+            continue;
+        }
+        if (on->kind != anchor_kind::page) {
+            problems.push_back(script + ": anchor " + anchor_id +
+                               " is not a page");
+            continue;
+        }
+        std::string why;
+        if (const auto prog = parse_bundle(_library, script, &why)) {
+            if (std::any_of(prog->stmts.begin(), prog->stmts.end(),
+                            [](const auto &_s) { return contains_goto(*_s); })) {
+                problems.push_back(script +
+                                   ": goto is not allowed in an action");
+                continue;
+            }
+        } else {
+            problems.push_back(why);
+            continue;
+        }
+        out.graph.actions.push_back({anchor_id, action, script});
     }
 
     const anchor_def *entry = find_anchor(out.graph, "entry");
@@ -991,6 +1056,12 @@ nav_result navigate(const screen_graph &_graph, const std::string &_target,
     }
 }
 
+nav_result run_action(const screen_graph &_graph, const graph_action &_action,
+                      const nav_io &_io, nav_limits _limits) {
+    const graph_edge as_edge{_action.anchor, _action.anchor, _action.script};
+    return run_edge(_graph, as_edge, _io, _limits);
+}
+
 nav_result run_edge(const screen_graph &_graph, const graph_edge &_edge,
                     const nav_io &_io, nav_limits _limits) {
     const std::string where = "run " + _edge.script + ": ";
@@ -1103,6 +1174,7 @@ bundle_tag bundle_tags(const std::filesystem::path &_library,
             const scanned_graph s = scan_graph(_library, g);
             tag.anchors = static_cast<int>(s.graph.anchors.size());
             tag.edges = static_cast<int>(s.graph.edges.size());
+            tag.actions = static_cast<int>(s.graph.actions.size());
         }
         return tag;
     }
@@ -1110,6 +1182,13 @@ bundle_tag bundle_tags(const std::filesystem::path &_library,
     std::string to;
     if (split_edge_name(rest, &from, &to) && is_anchor(from) && is_anchor(to)) {
         tag.edge_of = g;
+        return tag;
+    }
+    std::string anchor_id;
+    std::string action;
+    if (split_action_name(rest, &anchor_id, &action)) {
+        tag.action_of = g;
+        tag.action_on = anchor_id;
     }
     return tag;
 }
@@ -1128,6 +1207,10 @@ std::string graph_summary(const scanned_graph &_scanned) {
     out += "edges: " + std::to_string(g.edges.size()) + "\n";
     for (const graph_edge &e : g.edges) {
         out += "  " + e.from + " -> " + e.to + " (" + e.script + ")\n";
+    }
+    out += "actions: " + std::to_string(g.actions.size()) + "\n";
+    for (const graph_action &a : g.actions) {
+        out += "  " + a.anchor + "." + a.name + "\n";
     }
     if (_scanned.problems.empty()) {
         out += "problems: none";

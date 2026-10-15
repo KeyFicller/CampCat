@@ -611,6 +611,28 @@ RunStmt::exec(CcatInterpreter &_interp,
             }
             return stmt_exec_outcome::make_ok();
         }
+        if (!tag.action_of.empty()) {
+            const loaded_graph loaded = load_graph(
+                std::filesystem::path(_interp.m_cfg->config_home),
+                tag.action_of);
+            if (!loaded.ok) {
+                return stmt_exec_outcome::make_error("run " + bundle + ": " +
+                                                     loaded.error);
+            }
+            const auto action = std::find_if(
+                loaded.graph.actions.begin(), loaded.graph.actions.end(),
+                [&](const graph_action &_a) { return _a.script == bundle; });
+            const nav_result got = run_action(
+                loaded.graph, *action,
+                _interp.graph_io(tag.action_of, _should_stop));
+            if (got.stopped) {
+                return stmt_exec_outcome::make_stopped();
+            }
+            if (!got.ok) {
+                return stmt_exec_outcome::make_error(got.message, got.device);
+            }
+            return stmt_exec_outcome::make_ok();
+        }
     }
     bool value = true;
     stmt_exec_outcome o = outcome_from_opt(

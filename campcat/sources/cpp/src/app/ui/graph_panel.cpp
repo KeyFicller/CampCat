@@ -87,20 +87,21 @@ using campcat::ccat_lang::graph_edge;
 using campcat::ccat_lang::scanned_graph;
 using campcat::ccat_lang::screen_graph;
 
-/// One line under a node's title. `bad` paints it in the warning red. `preview`
-/// is set for a template row; `open_script` is set for a row naming a bundle.
+/// One line under a node's title. `bad` paints it in the warning red.
+/// `previews` and `names` are what a hover lists; neither line opens a script.
 struct body_line {
     std::string text;
     bool bad = false;
-    std::filesystem::path preview;
-    std::string open_script;
+    std::vector<std::filesystem::path> previews;
+    std::vector<std::string> names;
 };
 
 /// A screen rectangle that hovers or double-clicks. Filled while drawing, read
-/// once the canvas has finished.
+/// once the canvas has finished. An edge hit keeps one preview, when it has one.
 struct hit_target {
     ImRect rect;
-    std::filesystem::path preview;
+    std::vector<std::filesystem::path> previews;
+    std::vector<std::string> names;
     std::string open_script;
 };
 
@@ -143,21 +144,26 @@ std::string_view edge_label(std::string_view _graph, std::string_view _script) {
     return _script;
 }
 
-/// What the node says about one anchor: its templates, a name per line so each
-/// one previews on hover.
+/// Two lines under the anchor id: how many templates, how many actions.
 std::vector<body_line> body_lines_for(const screen_graph &_graph,
                                       const anchor_def &_anchor,
                                       const std::filesystem::path &_home) {
     const std::string bundle = _graph.name + "." + _anchor.id;
-    std::vector<body_line> out;
-    for (const std::string &png :
-         campcat::ccat_lang::bundle_templates(_home, bundle)) {
-        body_line line;
-        line.text = png;
-        line.preview = _home / bundle / png;
-        out.push_back(std::move(line));
+    body_line templates;
+    const std::vector<std::string> pngs =
+        campcat::ccat_lang::bundle_templates(_home, bundle);
+    templates.text = "template: " + std::to_string(pngs.size());
+    for (const std::string &png : pngs) {
+        templates.previews.push_back(_home / bundle / png);
     }
-    return out;
+    body_line actions;
+    for (const campcat::ccat_lang::graph_action &action : _graph.actions) {
+        if (action.anchor == _anchor.id) {
+            actions.names.push_back(action.name);
+        }
+    }
+    actions.text = "actions: " + std::to_string(actions.names.size());
+    return {std::move(templates), std::move(actions)};
 }
 
 /// Column pitch at zoom 1: wide enough for the longest edge label, and never
@@ -413,7 +419,7 @@ void graph_view_delegate::CustomDraw(ImDrawList *_draw_list, ImRect _rect,
         _draw_list->AddText(font, font->FontSize, pos,
                             lines[line].bad ? k_bad : k_ink,
                             lines[line].text.c_str());
-        if (lines[line].preview.empty() && lines[line].open_script.empty()) {
+        if (lines[line].previews.empty() && lines[line].names.empty()) {
             continue;
         }
         const float width =
@@ -426,7 +432,7 @@ void graph_view_delegate::CustomDraw(ImDrawList *_draw_list, ImRect _rect,
             continue;
         }
         g_hits.push_back(
-            {hit, lines[line].preview, lines[line].open_script});
+            {hit, lines[line].previews, lines[line].names, {}});
     }
     _draw_list->PopClipRect();
     // Once per frame, on the channel GraphEditor paints after the nodes. The
@@ -526,10 +532,9 @@ ImVec2 preview_size(int _w, int _h) {
                   static_cast<float>(_h) * scale);
 }
 
-void draw_template_tooltip(const std::filesystem::path &_path) {
+void draw_template_preview(const std::filesystem::path &_path) {
     const preview_tex *preview = preview_for(_path);
     const std::string name = _path.filename().string();
-    ImGui::BeginTooltip();
     if (preview->tex == 0) {
         ImGui::TextUnformatted("unreadable");
     } else {
@@ -539,7 +544,6 @@ void draw_template_tooltip(const std::filesystem::path &_path) {
             ImVec2(1.0F, 1.0F));
         ImGui::Text("%s  %dx%d", name.c_str(), preview->w, preview->h);
     }
-    ImGui::EndTooltip();
 }
 
 ImVec2 bezier_mid(ImVec2 _p0, ImVec2 _p1, ImVec2 _p2, ImVec2 _p3) {
@@ -555,8 +559,18 @@ void apply_hits(const std::vector<hit_target> &_hits,
         if (!hit.rect.Contains(mouse)) {
             continue;
         }
-        if (!down && !hit.preview.empty()) {
-            draw_template_tooltip(hit.preview);
+        if (!down && !hit.previews.empty()) {
+            ImGui::BeginTooltip();
+            for (const std::filesystem::path &path : hit.previews) {
+                draw_template_preview(path);
+            }
+            ImGui::EndTooltip();
+        } else if (!down && !hit.names.empty()) {
+            ImGui::BeginTooltip();
+            for (const std::string &name : hit.names) {
+                ImGui::TextUnformatted(name.c_str());
+            }
+            ImGui::EndTooltip();
         }
         if (dbl && !hit.open_script.empty()) {
             script_editor_open(_home, hit.open_script);
@@ -652,7 +666,7 @@ void draw_edge_labels(ImDrawList *_dl, ImVec2 _origin, ImVec2 _canvas,
         _dl->AddRectFilled(box.Min, box.Max, view_options().mBackgroundColor);
         _dl->AddText(font, size, mid - text * 0.5F, k_ink, label.data(),
                      label.data() + label.size());
-        _hits->push_back({visible, {}, edge.script});
+        _hits->push_back({visible, {}, {}, edge.script});
     }
 }
 

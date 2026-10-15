@@ -47,6 +47,10 @@ std::vector<std::string> anchor_script_problems(const Program &_program);
 /// `[a-z0-9_]+`: a graph or anchor name, so `G.<a>-<b>` splits one way only.
 bool graph_part_name(std::string_view _s);
 
+/// `rest` of `G.<anchor>.<action>`: exactly one dot, both sides a part name.
+bool split_action_name(std::string_view _rest, std::string *_anchor,
+                       std::string *_action);
+
 /// One anchor script's answer on one frame.
 struct anchor_check {
     bool here = false;
@@ -68,11 +72,19 @@ struct graph_edge {
     std::string script;
 };
 
+/// Bundle `G.<anchor>.<action>`: work that starts and ends on one page.
+struct graph_action {
+    std::string anchor;
+    std::string name;
+    std::string script;
+};
+
 /// One game's screen graph, read from the `G.*` bundles. No file of its own.
 struct screen_graph {
     std::string name;
     std::vector<anchor_def> anchors; ///< sorted by id
     std::vector<graph_edge> edges;   ///< sorted by script
+    std::vector<graph_action> actions; ///< sorted by script
 };
 
 struct scanned_graph {
@@ -196,13 +208,20 @@ nav_result navigate(const screen_graph &_graph, const std::string &_target,
 nav_result run_edge(const screen_graph &_graph, const graph_edge &_edge,
                     const nav_io &_io, nav_limits _limits = {});
 
+/// One action: the same checks as an edge whose `from` and `to` are the anchor.
+nav_result run_action(const screen_graph &_graph, const graph_action &_action,
+                      const nav_io &_io, nav_limits _limits = {});
+
 /// What `list_scripts` says about a bundle beyond its description.
 struct bundle_tag {
     std::string anchor_of; ///< the graph whose anchor this bundle is
     anchor_kind kind = anchor_kind::page;
     std::string edge_of;   ///< the graph whose edge this bundle is
+    std::string action_of; ///< the graph whose action this bundle is
+    std::string action_on; ///< the anchor that action runs on
     int anchors = 0;       ///< on `G.entry` only: the graph's counts
     int edges = 0;
+    int actions = 0;
 };
 
 /// Tag one bundle from its name and the `golden.md` files next to it.

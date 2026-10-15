@@ -31,6 +31,14 @@ def test_scripter_prompt_keeps_the_cheatsheet():
     assert text.index("## graph_workflow") < text.index("## script_workflow")
 
 
+def test_scripter_prompt_uses_an_action_for_same_screen_work():
+    text = scripter.scripter_prompt()
+    assert "{graph}.{anchor}.{action}" in text
+    assert "[action of stzb on kucang]" in text
+    assert "same screen" in text
+    assert text.index("{graph}.{anchor}.{action}") < text.index("## script_workflow")
+
+
 def test_prompt_override_covers_only_the_operator(monkeypatch):
     untouched = scripter.scripter_prompt()
     monkeypatch.setenv("CAMPCAT_LLM_SYSTEM_PROMPT", "OVERRIDE")
