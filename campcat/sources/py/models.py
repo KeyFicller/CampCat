@@ -121,14 +121,15 @@ class _UsageHandler(BaseCallbackHandler):
 
     Hung on the model itself. The summarizer calls `with_retry().invoke`,
     which still runs this model's callbacks; a proxy around `invoke` would
-    not see that call.
+    not see that call. This LangChain ends that run with `on_llm_end` and an
+    `LLMResult`; it never calls `on_chat_model_end`.
     """
 
     def __init__(self, *, context: bool) -> None:
         super().__init__()
         self._context = context
 
-    def on_chat_model_end(self, response, **kwargs) -> None:
+    def on_llm_end(self, response, **kwargs) -> None:
         msg = None
         gens = getattr(response, "generations", None) or []
         if gens and gens[0]:
