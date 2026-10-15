@@ -78,6 +78,25 @@ _HUMAN_REGION = re.compile(
 # The next call that repeats it is theirs, so it is not checked again.
 _human: tuple | None = None
 
+# A checked region does not converge across calls: the next look moves the box
+# the previous one just accepted. One acceptance is final for the turn; a
+# rejection may be retried once, and the second rejection ends it.
+_STOP = (" Do not view_crop or save this region again this turn "
+         "unless the tool returned an error.")
+_KEPT = " (already checked this turn; kept the previous region." + _STOP + ")"
+_accepted: dict[str, dict] = {}
+_reject_count: dict[str, int] = {}
+_reject_reason: dict[str, str] = {}
+
+
+def begin_turn() -> None:
+    """Drop this turn's checks. A new request may look at the screen again."""
+    global _human
+    _human = None
+    _accepted.clear()
+    _reject_count.clear()
+    _reject_reason.clear()
+
 
 class ReviewState(TypedDict, total=False):
     kind: str
@@ -241,16 +260,14 @@ def _inside(region: dict, shape: str, frame: tuple) -> bool:
         return False
 
 
-def _moved(shape: str, before: dict, after: dict, reason: str) -> str:
+def _moved(shape: str, before: dict, after: dict) -> str:
     if before == after:
         return ""
     if shape == "box":
-        return (f" (self-check moved box {before['x']},{before['y']} "
-                f"{before['w']}x{before['h']} to {after['x']},{after['y']} "
-                f"{after['w']}x{after['h']}: {reason})")
-    return (f" (self-check moved circle r={before['r']} at "
-            f"{before['cx']},{before['cy']} to r={after['r']} at "
-            f"{after['cx']},{after['cy']}: {reason})")
+        where = (f"box {after['x']},{after['y']} {after['w']}x{after['h']}")
+    else:
+        where = (f"circle r={after['r']} at {after['cx']},{after['cy']}")
+    return f" (self-check already used {where}.{_STOP})"
 
 
 def _picture(image: str) -> dict:
@@ -408,6 +425,11 @@ def _graph():
 def _one(kind: str, shape: str, region: dict, shot, expect: str,
          label: str) -> tuple[dict, str, str]:
     """`(region to send, note, rejection)`. A rejection ends the call."""
+    key = (label or "").strip()
+    if key and key in _accepted:
+        return dict(_accepted[key]), _KEPT, ""
+    if key and _reject_count.get(key, 0) >= 2:
+        return region, "", _reject_reason[key]
     import graph
     out = graph.run_subgraph(_graph(), {
         "kind": kind, "shape": shape, "region": region, "shot": shot,
@@ -416,14 +438,22 @@ def _one(kind: str, shape: str, region: dict, shot, expect: str,
     })
     verdict = out.get("verdict")
     if verdict == "reject":
-        return region, "", out.get("reason") or "rejected"
+        reason = out.get("reason") or "rejected"
+        if key:
+            _reject_count[key] = _reject_count.get(key, 0) + 1
+            if _reject_count[key] >= 2:
+                reason += _STOP
+            _reject_reason[key] = reason
+        return region, "", reason
     if verdict == "skip":
         return region, f" (self-check skipped: {out.get('reason') or 'unreadable'})", ""
     final = out.get("region") or region
-    note = _moved(shape, region, final, out.get("reason") or "")
+    if key:
+        _accepted[key] = dict(final)
+    note = _moved(shape, region, final)
     if not note and len(out.get("candidates") or []) > 1:
         note = (f" (self-check kept the first of {len(out['candidates'])}: "
-                f"{out.get('reason') or ''})")
+                f"{out.get('reason') or ''}.{_STOP})")
     return final, note, ""
 
 

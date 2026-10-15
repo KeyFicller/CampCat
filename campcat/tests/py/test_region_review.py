@@ -144,7 +144,9 @@ def test_adjust_then_ok_sends_the_new_region_and_says_so(monkeypatch):
         _say("Done."),
     ], None)
     assert calls[-1] == ("tap", {"region": {"x": 2, "y": 2, "w": 3, "h": 3}})
-    assert "self-check moved box 1,2 3x4 to 2,2 3x3" in _tap_text()[0]
+    text = _tap_text()[0]
+    assert "self-check already used box 2,2 3x3" in text
+    assert "Do not view_crop or save this region again this turn" in text
 
 
 def test_three_adjusts_then_the_pick_chooses(monkeypatch):
@@ -371,6 +373,61 @@ def test_with_expect_marks_only_region_tools():
     assert out[2] == shot
     assert "expect" not in tap["function"]["parameters"]["required"]
     assert "expect" not in update["function"]["parameters"]["properties"]["templates"]["items"]["required"]
+
+
+def _scripted_review(monkeypatch):
+    seen = []
+
+    def run(_compiled, state):
+        seen.append(state["label"])
+        return {"verdict": "ok", "region": dict(state["region"]),
+                "candidates": [{"region": dict(state["region"]), "note": "proposal"}]}
+
+    monkeypatch.setattr(graph, "run_subgraph", run)
+    return seen
+
+
+def test_a_checked_template_keeps_its_cut(monkeypatch):
+    seen = _scripted_review(monkeypatch)
+    region_review.review("save_anchor", {"golden": "v1", "templates": [
+        {"name": "dock.png", "cut": dict(BOX), "expect": "the dock"},
+    ]})
+    out, note, rejected = region_review.review("save_anchor", {
+        "golden": "v2",
+        "templates": [
+            {"name": "dock.png", "cut": {"x": 9, "y": 9, "w": 2, "h": 2},
+             "expect": "the dock"},
+            {"name": "icon.png", "cut": {"x": 4, "y": 4, "w": 1, "h": 1},
+             "expect": "the icon"},
+        ],
+    })
+    assert rejected == ""
+    assert out["golden"] == "v2"
+    cuts = {entry["name"]: entry["cut"] for entry in out["templates"]}
+    assert cuts["dock.png"] == BOX
+    assert cuts["icon.png"] == {"x": 4, "y": 4, "w": 1, "h": 1}
+    assert seen == ["dock.png", "icon.png"]
+    assert "already checked this turn" in note
+
+
+def test_a_second_rejection_is_the_last_review(monkeypatch):
+    seen = []
+
+    def run(_compiled, state):
+        seen.append(state["label"])
+        return {"verdict": "reject", "reason": "wrong element"}
+
+    monkeypatch.setattr(graph, "run_subgraph", run)
+    args = {"region": dict(BOX), "expect": "btn"}
+    _, _, first = region_review.review("tap", args)
+    assert first == "wrong element"
+    _, _, second = region_review.review("tap", {
+        "region": {"x": 9, "y": 9, "w": 2, "h": 2}, "expect": "btn"})
+    assert "Do not view_crop or save this region again this turn" in second
+    _, _, third = region_review.review("tap", {
+        "region": {"x": 8, "y": 8, "w": 2, "h": 2}, "expect": "btn"})
+    assert third == second
+    assert seen == ["btn", "btn"]
 
 
 def test_interrupt_inside_review_stops_the_turn(monkeypatch):

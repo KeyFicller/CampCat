@@ -186,6 +186,12 @@ RULES = {
         "error names the hops it tried and the screen it last saw."
     ),
     "graph_rules": (
+        "  * The screen a run starts on has anchor id `entry`, even when the brief "
+        "calls it home or desktop. That other name goes in golden.md, not a "
+        "second anchor. With no edges, verify with `goto(\"<graph>:entry\")` "
+        "and say the other name is not an anchor id. `already anchor`, or an "
+        "unreachable anchor, means use the anchor already there or say what "
+        "conflicts; do not delete `entry` and start over.\n"
         "  * An anchor script only judges: `has`, `if` / `elif` / `else`, `log`, "
         "`return true` / `return false`. Every anchor runs on every locate, so it never "
         "acts, and `save_anchor` refuses one that does.\n"

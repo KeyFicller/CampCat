@@ -1137,6 +1137,11 @@ std::string graph_check(const std::string &_graph) {
         save_script(std::string name, std::string source) {
     const std::unique_ptr<ccat_lang::Program> prog =
         check_new_bundle(name, source);
+    if (const std::string block =
+            ccat_lang::script_graph_block(g_ctx.script_dir, name, *prog);
+        !block.empty()) {
+        throw js::bind_error(block);
+    }
     require_local_templates(*prog);
     if (needs_approval("save_script")) {
         if (!g_ctx.request_approval) {
@@ -1648,6 +1653,11 @@ void require_anchor_script(const ccat_lang::Program &_prog) {
     // Parsed first: a syntax error answers the model directly, rather than
     // asking a human to read a script that cannot run.
     const std::unique_ptr<ccat_lang::Program> prog = parse_or_throw(source);
+    if (const std::string block =
+            ccat_lang::script_graph_block(g_ctx.script_dir, name, *prog);
+        !block.empty()) {
+        throw js::bind_error(block);
+    }
     const ccat_lang::bundle_tag tag =
         ccat_lang::bundle_tags(g_ctx.script_dir, name);
     const bool anchor = !tag.anchor_of.empty();

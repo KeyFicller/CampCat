@@ -242,6 +242,32 @@ bool split_edge_name(std::string_view _rest, std::string *_from,
     return graph_part_name(*_from) && graph_part_name(*_to);
 }
 
+/// Ends of an edge that are not anchors, as one clause. Empty when both are.
+std::string ends_without_golden(const std::filesystem::path &_library,
+                                const std::string &_graph,
+                                const std::string &_from,
+                                const std::string &_to) {
+    std::string missing;
+    const auto add = [&](const std::string &_id) {
+        if (golden_there(_library, _graph + "." + _id)) {
+            return;
+        }
+        if (!missing.empty()) {
+            missing += " and ";
+        }
+        missing += _graph + "." + _id;
+    };
+    add(_from);
+    if (_to != _from) {
+        add(_to);
+    }
+    if (missing.empty()) {
+        return "";
+    }
+    const bool one = missing.find(" and ") == std::string::npos;
+    return missing + (one ? " has no golden.md" : " have no golden.md");
+}
+
 void pause_ms(const nav_io &_io, int _ms) {
     if (_ms <= 0) {
         return;
@@ -449,6 +475,37 @@ arrival_out wait_arrival(const screen_graph &_graph, const graph_edge &_edge,
 
 } // namespace
 
+std::string script_graph_block(const std::filesystem::path &_library,
+                               const std::string &_name,
+                               const Program &_program) {
+    const std::size_t dot = _name.find('.');
+    if (dot == std::string::npos || dot == 0 || dot + 1 >= _name.size()) {
+        return "";
+    }
+    const std::string graph = _name.substr(0, dot);
+    const std::string rest = _name.substr(dot + 1);
+    if (!graph_part_name(graph)) {
+        return "";
+    }
+    std::string from;
+    std::string to;
+    if (split_edge_name(rest, &from, &to)) {
+        const std::string missing =
+            ends_without_golden(_library, graph, from, to);
+        if (missing.empty()) {
+            return "";
+        }
+        return _name + ": " + missing;
+    }
+    if (!graph_part_name(rest) || golden_there(_library, _name)) {
+        return "";
+    }
+    if (!anchor_problems(_program, nullptr).empty()) {
+        return "";
+    }
+    return _name + ": anchor script with no golden.md; save_anchor writes it";
+}
+
 std::optional<golden_doc> parse_golden_md(std::string_view _text,
                                           std::string *_err) {
     std::string text(_text);
@@ -562,7 +619,18 @@ scanned_graph scan_graph(const std::filesystem::path &_library,
 
     for (const std::string &rest : rests) {
         const std::string bundle = prefix + rest;
-        if (!graph_part_name(rest) || !golden_there(_library, bundle)) {
+        if (!graph_part_name(rest)) {
+            continue;
+        }
+        if (!golden_there(_library, bundle)) {
+            std::string why;
+            if (const auto prog = parse_bundle(_library, bundle, &why)) {
+                if (anchor_problems(*prog, nullptr).empty()) {
+                    problems.push_back(
+                        bundle +
+                        ": anchor script with no golden.md; save_anchor writes it");
+                }
+            }
             continue;
         }
         anchor_def a;
@@ -605,12 +673,17 @@ scanned_graph scan_graph(const std::filesystem::path &_library,
         if (!split_edge_name(rest, &e.from, &e.to)) {
             continue;
         }
+        e.script = prefix + rest;
         const anchor_def *from = find_anchor(out.graph, e.from);
         const anchor_def *to = find_anchor(out.graph, e.to);
         if (from == nullptr || to == nullptr) {
+            const std::string missing =
+                ends_without_golden(_library, name, e.from, e.to);
+            if (!missing.empty()) {
+                problems.push_back(e.script + ": " + missing);
+            }
             continue;
         }
-        e.script = prefix + rest;
         if (from->kind != anchor_kind::page || to->kind != anchor_kind::page) {
             problems.push_back(e.script + ": an edge must join two pages");
         }

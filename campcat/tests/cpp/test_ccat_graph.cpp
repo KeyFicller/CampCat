@@ -195,9 +195,44 @@ TEST(CcatGraph, EdgeNeedsBothEndsAnchors) {
     write_file(g.dir / "g.a-zzz" / "main.ccat", "goto(\"g:a\")\n");
     const auto scanned = scan_graph(g.dir, "g");
     EXPECT_EQ(scanned.graph.edges.size(), 2u);
-    EXPECT_TRUE(scanned.problems.empty()) << "a non-edge is not checked as one";
+    bool named = false;
+    for (const std::string &p : scanned.problems) {
+        if (p.find("g.a-zzz") != std::string::npos &&
+            p.find("g.zzz has no golden.md") != std::string::npos) {
+            named = true;
+        }
+    }
+    EXPECT_TRUE(named);
     EXPECT_TRUE(bundle_tags(g.dir, "g.a-zzz").edge_of.empty());
     EXPECT_EQ(bundle_tags(g.dir, "g.a-b").edge_of, "g");
+}
+
+TEST(CcatGraph, AnchorScriptWithoutGoldenIsReported) {
+    toy g("nogolden");
+    write_file(g.dir / "g.kucang" / "main.ccat",
+               "if (has(\"t.png\")) { return true }\nreturn false\n");
+    write_file(g.dir / "g.entry-kucang" / "main.ccat", "home\n");
+    const auto scanned = scan_graph(g.dir, "g");
+    for (const anchor_def &a : scanned.graph.anchors) {
+        EXPECT_NE(a.id, "kucang");
+    }
+    for (const graph_edge &e : scanned.graph.edges) {
+        EXPECT_NE(e.script, "g.entry-kucang");
+    }
+    bool anchor = false;
+    bool edge = false;
+    for (const std::string &p : scanned.problems) {
+        if (p.find("g.kucang: anchor script with no golden.md") !=
+            std::string::npos) {
+            anchor = true;
+        }
+        if (p.find("g.entry-kucang") != std::string::npos &&
+            p.find("g.kucang has no golden.md") != std::string::npos) {
+            edge = true;
+        }
+    }
+    EXPECT_TRUE(anchor);
+    EXPECT_TRUE(edge);
 }
 
 TEST(CcatGraph, ScanReportsAll) {

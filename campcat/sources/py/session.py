@@ -131,12 +131,18 @@ def scripter_memory() -> str:
     return _SCRIPTER_MEMORY
 
 
+def _review_turn() -> None:
+    import agent.region_review as region_review
+    region_review.begin_turn()
+
+
 def reset() -> None:
     """Drop every turn. The next request starts a fresh conversation."""
     global _LATEST_NUM, _LATEST_B64, _LATEST_TIME, _MEMORIZED_UPTO, _TURN_PREV_SHOT
     global _SCRIPTER_MEMORIZED_UPTO, _SCRIPTER_MEMORY
     global _TURN_SEQ, _LLM_CALLS, _TOOL_CALLS, _CONTEXT
     import agent.memorier as memorier
+    _review_turn()
     _MESSAGES.clear()
     _SCRIPTER_MESSAGES.clear()
     _LATEST_NUM = 0
@@ -212,6 +218,7 @@ def start_turn() -> None:
     """Begin a turn, whose first screenshot has no previous one to measure from."""
     global _TURN_PREV_SHOT
     _TURN_PREV_SHOT = None
+    _review_turn()
 
 
 def append_turn(text: str, raw: list) -> None:

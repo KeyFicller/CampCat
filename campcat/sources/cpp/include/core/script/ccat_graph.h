@@ -88,6 +88,13 @@ struct scanned_graph {
 scanned_graph scan_graph(const std::filesystem::path &_library,
                          std::string_view _name);
 
+/// Why `save_script` / `update_script` must not write `_name`. Empty when they may.
+/// An anchor script under `graph.id` needs `golden.md`, which only `save_anchor`
+/// writes. An edge needs both ends to already be anchors.
+std::string script_graph_block(const std::filesystem::path &_library,
+                               const std::string &_name,
+                               const Program &_program);
+
 struct loaded_graph {
     bool ok = false;
     screen_graph graph;

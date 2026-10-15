@@ -247,6 +247,26 @@ TEST_F(GraphTools, UpdateScriptLintsAnchor) {
         << reply.error;
 }
 
+TEST_F(GraphTools, SaveScriptRefusesAnAnchorScriptWithoutGolden) {
+    const auto reply = call(
+        "save_script",
+        R"({"name": "g.kucang", "source": "if (has(\"t.png\")) { return true }\nreturn false\n"})");
+    EXPECT_FALSE(reply.ok);
+    EXPECT_NE(reply.error.find("golden.md"), std::string::npos) << reply.error;
+    EXPECT_NE(reply.error.find("save_anchor"), std::string::npos) << reply.error;
+    EXPECT_FALSE(exists("g.kucang/main.ccat"));
+}
+
+TEST_F(GraphTools, SaveScriptRefusesAnEdgeToAMissingAnchor) {
+    const auto reply = call(
+        "save_script",
+        R"({"name": "g.a-kucang", "source": "home\n"})");
+    EXPECT_FALSE(reply.ok);
+    EXPECT_NE(reply.error.find("g.kucang has no golden.md"), std::string::npos)
+        << reply.error;
+    EXPECT_FALSE(exists("g.a-kucang/main.ccat"));
+}
+
 TEST_F(GraphTools, SaveScriptEdgeReportsGraph) {
     anchor("b", tex(9), "panel");
     const auto reply =
