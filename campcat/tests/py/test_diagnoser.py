@@ -93,7 +93,7 @@ def test_crop_issue_path_gathers_three_pictures_and_reports_the_shot(monkeypatch
     )
     assert calls == [
         ("screenshot", {}),
-        ("view_crop_box", {"box": {"x": 10, "y": 20, "w": 30, "h": 40}}),
+        ("view_crop", {"region": {"x": 10, "y": 20, "w": 30, "h": 40}}),
         ("view_template", {"bundle": "b", "name": "btn"}),
     ]
     images = _images(model.seen[-1][-1])
@@ -190,7 +190,7 @@ def test_scripter_intercepts_diagnose_and_keeps_host_clean(monkeypatch):
 
 def test_interrupt_in_gather_stops_the_outer_turn(monkeypatch):
     def fake(name, args):
-        if name == "view_crop_box":
+        if name == "view_crop":
             raise tools.TurnInterrupted()
         return {"ok": True, "shot": 7, "text": "ok", "image_b64": _PNG}
 

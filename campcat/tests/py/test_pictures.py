@@ -30,7 +30,7 @@ def _urls(message):
 
 
 def _crop(image, n=0):
-    return session.picture_of("view_crop_box", image, {"box": {"n": n}})
+    return session.picture_of("view_crop", image, {"region": {"n": n}})
 
 
 def setup_function():
@@ -62,7 +62,7 @@ def test_crops_are_cleared_in_one_batch():
         assert not _urls(old)
         text = session.content_text(old.content)
         assert "make the same call again" in text
-        assert 'view_crop_box({"box":' in text
+        assert 'view_crop({"region":' in text
 
 
 def test_new_crop_under_the_high_mark_rewrites_nothing():
@@ -94,7 +94,7 @@ def test_template_and_crop_in_one_batch_both_stay():
 
 def test_large_crop_counts_as_a_frame():
     wide = _png(1200, 100)
-    crop = session.picture_of("view_crop_box", wide, {"box": {"n": 0}})
+    crop = session.picture_of("view_crop", wide, {"region": {"n": 0}})
     assert not (isinstance(crop.id, str) and crop.id.startswith("crop:"))
     messages = [crop, session.screenshot_frame(1, _png(2000, 1000))]
 

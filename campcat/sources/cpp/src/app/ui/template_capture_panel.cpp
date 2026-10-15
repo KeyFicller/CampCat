@@ -124,7 +124,7 @@ int drag_radius(int _cx, int _cy, int _ix, int _iy) {
 }
 
 /// The circular selection as a 4-channel crop: alpha 255 inside the disc and 0
-/// outside. The same form `save_template_circle` writes, so a template cut
+/// outside. The same form `save_template` writes for a circle, so a template cut
 /// here matches under the same rule -- the alpha is the shape.
 cv::Mat circle_crop(int _cx, int _cy, int _r) {
     cv::Mat out(2 * _r + 1, 2 * _r + 1, CV_8UC4, cv::Scalar(0, 0, 0, 0));

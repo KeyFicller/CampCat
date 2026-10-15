@@ -18,18 +18,20 @@ import tools
 
 
 # Only the scripter sees these. Anything the host sends that is not listed here
-# goes to the operator, so a new C++ tool lands with today's behaviour.
+# or in HIDDEN goes to the operator, so a new C++ tool lands with today's behaviour.
 SCRIPTER_ONLY = frozenset({
     "read_script", "ccat_help",
     "save_script", "update_script", "delete_script", "rename_script",
-    "save_template_box", "save_template_circle", "view_template",
+    "save_template", "view_template", "view_crop",
     "read_graph", "save_anchor",
 })
+# Registered in C++ for the review pipeline, which calls them itself. A model
+# is not offered them: the approval bubble already shows a region.
+HIDDEN = frozenset({"mark"})
 # Offered to both: the operator runs saved skills and looks at the screen; the
 # scripter verifies what it wrote and cuts templates from fresh frames.
 SHARED = frozenset({
     "list_scripts", "run_script", "screenshot", "view_shot",
-    "view_crop_box", "view_crop_circle",
 })
 
 
@@ -82,12 +84,12 @@ RULES = {
         "expectation to compare the screen against, and the approval reads.\n"
         "4. `save_script` to create the bundle. It writes main.ccat and runs nothing; a name "
         "that already exists is refused.\n"
-        "5. `save_template_box`, once for every PNG the script names. Screenshot right before "
+        "5. `save_template`, once for every PNG the script names. Screenshot right before "
         "each cut -- it can only match as well as the picture it came from -- and crop tight "
-        "around the part that stays put. `save_template_box(bundle, name, shot, box)` takes the "
-        "box; for a round element use `save_template_circle(bundle, name, shot, circle)` "
-        "instead, which writes the disc's alpha and leaves every pixel outside it out of "
-        "the match.\n"
+        "around the part that stays put. The region is a box "
+        "`{\"x\":...,\"y\":...,\"w\":...,\"h\":...}` or, for a round element, a circle "
+        "`{\"cx\":...,\"cy\":...,\"r\":...}`, which writes the disc's alpha and leaves every "
+        "pixel outside it out of the match.\n"
         "6. Run the bundle: `run_script` with the source `run(\"<name>/main.ccat\")`. Pass "
         "that `run(...)` call and not the script's own text -- a bare `run_script` resolves "
         "template names against the script root, so the PNGs you just saved into the bundle "
@@ -139,9 +141,9 @@ RULES = {
         "\n"
         "1. `view_template(bundle, name)` -- what it was looking for (the name is in "
         "the error's path; `read_script` lists them).\n"
-        "2. `view_crop_box(box={\"x\":...,\"y\":...,\"w\":...,\"h\":...})` with the error's "
-        "`box`, or `view_crop_circle(circle={\"cx\":...,\"cy\":...,\"r\":...})` with "
-        "its `circle` -- what is there now, at the template's own scale. `screenshot` "
+        "2. `view_crop(region={\"x\":...,\"y\":...,\"w\":...,\"h\":...})` with the error's "
+        "`box`, or `region={\"cx\":...,\"cy\":...,\"r\":...}` with its `circle` -- what is "
+        "there now, at the template's own scale. `screenshot` "
         "when you need the whole screen instead.\n"
         "3. Compare both against the failing step's `//` comment: the same control "
         "looking different (a state you never waited for, a label that changes "
@@ -173,7 +175,7 @@ RULES = {
         "`already anchor <id>` means this screen is in the graph -- use that anchor, do "
         "not save a second one.\n"
         "3. Each edge: `save_script(\"<graph>.<a>-<b>\", <the movements>)`, then its "
-        "templates with `save_template_box`. The reply ends with the graph check; fix "
+        "templates with `save_template`. The reply ends with the graph check; fix "
         "every problem it lists.\n"
         "4. Verify one edge from screen a with `run_script` and the source "
         "`run(\"<graph>.<a>-<b>/main.ccat\")`: it checks it starts on a and lands on b. "

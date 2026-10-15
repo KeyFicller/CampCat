@@ -58,7 +58,7 @@ int g_next_shot = 0;
 int g_last_shot = 0;
 
 /// The region the human drew, the last time a rejection handed one out. The
-/// human's region comes back as a fresh `tap` / `save_template_box` the model relays
+/// human's region comes back as a fresh `tap` / `save_template` the model relays
 /// (see the box-correction spec, §9-1), so this is the only way the tools can
 /// tell it from one the model guessed -- and it must not be snapped. Cleared at
 /// session reset, with the frames it was measured on.
@@ -94,7 +94,7 @@ constexpr std::string_view k_device_hint =
 /// failure in the interpreter does and what a device failure does not -- one
 /// condition covers all of them, including ones this file does not know about.
 constexpr std::string_view k_template_hint =
-    "; view_template shows the template it looked for, view_crop_box what is there "
+    "; view_template shows the template it looked for, view_crop what is there "
     "now";
 
 /// Clears a stale stop on entry and marks the script as running until it
@@ -190,39 +190,29 @@ bool region_on_screen(int _img_w, int _img_h, const llm::region &_region,
     return true;
 }
 
-/// One region as a tool argument: `"box":{"x":...,"y":...,"w":...,"h":...}` or
-/// `"circle":{"cx":...,"cy":...,"r":...}` -- the key is the shape's own name,
-/// which is also the parameter it binds to. Used where a sentence read back to
-/// the model has to carry a region it can pass straight in again.
+/// One region as the `region` argument, so a sentence read back to the model
+/// can be passed straight in again: a box `{x,y,w,h}` or a circle `{cx,cy,r}`.
 std::string region_arg_json(const llm::region &_region) {
     if (const llm::box *b = std::get_if<llm::box>(&_region)) {
-        return "\"box\":{\"x\":" + std::to_string(b->x) + ",\"y\":" +
+        return "\"region\":{\"x\":" + std::to_string(b->x) + ",\"y\":" +
                std::to_string(b->y) + ",\"w\":" + std::to_string(b->w) +
                ",\"h\":" + std::to_string(b->h) + "}";
     }
     const llm::circle &c = std::get<llm::circle>(_region);
-    return "\"circle\":{\"cx\":" + std::to_string(c.cx) + ",\"cy\":" +
+    return "\"region\":{\"cx\":" + std::to_string(c.cx) + ",\"cy\":" +
            std::to_string(c.cy) + ",\"r\":" + std::to_string(c.r) + "}";
 }
 
 /// What to append to a refusal when the human redrew the region; empty when they
-/// did not, so the caller keeps its own wording byte for byte. The human's shape
-/// picks the tool suffix, and `_shot` names the frame they drew on, which
-/// `save_template_box` needs when it is not the current one.
+/// did not, so the caller keeps its own wording byte for byte. `_shot` names the
+/// frame they drew on, which `save_template` needs when it is not the current one.
 std::string corrected_region_note(const llm::approval_decision &_d,
                                   const char *_tool, int _shot) {
     if (!_d.redrawn) {
         return {};
     }
-    // `tap` stays bare; the template pair is `_box` / `_circle`.
-    const bool circle = std::holds_alternative<llm::circle>(*_d.redrawn);
-    std::string tool(_tool);
-    if (tool == "save_template") {
-        tool += circle ? "_circle" : "_box";
-    } else if (circle) {
-        tool += "_circle";
-    }
-    return "; call " + tool + " again with this corrected region {\"shot\":" +
+    return "; call " + std::string(_tool) +
+           " again with this corrected region {\"shot\":" +
            std::to_string(_shot) + "," + region_arg_json(*_d.redrawn) + "}";
 }
 
@@ -669,10 +659,9 @@ struct circle {
                      js::str("Radius in pixels, at least 1.")}]] int r;
 };
 
-/// Either shape, for the one place that takes several at once: the template set
-/// `update_script` declares. Everywhere else a tool takes exactly one shape, and
-/// carries it in its own parameter so the model does not have to name a variant
-/// alternative to be understood.
+/// Either shape, told apart by its fields (`{x,y,w,h}` or `{cx,cy,r}`), so a
+/// tool that takes a region is one tool. No tag for the model to name: each
+/// alternative carries its own fields and none has a default.
 using shape = std::variant<box, circle>;
 
 /// The model's spelling of a shape as the shared one. The only place the two
@@ -755,7 +744,7 @@ CPP_REFLECT_TOOL(view_shot)
     .text = js::str(
         "Shows a template PNG from a script bundle: what a failed tap, "
         "tap_offset, swipe or wait_until was matching against. Look at it "
-        "together with a fresh screenshot or view_crop_box -- the template is the "
+        "together with a fresh screenshot or view_crop -- the template is the "
         "side that did not match, so the question is whether the control it "
         "holds is on the screen at all (then the step before it did not land, or "
         "the screen is not the one you expected) or is there but different "
@@ -803,7 +792,7 @@ CPP_REFLECT_TOOL(view_shot)
     if (png.empty() || cv::imdecode(buf, cv::IMREAD_COLOR).empty()) {
         throw js::bind_error("\"" + bundle + "/" + file +
                              "\" is not a decodable picture; re-cut it with "
-                             "save_template_box");
+                             "save_template");
     }
     return png;
 }
@@ -811,93 +800,65 @@ CPP_REFLECT_TOOL(view_template)
 
 [[= js::image_result]][[= js::doc{
     .text = js::str(
-        "Shows one box of a screenshot at its own size, with nothing "
-        "drawn on it. Use it with the box a failed statement reported, to see "
-        "what is there now at the same scale as the template it was looking "
-        "for: the whole-screen view is scaled down, so this is the only way to "
-        "compare the two pixel for pixel. It does not change the current "
-        "screen.")}]]
+        "Shows one region of a screenshot at its own size, with nothing drawn "
+        "on it. A box is {x,y,w,h}; a circle is {cx,cy,r}, and the pixels "
+        "outside that disc are transparent, exactly as save_template writes "
+        "them. Use it with the region a failed statement reported, to see what "
+        "is there now at the same scale as the template: the whole-screen view "
+        "is scaled down, so this is the only way to compare the two pixel for "
+        "pixel. It does not change the current screen.")}]]
     [[= js::param_docs(
-        js::str("The box to cut out."),
+        js::str("The region to cut out: a box {x,y,w,h} or a circle {cx,cy,r}."),
         js::str("Which screenshot to look at: the number its caption showed. "
                 "Omit for the current screen; looking at another frame does "
                 "not make it current."))]] std::string
-    view_crop_box(box box, std::optional<int> shot) {
+    view_crop(shape region, std::optional<int> shot) {
     cv::Mat bgr;
     std::string error;
     if (!frame_mat(shot, &bgr, &error)) {
         throw js::bind_error(error);
     }
-    const llm::region region = to_region(box);
-    if (!region_on_screen(bgr.cols, bgr.rows, region, &error)) {
+    const llm::region r = to_region(region);
+    if (!region_on_screen(bgr.cols, bgr.rows, r, &error)) {
         throw js::bind_error(error);
     }
     std::vector<unsigned char> png;
-    if (!cv::imencode(".png", crop_region(bgr, region), png)) {
+    if (!cv::imencode(".png", crop_region(bgr, r), png)) {
         throw js::bind_error("png encode failed");
     }
     return std::string(png.begin(), png.end());
 }
-CPP_REFLECT_TOOL(view_crop_box)
+CPP_REFLECT_TOOL(view_crop)
 
 [[= js::image_result]][[= js::doc{
     .text = js::str(
-        "Shows a circle's crop at its own size, with nothing drawn on it: the "
-        "same look-at-it-at-template-scale call as view_crop_box, for a circular "
-        "template. The pixels outside the disc are transparent, exactly as "
-        "save_template_circle writes them and as the matcher reads them, so a "
-        "mismatch can be traced to the shape or to the pixels. It does not "
-        "change the current screen.")}]]
+        "Draws a region on a screenshot and returns the marked image. Nothing "
+        "is tapped and nothing needs approval; the region lives in the "
+        "picture. A box is {x,y,w,h} and a circle is {cx,cy,r}.")}]]
     [[= js::param_docs(
-        js::str("The circle to cut out."),
+        js::str("Short label for what the region marks, e.g. \"the login button\"."),
+        js::str("The region to mark: a box {x,y,w,h} or a circle {cx,cy,r}."),
         js::str("Which screenshot to look at: the number its caption showed. "
                 "Omit for the current screen; looking at another frame does "
                 "not make it current."))]] std::string
-    view_crop_circle(circle circle, std::optional<int> shot) {
+    mark(std::string label, shape region, std::optional<int> shot) {
     cv::Mat bgr;
     std::string error;
     if (!frame_mat(shot, &bgr, &error)) {
         throw js::bind_error(error);
     }
-    const llm::region region = to_region(circle);
-    if (!region_on_screen(bgr.cols, bgr.rows, region, &error)) {
-        throw js::bind_error(error);
-    }
-    std::vector<unsigned char> png;
-    if (!cv::imencode(".png", crop_region(bgr, region), png)) {
-        throw js::bind_error("png encode failed");
-    }
-    return std::string(png.begin(), png.end());
-}
-CPP_REFLECT_TOOL(view_crop_circle)
-
-[[= js::image_result]][[= js::doc{
-    .text = js::str(
-        "Draws a box on a screenshot and returns the marked image, "
-        "so the user can see where you think something is. Nothing is "
-        "tapped and nothing needs approval; the box lives in the picture.")}]][
-    [= js::param_docs(
-        js::str(
-            "Short label for what the box marks, e.g. \"the login button\"."),
-        js::str("The box to mark."),
-        js::str("Which screenshot to look at: the number its caption showed. "
-                "Omit for the current screen; looking at another frame does "
-                "not make it current."))]] std::string
-    mark(std::string label, box box, std::optional<int> shot) {
-    cv::Mat bgr;
-    std::string error;
-    if (!frame_mat(shot, &bgr, &error)) {
-        throw js::bind_error(error);
-    }
-    const llm::region region = to_region(box);
-    if (!region_on_screen(bgr.cols, bgr.rows, region, &error)) {
+    const llm::region r = to_region(region);
+    if (!region_on_screen(bgr.cols, bgr.rows, r, &error)) {
         throw js::bind_error(error);
     }
     const cv::Scalar color(60, 200, 255); // BGR, near-orange against most UIs
-    const llm::box b = region_bounds(region);
-    cv::rectangle(bgr, cv::Rect(b.x, b.y, b.w, b.h), color, 4);
+    const llm::box b = region_bounds(r);
+    if (const llm::circle *c = std::get_if<llm::circle>(&r)) {
+        cv::circle(bgr, cv::Point(c->cx, c->cy), c->r, color, 4);
+    } else {
+        cv::rectangle(bgr, cv::Rect(b.x, b.y, b.w, b.h), color, 4);
+    }
     if (!label.empty()) {
-        // Above the box, or below it when the box hugs the top edge.
         const int ty =
             b.y >= k_label_font_h + 4 ? b.y - k_label_font_h - 2 : b.y + b.h + 4;
         draw_label(bgr, label, b.x, ty, color);
@@ -910,47 +871,7 @@ CPP_REFLECT_TOOL(view_crop_circle)
 }
 CPP_REFLECT_TOOL(mark)
 
-[[= js::image_result]][[= js::doc{
-    .text = js::str(
-        "Draws a circle on a screenshot and returns the marked image, "
-        "for an element that is round: the same thing mark does for a box. "
-        "Nothing is tapped and nothing needs approval.")}]]
-    [[= js::param_docs(
-        js::str("Short label for what the circle marks."),
-        js::str("The circle to mark."),
-        js::str("Which screenshot to look at: the number its caption showed. "
-                "Omit for the current screen; looking at another frame does "
-                "not make it current."))]] std::string
-    mark_circle(std::string label, circle circle, std::optional<int> shot) {
-    cv::Mat bgr;
-    std::string error;
-    if (!frame_mat(shot, &bgr, &error)) {
-        throw js::bind_error(error);
-    }
-    const llm::region region = to_region(circle);
-    if (!region_on_screen(bgr.cols, bgr.rows, region, &error)) {
-        throw js::bind_error(error);
-    }
-    const cv::Scalar color(60, 200, 255); // BGR, near-orange against most UIs
-    const llm::circle c = std::get<llm::circle>(region);
-    cv::circle(bgr, cv::Point(c.cx, c.cy), c.r, color, 4);
-    if (!label.empty()) {
-        const llm::box b = region_bounds(region);
-        // Above the circle, or below it when it hugs the top edge.
-        const int ty =
-            b.y >= k_label_font_h + 4 ? b.y - k_label_font_h - 2 : b.y + b.h + 4;
-        draw_label(bgr, label, b.x, ty, color);
-    }
-    std::vector<unsigned char> png;
-    if (!cv::imencode(".png", bgr, png)) {
-        throw js::bind_error("png encode failed");
-    }
-    return std::string(png.begin(), png.end());
-}
-CPP_REFLECT_TOOL(mark_circle)
-
-/// The tap body both `tap` and `tap_circle` run. The only difference between
-/// them is how the region is spelled on the way in.
+/// The tap `tap` runs, for either shape.
 std::string tap_region(const llm::region &_given) {
     std::string error;
     if (!region_on_screen(g_ctx.screen.w, g_ctx.screen.h, _given, &error)) {
@@ -1017,26 +938,17 @@ std::string tap_region(const llm::region &_given) {
 }
 
 [[= js::doc{.text = js::str(
-                "Taps the element at this box, in screenshot pixels. While "
-                "human approval is on, the box is shown to the user and "
-                "nothing is tapped unless they approve it. The tap lands at "
-                "the box centre. Nothing else needs a prior call.")}]]
-    [[= js::param_docs(js::str("The box to tap."))]] std::string
-    tap(box box) {
-    return tap_region(to_region(box));
+                "Taps the element at this region, in screenshot pixels. A box "
+                "is {x,y,w,h} and a circle is {cx,cy,r}; the tap lands at its "
+                "centre. While human approval is on, the region is shown to "
+                "the user and nothing is tapped unless they approve it. "
+                "Nothing else needs a prior call.")}]]
+    [[= js::param_docs(js::str("The region to tap: a box {x,y,w,h} or a circle "
+                               "{cx,cy,r}."))]] std::string
+    tap(shape region) {
+    return tap_region(to_region(region));
 }
 CPP_REFLECT_TOOL(tap)
-
-[[= js::doc{.text = js::str(
-                "Taps the element at this circle, in screenshot pixels, for "
-                "one that is round. While human approval is on, the circle is "
-                "shown to the user and nothing is tapped unless they approve "
-                "it. The tap lands at the circle's centre.")}]]
-    [[= js::param_docs(js::str("The circle to tap."))]] std::string
-    tap_circle(circle circle) {
-    return tap_region(to_region(circle));
-}
-CPP_REFLECT_TOOL(tap_circle)
 
 [[= js::doc{
     .text = js::str(
@@ -1091,7 +1003,7 @@ CPP_REFLECT_TOOL(start_emulator)
         "While human approval is on, the script is shown to the user "
         "and nothing runs unless they approve it. Call ccat_help "
         "for the language. The sandbox starts empty, so a statement that "
-        "needs a template PNG fails until save_template_box puts one in the "
+        "needs a template PNG fails until save_template puts one in the "
         "bundle (an `if` on a missing PNG is just false); tap_at and "
         "swipe_at need no template, and run(\"<name>/main.ccat\") runs a "
         "saved bundle.")}]]
@@ -1225,7 +1137,7 @@ std::string graph_check(const std::string &_graph) {
     return "saved \"" + name + "/main.ccat\" (" +
            std::to_string(prog->stmts.size()) + " statements, " +
            std::to_string(source.size()) +
-           " chars); put its templates in the same bundle with save_template_box, "
+           " chars); put its templates in the same bundle with save_template, "
            "and "
            "run it from a script with run(\"" +
            name + "/main.ccat\")" +
@@ -1233,8 +1145,7 @@ std::string graph_check(const std::string &_graph) {
 }
 CPP_REFLECT_TOOL(save_script)
 
-/// The save body both `save_template_box` and `save_template_circle` run. The only
-/// difference between them is how the region is spelled on the way in.
+/// The cut `save_template` writes, for either shape.
 std::string save_template_region(std::string bundle, std::string name,
                                  const std::optional<int> &shot,
                                  const llm::region &_given) {
@@ -1317,56 +1228,29 @@ std::string save_template_region(std::string bundle, std::string name,
 
 [[= js::doc{
     .text = js::str(
-        "Cuts a template PNG, out of one of the screenshots you have taken, "
-        "into "
-        "an existing script bundle, so that bundle's script can use it with "
-        "tap(\"name.png\"). While human approval is on, the box is shown to "
-        "the user and "
-        "nothing is cut unless they approve it. It cuts from the picture you "
-        "looked at, so it can only match as well as that picture does: "
-        "screenshot right "
-        "before you cut, and crop tight around the part that stays put. For a "
-        "round element use save_template_circle instead: the pixels outside "
-        "the disc are then left out of the match.")}]]
+        "Cuts one template PNG, out of one of the screenshots you have taken, "
+        "into an existing script bundle, so that bundle's script can use it "
+        "with tap(\"name.png\"). The region is a box {x,y,w,h} or, for a round "
+        "element, a circle {cx,cy,r}: a circle is written with the disc's alpha "
+        "and matching then ignores every pixel outside it. While human approval "
+        "is on, the region is shown to the user and nothing is cut unless they "
+        "approve it. It cuts from the picture you looked at, so screenshot "
+        "right before you cut, and crop tight around the part that stays put.")}]]
     [[= js::param_docs(
         js::str("Bundle to put the template in; it must already exist (see "
                 "save_script)."),
         js::str(
             "Template name, a leaf name; \".png\" is appended when missing."),
         js::str("Which screenshot to cut from: the number its caption showed. "
-                "Omit for the most "
-                "recent one."),
-        js::str("The box to cut out, in that screenshot's pixels."))]] std::string
-        save_template_box(std::string bundle, std::string name,
-                      std::optional<int> shot, box box) {
+                "Omit for the most recent one."),
+        js::str("The region to cut out: a box {x,y,w,h} or a circle "
+                "{cx,cy,r}."))]] std::string
+        save_template(std::string bundle, std::string name,
+                      std::optional<int> shot, shape region) {
     return save_template_region(std::move(bundle), std::move(name), shot,
-                                to_region(box));
+                                to_region(region));
 }
-CPP_REFLECT_TOOL(save_template_box)
-
-[[= js::doc{
-    .text = js::str(
-        "Cuts a template PNG from a circle, for an element that is round: the "
-        "same thing save_template_box does for a box. The file is written with the "
-        "disc's alpha channel, and matching then ignores every pixel outside "
-        "it, so the ring around a round button does not count against the "
-        "score. It cuts from the picture you looked at, so screenshot right "
-        "before you cut.")}]]
-    [[= js::param_docs(
-        js::str("Bundle to put the template in; it must already exist (see "
-                "save_script)."),
-        js::str(
-            "Template name, a leaf name; \".png\" is appended when missing."),
-        js::str("Which screenshot to cut from: the number its caption showed. "
-                "Omit for the most "
-                "recent one."),
-        js::str("The circle to cut out, in that screenshot's pixels."))]]
-    std::string save_template_circle(std::string bundle, std::string name,
-                                     std::optional<int> shot, circle circle) {
-    return save_template_region(std::move(bundle), std::move(name), shot,
-                                to_region(circle));
-}
-CPP_REFLECT_TOOL(save_template_circle)
+CPP_REFLECT_TOOL(save_template)
 
 [[= js::quiet{.text = js::str("Read CCAT.md")}]][[= js::doc{
     .text = js::str(
@@ -1703,7 +1587,7 @@ void require_anchor_script(const ccat_lang::Program &_prog) {
         "PNGs you do not declare are deleted. Prefer this "
         "over saving a new "
         "name when changing a skill you already have; save_script is for a new "
-        "one, and save_template_box for adjusting a single template while you work "
+        "one, and save_template for adjusting a single template while you work "
         "out its box.")}]]
     [[= js::param_docs(
         js::str("Bundle to update; it must already exist (see list_scripts)."),

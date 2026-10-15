@@ -8,18 +8,16 @@ import agent.operator as operator
 import agent.scripter as scripter
 
 HOST_NAMES = (
-    "screenshot view_shot view_template view_crop_box view_crop_circle mark "
-    "mark_circle tap tap_circle start_emulator run_script save_script "
-    "save_template_box save_template_circle ccat_help list_scripts read_script "
-    "update_script read_graph save_anchor delete_script "
-    "rename_script"
+    "screenshot view_shot view_template view_crop mark tap start_emulator "
+    "run_script save_script save_template ccat_help list_scripts read_script "
+    "update_script read_graph save_anchor delete_script rename_script"
 ).split()
 
 # Host order, not the grouped order in the spec table: `run_script` is
-# registered before `list_scripts`.
+# registered before `list_scripts`. `mark` is registered and offered to neither.
 OPERATOR_NAMES = (
-    "screenshot view_shot view_crop_box view_crop_circle mark mark_circle tap "
-    "tap_circle start_emulator run_script list_scripts author_script"
+    "screenshot view_shot tap start_emulator run_script list_scripts "
+    "author_script"
 ).split()
 
 
@@ -38,7 +36,7 @@ def test_operator_and_scripter_split_the_host_table():
 
     assert _names(operator_table) == OPERATOR_NAMES
     assert "view_template" not in _names(operator_table)
-    assert len(scripter_table) == 18
+    assert len(scripter_table) == 16
     assert _names(scripter_table) == [
         name for name in HOST_NAMES
         if name in scripter.SCRIPTER_ONLY | scripter.SHARED
@@ -48,7 +46,9 @@ def test_operator_and_scripter_split_the_host_table():
     assert "diagnose_template" not in _names(operator_table)
     covered = (set(_names(operator_table)) | set(_names(scripter_table))) - {
         "author_script", "diagnose_template"}
-    assert covered == set(HOST_NAMES)
+    assert covered == set(HOST_NAMES) - scripter.HIDDEN
+    assert "mark" not in _names(operator_table)
+    assert "mark" not in _names(scripter_table)
 
 
 def test_unknown_tool_stays_with_the_operator():

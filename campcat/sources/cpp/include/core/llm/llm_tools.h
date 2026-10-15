@@ -58,7 +58,7 @@ struct approval_request {
     std::vector<region> highlight;  ///< Regions to draw on the screenshot
     std::string screen_png; ///< Raw PNG bytes of the latest screenshot (not
                             ///< base64); may be empty
-    /// Whether the human may redraw this region (tap / save_template_box set it).
+    /// Whether the human may redraw this region (tap / save_template set it).
     /// The UI keys on this flag, so it never has to know tool names.
     bool editable = false;
     /// The region the model gave, set only when it is not the one being acted on

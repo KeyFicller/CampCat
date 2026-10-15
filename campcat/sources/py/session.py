@@ -39,7 +39,7 @@ _KEEP_PICTURES = 3
 _KEEP_CROPS = 4
 _CROP_HIGH = 8
 
-CROP_TOOLS = frozenset({"view_crop_box", "view_crop_circle", "view_template"})
+CROP_TOOLS = frozenset({"view_crop", "view_template"})
 
 # The longest side any context frame is worth, whatever the screen it came from.
 # A request carries every picture still in the list and the provider answers 413
@@ -272,7 +272,7 @@ def _shot_caption(shot: int, lead: str, image: str, captured: float = 0.0,
                   since_previous: float | None = None) -> str:
     """`lead` plus the number, size and time, which is what names this frame later.
 
-    `save_template_box`'s `shot` is this number and its box is in these pixels, so
+    `save_template`'s `shot` is this number and its region is in these pixels, so
     both have to be on screen next to the picture. The time is what lets a wait
     be reasoned about instead of guessed: `since_previous` is how long passed
     between this frame and the one before it in the same turn.

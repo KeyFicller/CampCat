@@ -23,10 +23,8 @@ MAX_ROUNDS = 3
 # kind, and the shape a single region takes. update_script and save_anchor have
 # one region per template entry, read off that entry's cut.
 REGION_TOOLS = {
-    "tap": ("tap", "box"),
-    "tap_circle": ("tap", "circle"),
-    "save_template_box": ("template", "box"),
-    "save_template_circle": ("template", "circle"),
+    "tap": ("tap", "region"),
+    "save_template": ("template", "region"),
     "update_script": ("template", None),
     "save_anchor": ("template", None),
 }
@@ -170,9 +168,9 @@ def remember_human_region(content: str) -> None:
         payload = json.loads(found.group(2))
     except json.JSONDecodeError:
         return
-    region = {key: payload[key] for key in ("box", "circle") if key in payload}
-    if region:
-        _human = (found.group(1), region)
+    region = payload.get("region")
+    if isinstance(region, dict):
+        _human = (found.group(1), {"region": region})
 
 
 def _strip(args: dict) -> dict:
@@ -185,6 +183,11 @@ def _strip(args: dict) -> dict:
             for entry in entries
         ]
     return out
+
+
+def _shape_of(region: dict) -> str:
+    """Which shape a `region` argument is, from the fields it carries."""
+    return "circle" if "cx" in region else "box"
 
 
 def _bounds(region: dict, shape: str) -> tuple[int, int, int, int]:
@@ -232,12 +235,11 @@ def review_render(state: ReviewState) -> dict:
     shape = state["shape"]
     region = state["region"]
     extra = {} if state.get("shot") is None else {"shot": state["shot"]}
-    crop = tools.call_cpp(f"view_crop_{shape}", {shape: region, **extra})
+    crop = tools.call_cpp("view_crop", {"region": region, **extra})
     if not crop.get("ok"):
         return {"verdict": "skip", "reason": str(crop.get("error", ""))}
     marked = tools.call_cpp(
-        "mark_circle" if shape == "circle" else "mark",
-        {"label": state.get("label") or "", shape: region, **extra})
+        "mark", {"label": state.get("label") or "", "region": region, **extra})
     if not marked.get("ok"):
         return {"verdict": "skip", "reason": str(marked.get("error", ""))}
     marked_b64 = marked.get("image_b64") or ""
@@ -345,8 +347,7 @@ def _human_repeat(name: str, args: dict) -> bool:
     if _human is None or _human[0] != name:
         return False
     saved = _human[1]
-    same = all(args.get(key) == saved.get(key) for key in ("box", "circle")
-               if key in saved)
+    same = args.get("region") == saved.get("region")
     if not same:
         return False
     _human = None
@@ -393,15 +394,16 @@ def review(name: str, args: dict) -> tuple[dict, str, str]:
         return _strip(args), "", ""
     if name in ("update_script", "save_anchor"):
         return _review_update(args)
-    _kind, shape = spec
-    region = args.get(shape) if isinstance(args.get(shape), dict) else None
+    _kind, key = spec
+    region = args.get(key) if isinstance(args.get(key), dict) else None
     if region is None:
         return _strip(args), "", ""
     final, note, rejected = _one(
-        _kind, shape, region, None if _kind == "tap" else args.get("shot"),
+        _kind, _shape_of(region), region,
+        None if _kind == "tap" else args.get("shot"),
         str(args.get("expect") or ""), str(args.get("expect") or name))
     if rejected:
         return args, "", rejected
     out = _strip(args)
-    out[shape] = final
+    out[key] = final
     return out, note, ""

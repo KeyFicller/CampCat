@@ -126,8 +126,9 @@ def _name(tool: dict) -> str | None:
 
 
 def operator_tools(host_tools: list) -> list:
-    """Host tools minus the scripter-only ones, plus the handoff tool."""
-    kept = [tool for tool in host_tools if _name(tool) not in scripter.SCRIPTER_ONLY]
+    """Host tools the operator may call, plus the handoff tool."""
+    hidden = scripter.SCRIPTER_ONLY | scripter.HIDDEN
+    kept = [tool for tool in host_tools if _name(tool) not in hidden]
     return kept + [AUTHOR_SCRIPT]
 
 

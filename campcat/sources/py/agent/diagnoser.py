@@ -157,7 +157,7 @@ def diagnose_gather(state: DiagnoseState) -> dict:
     shot = shot_reply.get("shot")
     shot_n = shot if isinstance(shot, int) and not isinstance(shot, bool) else 0
     session.screenshot_frame(shot, image)
-    crop = tools.call_cpp("view_crop_box", {"box": match["box"]})
+    crop = tools.call_cpp("view_crop", {"region": match["box"]})
     if not crop.get("ok"):
         return _host_fail(crop, shot_n)
     template = tools.call_cpp("view_template", {

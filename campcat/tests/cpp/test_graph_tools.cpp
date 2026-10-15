@@ -313,17 +313,17 @@ TEST_F(GraphTools, AFlatTemplateIsRefused) {
     // A patch of one flat colour has no variance, and normalized correlation is
     // undefined without it: OpenCV scores such a template 1.0 everywhere, so it
     // would match every screen and the anchor over it would be useless.
-    const auto flat = call("save_template_box",
+    const auto flat = call("save_template",
                            R"({"bundle": "g.task", "name": "flat",
-                               "box": {"x": 60, "y": 55, "w": 20, "h": 20}})");
+                               "region": {"x": 60, "y": 55, "w": 20, "h": 20}})");
     EXPECT_FALSE(flat.ok);
     EXPECT_NE(flat.error.find("flat colour"), std::string::npos)
         << flat.error;
     EXPECT_FALSE(exists("g.task/flat.png")) << "nothing is written for a refusal";
 
-    const auto drawn = call("save_template_box",
+    const auto drawn = call("save_template",
                             R"({"bundle": "g.task", "name": "mark",
-                                "box": {"x": 38, "y": 28, "w": 24, "h": 24}})");
+                                "region": {"x": 38, "y": 28, "w": 24, "h": 24}})");
     EXPECT_TRUE(drawn.ok) << drawn.error;
     EXPECT_TRUE(exists("g.task/mark.png"));
 }

@@ -129,23 +129,23 @@ const campcat::llm::js::tool_entry *tool_named(const std::string &_name) {
 // clamped tap would look like a success to the model. Its bounding box is 2r+1
 // wide, so the last covered pixel is cx+r -- the pair below sits exactly on it.
 TEST_F(ShapeTools, CircleStopsAtTheLastPixelItCanCover) {
-    const auto last = call("view_crop_circle",
-                           R"({"circle":{"cx":61,"cy":40,"r":38}})");
+    const auto last = call("view_crop",
+                           R"({"region":{"cx":61,"cy":40,"r":38}})");
     EXPECT_TRUE(last.ok) << last.error;
 
-    const auto past = call("view_crop_circle",
-                           R"({"circle":{"cx":62,"cy":40,"r":38}})");
+    const auto past = call("view_crop",
+                           R"({"region":{"cx":62,"cy":40,"r":38}})");
     EXPECT_FALSE(past.ok);
     EXPECT_NE(past.error.find("out of range"), std::string::npos) << past.error;
 }
 
 TEST_F(ShapeTools, CircleStopsAtTheLastRowItCanCover) {
     const auto last =
-        call("view_crop_circle", R"({"circle":{"cx":50,"cy":41,"r":38}})");
+        call("view_crop", R"({"region":{"cx":50,"cy":41,"r":38}})");
     EXPECT_TRUE(last.ok) << last.error;
 
     const auto past =
-        call("view_crop_circle", R"({"circle":{"cx":50,"cy":42,"r":38}})");
+        call("view_crop", R"({"region":{"cx":50,"cy":42,"r":38}})");
     EXPECT_FALSE(past.ok);
     EXPECT_NE(past.error.find("out of range"), std::string::npos) << past.error;
 }
@@ -153,9 +153,9 @@ TEST_F(ShapeTools, CircleStopsAtTheLastRowItCanCover) {
 // A radius of zero covers one pixel and a negative one covers nothing; neither
 // is a shape anyone meant, so both are refused with a radius that cannot crop.
 TEST_F(ShapeTools, ANonPositiveRadiusIsRefused) {
-    for (const char *args : {R"({"circle":{"cx":50,"cy":40,"r":0}})",
-                             R"({"circle":{"cx":50,"cy":40,"r":-3}})"}) {
-        const auto reply = call("view_crop_circle", args);
+    for (const char *args : {R"({"region":{"cx":50,"cy":40,"r":0}})",
+                             R"({"region":{"cx":50,"cy":40,"r":-3}})"}) {
+        const auto reply = call("view_crop", args);
         EXPECT_FALSE(reply.ok) << args;
         EXPECT_NE(reply.error.find("out of range"), std::string::npos)
             << args << ": " << reply.error;
@@ -168,17 +168,17 @@ TEST_F(ShapeTools, ANonPositiveRadiusIsRefused) {
 // wrong by copying one shape's test into the other.
 TEST_F(ShapeTools, BoxMaySitFlushAgainstTheEdge) {
     const auto flush =
-        call("view_crop_box", R"({"box":{"x":90,"y":70,"w":10,"h":10}})");
+        call("view_crop", R"({"region":{"x":90,"y":70,"w":10,"h":10}})");
     EXPECT_TRUE(flush.ok) << flush.error;
 
     const auto past =
-        call("view_crop_box", R"({"box":{"x":91,"y":70,"w":10,"h":10}})");
+        call("view_crop", R"({"region":{"x":91,"y":70,"w":10,"h":10}})");
     EXPECT_FALSE(past.ok);
     EXPECT_NE(past.error.find("out of range"), std::string::npos) << past.error;
 }
 
 TEST_F(ShapeTools, AZeroSizedBoxIsRefused) {
-    const auto reply = call("view_crop_box", R"({"box":{"x":10,"y":10,"w":0,"h":10}})");
+    const auto reply = call("view_crop", R"({"region":{"x":10,"y":10,"w":0,"h":10}})");
     EXPECT_FALSE(reply.ok);
     EXPECT_NE(reply.error.find("out of range"), std::string::npos)
         << reply.error;
@@ -190,12 +190,12 @@ TEST_F(ShapeTools, AZeroSizedBoxIsRefused) {
 // computed. A disc's is 2r+1 square: the disc plus the one-pixel rim that makes
 // its centre land on a pixel rather than between four.
 TEST_F(ShapeTools, ACropIsTheRegionsBoundingBox) {
-    const auto box = call("view_crop_box", R"({"box":{"x":10,"y":20,"w":30,"h":15}})");
+    const auto box = call("view_crop", R"({"region":{"x":10,"y":20,"w":30,"h":15}})");
     ASSERT_TRUE(box.ok) << box.error;
     EXPECT_EQ(decode_png(box.image_png).size(), cv::Size(30, 15));
 
     const auto disc =
-        call("view_crop_circle", R"({"circle":{"cx":50,"cy":40,"r":12}})");
+        call("view_crop", R"({"region":{"cx":50,"cy":40,"r":12}})");
     ASSERT_TRUE(disc.ok) << disc.error;
     EXPECT_EQ(decode_png(disc.image_png).size(), cv::Size(25, 25));
 }
@@ -204,11 +204,11 @@ TEST_F(ShapeTools, ACropIsTheRegionsBoundingBox) {
 // middle, a disc at its own centre. A tap on the wrong pixel is otherwise
 // silent, so the number is worth reading back.
 TEST_F(ShapeTools, TapLandsOnTheRegionsCentre) {
-    const auto box = call("tap", R"({"box":{"x":10,"y":20,"w":30,"h":15}})");
+    const auto box = call("tap", R"({"region":{"x":10,"y":20,"w":30,"h":15}})");
     ASSERT_TRUE(box.ok) << box.error;
     EXPECT_EQ(box.text, "tapped 25,27");
 
-    const auto disc = call("tap_circle", R"({"circle":{"cx":50,"cy":40,"r":12}})");
+    const auto disc = call("tap", R"({"region":{"cx":50,"cy":40,"r":12}})");
     ASSERT_TRUE(disc.ok) << disc.error;
     EXPECT_EQ(disc.text, "tapped 50,40");
 }
@@ -269,18 +269,17 @@ TEST(ShapeSchema, TheCutOffersBothShapesAsAlternatives) {
     EXPECT_NE(schema.find("\"w\""), std::string_view::npos); // box
 }
 
-// Each disc tool names its shape in the schema and no other, so the model cannot
-// be told a box is acceptable where only a disc is.
-TEST(ShapeSchema, ADiscToolOffersOnlyTheDisc) {
-    const campcat::llm::js::tool_entry *circle = tool_named("view_crop_circle");
-    ASSERT_NE(circle, nullptr);
-    EXPECT_NE(circle->schema.find("\"cx\""), std::string_view::npos);
-    EXPECT_EQ(circle->schema.find("\"x\""), std::string_view::npos);
-
-    const campcat::llm::js::tool_entry *box = tool_named("view_crop_box");
-    ASSERT_NE(box, nullptr);
-    EXPECT_NE(box->schema.find("\"x\""), std::string_view::npos);
-    EXPECT_EQ(box->schema.find("\"cx\""), std::string_view::npos);
+// A region tool offers both shapes, told apart by their fields, the same way
+// update_script's cut does. `anyOf`, not `oneOf`: both providers reject the
+// exclusive form.
+TEST(ShapeSchema, ARegionToolOffersBothShapes) {
+    for (const char *name : {"tap", "view_crop", "save_template", "mark"}) {
+        const campcat::llm::js::tool_entry *entry = tool_named(name);
+        ASSERT_NE(entry, nullptr) << name;
+        EXPECT_NE(entry->schema.find("\"anyOf\""), std::string_view::npos) << name;
+        EXPECT_NE(entry->schema.find("\"cx\""), std::string_view::npos) << name;
+        EXPECT_NE(entry->schema.find("\"x\""), std::string_view::npos) << name;
+    }
 }
 
 // --- a named frame, not only the current screen ----------------------------
@@ -379,13 +378,13 @@ private:
 
 TEST_F(FrameTools, CropReadsTheNamedFrame) {
     const auto named = call(
-        "view_crop_box", R"({"box":{"x":0,"y":0,"w":10,"h":10},"shot":1})");
+        "view_crop", R"({"region":{"x":0,"y":0,"w":10,"h":10},"shot":1})");
     ASSERT_TRUE(named.ok) << named.error;
     EXPECT_TRUE(all_pixels(decode_png(named.image_png),
                            cv::Scalar(255, 255, 255)));
 
     const auto current =
-        call("view_crop_box", R"({"box":{"x":0,"y":0,"w":10,"h":10}})");
+        call("view_crop", R"({"region":{"x":0,"y":0,"w":10,"h":10}})");
     ASSERT_TRUE(current.ok) << current.error;
     EXPECT_TRUE(
         all_pixels(decode_png(current.image_png), cv::Scalar(128, 128, 128)));
@@ -393,14 +392,14 @@ TEST_F(FrameTools, CropReadsTheNamedFrame) {
 
 TEST_F(FrameTools, CropOfAnOldFrameKeepsTheCurrentScreen) {
     const auto named = call(
-        "view_crop_box", R"({"box":{"x":0,"y":0,"w":10,"h":10},"shot":1})");
+        "view_crop", R"({"region":{"x":0,"y":0,"w":10,"h":10},"shot":1})");
     ASSERT_TRUE(named.ok) << named.error;
     // The named crop has to be frame 1, or this only checks the current screen
     // twice and passes while `shot` is ignored.
     EXPECT_TRUE(all_pixels(decode_png(named.image_png),
                            cv::Scalar(255, 255, 255)));
     const auto current =
-        call("view_crop_box", R"({"box":{"x":0,"y":0,"w":10,"h":10}})");
+        call("view_crop", R"({"region":{"x":0,"y":0,"w":10,"h":10}})");
     ASSERT_TRUE(current.ok) << current.error;
     EXPECT_TRUE(
         all_pixels(decode_png(current.image_png), cv::Scalar(128, 128, 128)));
@@ -409,7 +408,7 @@ TEST_F(FrameTools, CropOfAnOldFrameKeepsTheCurrentScreen) {
 TEST_F(FrameTools, MarkDrawsOnTheNamedFrame) {
     const auto marked = call(
         "mark",
-        R"({"label":"","box":{"x":0,"y":0,"w":10,"h":10},"shot":1})");
+        R"({"label":"","region":{"x":0,"y":0,"w":10,"h":10},"shot":1})");
     ASSERT_TRUE(marked.ok) << marked.error;
     const cv::Vec3b px = decode_png(marked.image_png).at<cv::Vec3b>(5, 95);
     EXPECT_EQ(px, cv::Vec3b(0, 0, 0));
@@ -417,7 +416,7 @@ TEST_F(FrameTools, MarkDrawsOnTheNamedFrame) {
 
 TEST_F(FrameTools, UnknownShotIsRefusedWithFrameForWording) {
     const auto reply = call(
-        "view_crop_circle", R"({"circle":{"cx":50,"cy":40,"r":12},"shot":9})");
+        "view_crop", R"({"region":{"cx":50,"cy":40,"r":12},"shot":9})");
     EXPECT_FALSE(reply.ok);
     EXPECT_NE(reply.error.find("no screenshot #9 in this session"),
               std::string::npos)
