@@ -299,8 +299,9 @@ reachable from `entry`. Saving an anchor or an edge reports the same list.
 
 ### Rules for a graph that stays reliable
 
-1. One screen, one anchor. Two anchors true on one screen are told apart by a `has` on what
-   only one of them shows (`if (has("other.png")) { return false }`) -- never a lower threshold.
+1. One screen, one anchor. Tell two screens apart by a template of a control only one of
+   them shows. Every PNG in the bundle is drawn on that anchor in the graph editor, so do
+   not save a picture of the other screen just to `return false`. Never a lower threshold.
 2. An edge must be safe to run again. Spending or claiming goes in the task, after `goto`.
 3. Do not `tap_at` when a `tap` missed. Let it fail.
 4. In a task, do not `loop` + `has` + `wait` for a screen: `goto` it. Only an edge waits

@@ -591,17 +591,18 @@ RunStmt::exec(CcatInterpreter &_interp,
         const std::string bundle = abs.parent_path().filename().string();
         const bundle_tag tag = bundle_tags(home, bundle);
         if (!tag.edge_of.empty()) {
-            std::string err;
-            const screen_graph *graph = _interp.cached_graph(tag.edge_of, &err);
-            if (graph == nullptr) {
+            const loaded_graph loaded = load_graph(
+                std::filesystem::path(_interp.m_cfg->config_home), tag.edge_of);
+            if (!loaded.ok) {
                 return stmt_exec_outcome::make_error("run " + bundle + ": " +
-                                                     err);
+                                                     loaded.error);
             }
             const auto edge = std::find_if(
-                graph->edges.begin(), graph->edges.end(),
+                loaded.graph.edges.begin(), loaded.graph.edges.end(),
                 [&](const graph_edge &_e) { return _e.script == bundle; });
-            const nav_result got =
-                run_edge(*graph, *edge, _interp.graph_io(tag.edge_of, _should_stop));
+            const nav_result got = run_edge(
+                loaded.graph, *edge,
+                _interp.graph_io(tag.edge_of, _should_stop));
             if (got.stopped) {
                 return stmt_exec_outcome::make_stopped();
             }
@@ -829,22 +830,6 @@ CcatInterpreter::run(const Program &_program,
     return r;
 }
 
-const screen_graph *CcatInterpreter::cached_graph(const std::string &_name,
-                                                  std::string *_err) {
-    const auto found = m_graphs.find(_name);
-    if (found != m_graphs.end()) {
-        return &found->second;
-    }
-    const loaded_graph loaded =
-        load_graph(std::filesystem::path(m_cfg->config_home), _name);
-    if (!loaded.ok) {
-        *_err = loaded.error;
-        return nullptr;
-    }
-    const auto [it, _] = m_graphs.emplace(_name, loaded.graph);
-    return &it->second;
-}
-
 bundle_run
 CcatInterpreter::run_graph_bundle(const std::string &_bundle,
                                   const std::function<bool()> &_should_stop) {
@@ -961,13 +946,13 @@ GotoStmt::exec(CcatInterpreter &_interp,
         return stmt_exec_outcome::make_error(
             "goto target must be \"graph:anchor\"");
     }
-    std::string err;
-    const screen_graph *graph = _interp.cached_graph(graph_name, &err);
-    if (graph == nullptr) {
-        return stmt_exec_outcome::make_error(err);
+    const loaded_graph loaded = load_graph(
+        std::filesystem::path(_interp.m_cfg->config_home), graph_name);
+    if (!loaded.ok) {
+        return stmt_exec_outcome::make_error(loaded.error);
     }
-    const nav_result got =
-        navigate(*graph, anchor, _interp.graph_io(graph_name, _should_stop));
+    const nav_result got = navigate(
+        loaded.graph, anchor, _interp.graph_io(graph_name, _should_stop));
     if (got.stopped) {
         return stmt_exec_outcome::make_stopped();
     }
@@ -986,10 +971,10 @@ AtStmt::exec(CcatInterpreter &_interp,
         return stmt_exec_outcome::make_error(
             "at target must be \"graph:anchor\"");
     }
-    std::string err;
-    const screen_graph *graph = _interp.cached_graph(graph_name, &err);
-    if (graph == nullptr) {
-        return stmt_exec_outcome::make_error(err);
+    const loaded_graph loaded = load_graph(
+        std::filesystem::path(_interp.m_cfg->config_home), graph_name);
+    if (!loaded.ok) {
+        return stmt_exec_outcome::make_error(loaded.error);
     }
     cv::Mat frame;
     if (!_interp.capture_screen(&frame, _should_stop)) {
@@ -1000,7 +985,8 @@ AtStmt::exec(CcatInterpreter &_interp,
                                              /*_device=*/true);
     }
     const locate_hit hit =
-        locate(*graph, _interp.graph_io(graph_name, _should_stop).check, frame);
+        locate(loaded.graph,
+               _interp.graph_io(graph_name, _should_stop).check, frame);
     if (hit.kind == locate_kind::error || hit.kind == locate_kind::ambiguous) {
         return stmt_exec_outcome::make_error("at " + target + " " + hit.detail);
     }

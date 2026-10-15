@@ -6,8 +6,6 @@
 
 #include "core/template_matcher.h"
 
-#include <unordered_map>
-
 #include <opencv2/core.hpp>
 
 #include <filesystem>
@@ -197,13 +195,6 @@ private:
                     const std::function<bool()> &_should_stop,
                     bool *_value_out);
 
-    /**
-     * @brief The graph named `_name`, loaded once per run.
-     * @return null and an error in `_err` when the graph is missing or invalid.
-     */
-    const screen_graph *cached_graph(const std::string &_name,
-                                     std::string *_err);
-
     /// Run `<config_home>/<_bundle>/main.ccat` with graph-script re-entry blocked.
     bundle_run run_graph_bundle(const std::string &_bundle,
                                 const std::function<bool()> &_should_stop);
@@ -232,7 +223,6 @@ private:
     bool m_in_graph_script = false;
     /// Set by `check_anchor`: screenshots come from here instead of the device.
     const cv::Mat *m_frame = nullptr;
-    std::unordered_map<std::string, screen_graph> m_graphs;
 };
 
 } // namespace ccat_lang

@@ -61,15 +61,56 @@ PICK_PROMPT = (
     "reason: one sentence"
 )
 
+# Shared by the one-crop check and the pick, so the two cannot drift.
+_TEMPLATE_RULES = (
+    "Apply these rules in order and stop at the first that decides. Color, "
+    "readable text, and how much a crop looks like a button do not count.\n"
+    "1. Shape. A round control (圆) keeps only a circle {cx,cy,r}. A "
+    "rectangular control keeps only a box {x,y,w,h}. While a right shape "
+    "remains, drop the wrong one. A box around a round control is the wrong "
+    "shape.\n"
+    "2. Clipping. Drop a crop that cuts the control off while a complete one "
+    "remains. A circle is judged by its rim, not the corners outside the disc.\n"
+    "3. Edges. A crop whose edge sits on the control beats one with background "
+    "between the edge and the control (留白). While a flush crop remains, drop "
+    "the ones with that gap.\n"
+    "4. If none sit on the edge, keep the one with the least 留白.\n"
+    "5. If more than one remain, keep the lowest number, the first proposal."
+)
+
+TEMPLATE_PICK_PROMPT = (
+    "You see every crop considered for one template, in order. 1 is the first "
+    "proposal; each later one is a correction.\n"
+    + _TEMPLATE_RULES +
+    "\nAnswer in exactly this form:\n"
+    "pick: <the number>\n"
+    "reason: one sentence naming which rule decided it"
+)
+
 REVIEW_CRITERIA = {
     "tap": "The region is to be tapped: it must sit on the element the expectation names.",
     "template": (
-        "The region becomes a template: it must hold the stable control the "
-        "expectation names and nothing behind it -- no background, no "
-        "neighbouring element -- and must not cut the control off. For a "
-        "circle, the corners outside the disc are ignored."
+        "The region becomes a template.\n" + _TEMPLATE_RULES + "\n"
+        "On this one crop, answer ok only when its shape is right and its edge "
+        "already sits on the control. Otherwise adjust to that boundary, and "
+        "switch circle and box when the shape is wrong. Reject only when the "
+        "region is on the wrong element or the element is not in this frame."
     ),
 }
+
+
+def _review_system(kind: str) -> str:
+    if kind == "template":
+        extra = (
+            "For a template, an adjust may change the shape: write circle: for "
+            "a round control and box: for a rectangular one."
+        )
+    else:
+        extra = (
+            "The box or circle key must be the shape of the region you were given."
+        )
+    return REVIEW_PROMPT + "\n" + extra
+
 
 _HUMAN_REGION = re.compile(
     r"call (\w+) again with this corrected region (\{.*\})")
@@ -162,14 +203,19 @@ def with_expect(offered: list) -> list:
     return out
 
 
-def parse_review(text: str, shape: str) -> tuple[str, dict | None, str]:
-    """`(verdict, region, reason)`. Anything off the form is `skip`."""
+def parse_review(text: str, shape: str, *, kind: str = "tap"
+                 ) -> tuple[str, dict | None, str, str]:
+    """`(verdict, region, reason, shape)`. Anything off the form is `skip`.
+
+    A template adjust may name either shape; the key on that line is the new
+    one. A tap must repeat the shape it was given.
+    """
     lines = [line.strip() for line in text.strip().splitlines() if line.strip()]
     if not lines or not lines[0].startswith("verdict:"):
-        return "skip", None, text.strip()
+        return "skip", None, text.strip(), shape
     verdict = lines[0].split(":", 1)[1].strip()
     if verdict not in ("ok", "adjust", "reject"):
-        return "skip", None, text.strip()
+        return "skip", None, text.strip(), shape
     region = None
     reason = ""
     for line in lines[1:]:
@@ -177,15 +223,18 @@ def parse_review(text: str, shape: str) -> tuple[str, dict | None, str]:
             reason = line.split(":", 1)[1].strip()
         elif line.startswith("box:") or line.startswith("circle:"):
             key, raw = line.split(":", 1)
-            if key != shape:
-                return "skip", None, text.strip()
+            if kind != "template" and key != shape:
+                return "skip", None, text.strip(), shape
             try:
                 region = json.loads(raw)
             except json.JSONDecodeError:
-                return "skip", None, text.strip()
+                return "skip", None, text.strip(), shape
+            if not isinstance(region, dict):
+                return "skip", None, text.strip(), shape
+            shape = key
     if verdict == "adjust" and not isinstance(region, dict):
-        return "skip", None, text.strip()
-    return verdict, region, reason
+        return "skip", None, text.strip(), shape
+    return verdict, region, reason, shape
 
 
 def parse_pick(text: str, count: int) -> int | None:
@@ -263,6 +312,8 @@ def _inside(region: dict, shape: str, frame: tuple) -> bool:
 def _moved(shape: str, before: dict, after: dict) -> str:
     if before == after:
         return ""
+    # The sent crop may have changed shape, so the note follows `after`.
+    shape = _shape_of(after)
     if shape == "box":
         where = (f"box {after['x']},{after['y']} {after['w']}x{after['h']}")
     else:
@@ -316,7 +367,7 @@ def review_judge(state: ReviewState) -> dict:
     try:
         model = models.build_chat_model()
         response = model.invoke([
-            SystemMessage(content=REVIEW_PROMPT),
+            SystemMessage(content=_review_system(state["kind"])),
             HumanMessage(content=[
                 {"type": "text", "text": text},
                 _picture(state.get("crop_b64") or ""),
@@ -327,11 +378,13 @@ def review_judge(state: ReviewState) -> dict:
         raise
     except Exception as exc:  # noqa: BLE001 - a failed check lets the call through
         return {"verdict": "skip", "reason": str(exc), "rounds": rounds}
-    verdict, region, reason = parse_review(
-        session.content_text(getattr(response, "content", response)), state["shape"])
+    verdict, region, reason, shape = parse_review(
+        session.content_text(getattr(response, "content", response)),
+        state["shape"], kind=state["kind"])
     out: dict = {"verdict": verdict, "reason": reason, "rounds": rounds}
-    if verdict == "adjust" and _inside(region, state["shape"], state.get("frame_size")):
+    if verdict == "adjust" and _inside(region, shape, state.get("frame_size")):
         out["region"] = region
+        out["shape"] = shape
         out["candidates"] = list(state.get("candidates") or []) + [
             {"region": region, "note": reason}]
     elif verdict == "adjust":
@@ -358,7 +411,7 @@ def _after_judge(state: ReviewState) -> str:
 
 
 def review_pick(state: ReviewState) -> dict:
-    """The crop that best matches the expectation, from every one considered."""
+    """One crop from every one considered, by the prompt for this kind."""
     candidates = state.get("candidates") or []
     first = candidates[0]["region"]
     extra = {} if state.get("shot") is None else {"shot": state["shot"]}
@@ -379,8 +432,10 @@ def review_pick(state: ReviewState) -> dict:
     lines.append("The pictures follow in that order.")
     try:
         model = models.build_chat_model()
+        prompt = (TEMPLATE_PICK_PROMPT if state.get("kind") == "template"
+                  else PICK_PROMPT)
         response = model.invoke([
-            SystemMessage(content=PICK_PROMPT),
+            SystemMessage(content=prompt),
             HumanMessage(content=[
                 {"type": "text", "text": "\n".join(lines)}, *pictures]),
         ])

@@ -21,6 +21,8 @@ def test_scripter_prompt_keeps_the_cheatsheet():
     assert "save_anchor" in text
     assert "golden.md" in text
     assert "not an anchor id" in text
+    assert "do not save a picture of another screen" in text
+    assert 'has("other.png")' not in text
     assert "goto(" in text
     assert "update_graph" not in text
     assert "save_golden" not in text

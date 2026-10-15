@@ -16,12 +16,8 @@ lit, the app's logo top left. The posts, their pictures and the unread counts ch
 `main.ccat` -- only judges whether that screen is showing:
 
 ```ccat
-// The feed tab bar is fixed and on this screen only.
-if (has("feed.png")) {
-  // The search overlay keeps the tab bar but covers the feed: not this screen.
-  if (has("search_open.png")) { return false }
-  return true
-}
+// The logo is fixed and on this screen only. Search covers it, so an open search is not this screen.
+if (has("feed_logo.png")) { return true }
 return false
 ```
 

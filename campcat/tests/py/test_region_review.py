@@ -438,3 +438,68 @@ def test_interrupt_inside_review_stops_the_turn(monkeypatch):
     assert "tap" not in [c[0] for c in calls]
     assert _tap_text() == [tools.INTERRUPTED_TEXT]
     assert not out.get("error")
+
+
+CIRCLE = {"cx": 3, "cy": 3, "r": 2}
+
+
+def _systems(model):
+    found = []
+    for messages in model.seen:
+        content = getattr(messages[0], "content", "")
+        if isinstance(content, str):
+            found.append(content)
+    return found
+
+
+def test_tap_adjust_to_a_circle_is_skipped(monkeypatch):
+    calls, _, _ = _drive(monkeypatch, [
+        _call("tap", {"region": dict(BOX), "expect": "btn"}),
+        _say('verdict: adjust\ncircle: {"cx":3,"cy":3,"r":2}\nreason: round'),
+        _say("Done."),
+    ], None)
+    assert [c for c in calls if c[0] == "tap"] == [("tap", {"region": BOX})]
+
+
+def test_template_adjust_to_a_circle_is_what_the_host_gets(monkeypatch):
+    calls, _, _ = _drive(monkeypatch, [
+        _call("save_template", {"region": dict(BOX), "expect": "round button"}),
+        _say('verdict: adjust\ncircle: {"cx":3,"cy":3,"r":2}\nreason: round control'),
+        _say("verdict: ok\nreason: rim sits on it"),
+        _say("pick: 2\nreason: rule 1"),
+        _say("Done."),
+    ], None, name="save_template")
+    crops = [c[1]["region"] for c in calls if c[0] == "view_crop"]
+    assert crops[1] == CIRCLE
+    assert [c for c in calls if c[0] == "save_template"] == [
+        ("save_template", {"region": CIRCLE})]
+    assert any("circle r=2" in text for text in _tap_text())
+
+
+def test_template_pick_follows_the_crop_rules(monkeypatch):
+    calls, model, _ = _drive(monkeypatch, [
+        _call("save_template", {"region": dict(BOX), "expect": "round button"}),
+        _say('verdict: adjust\ncircle: {"cx":3,"cy":3,"r":2}\nreason: round control'),
+        _say("verdict: ok\nreason: rim sits on it"),
+        _say("pick: 2\nreason: rule 1, the circle"),
+        _say("Done."),
+    ], None, name="save_template")
+    picks = [text for text in _systems(model) if text.startswith("You see every crop")]
+    assert picks
+    assert "圆" in picks[-1]
+    assert "留白" in picks[-1]
+    assert "best matches" not in picks[-1]
+    assert [c for c in calls if c[0] == "save_template"][-1][1]["region"] == CIRCLE
+
+
+def test_unreadable_template_pick_keeps_the_first_cut(monkeypatch):
+    calls, _, _ = _drive(monkeypatch, [
+        _call("save_template", {"region": dict(BOX), "expect": "round button"}),
+        _say('verdict: adjust\ncircle: {"cx":3,"cy":3,"r":2}\nreason: round control'),
+        _say("verdict: ok\nreason: rim sits on it"),
+        _say("nope"),
+        _say("Done."),
+    ], None, name="save_template")
+    assert [c for c in calls if c[0] == "save_template"] == [
+        ("save_template", {"region": BOX})]
+    assert any("kept the first of 2" in text for text in _tap_text())
