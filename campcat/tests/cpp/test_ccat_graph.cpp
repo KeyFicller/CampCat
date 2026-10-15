@@ -1,5 +1,6 @@
 #include <core/adb_client.h>
 #include <core/app_config.h>
+#include <core/automation_log.h>
 #include <core/script/ccat_bundle.h>
 #include <core/script/ccat_graph.h>
 #include <core/script/ccat_interpreter.h>
@@ -38,6 +39,7 @@ using campcat::ccat_lang::navigate;
 using campcat::ccat_lang::parse_error;
 using campcat::ccat_lang::parse_program;
 using campcat::ccat_lang::run_action;
+using campcat::ccat_lang::running_graph_bundle;
 using campcat::ccat_lang::run_edge;
 using campcat::ccat_lang::scan_graph;
 using campcat::ccat_lang::screen_graph;
@@ -587,6 +589,39 @@ TEST(CcatGraph, RunOnAnActionChecksBothEnds) {
     EXPECT_NE(wrong.message.find("not at a"), std::string::npos)
         << wrong.message;
     EXPECT_EQ(off.adb.homes, 0);
+}
+
+TEST(CcatGraph, RunPublishesTheBundleWhileItRuns) {
+    toy g("publish");
+    write_file(g.dir / "g.a.claim" / "main.ccat", "home\n");
+    std::string seen;
+    const auto sink = campcat::automation_log::add_sink([&](const std::string &) {
+        const std::string cur = running_graph_bundle();
+        if (!cur.empty()) {
+            seen = cur;
+        }
+    });
+    (void)sink;
+    device d(g);
+
+    d.adb.frames = {g.frame_a, g.frame_a};
+    EXPECT_TRUE(d.run("run(\"g.a.claim/main.ccat\")").ok);
+    EXPECT_EQ(seen, "g.a.claim");
+    EXPECT_TRUE(running_graph_bundle().empty());
+
+    seen.clear();
+    d.adb.frames = {g.frame_a, g.frame_b};
+    d.adb.at = 0;
+    EXPECT_TRUE(d.run("run(\"g.a-b/main.ccat\")").ok);
+    EXPECT_EQ(seen, "g.a-b");
+    EXPECT_TRUE(running_graph_bundle().empty());
+
+    seen.clear();
+    d.adb.frames = {g.frame_a, g.frame_b};
+    d.adb.at = 0;
+    EXPECT_TRUE(d.run("goto(\"g:b\")").ok);
+    EXPECT_EQ(seen, "g.a-b");
+    EXPECT_TRUE(running_graph_bundle().empty());
 }
 
 TEST(CcatGraph, RunOnPlainBundleUnchanged) {

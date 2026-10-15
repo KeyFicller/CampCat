@@ -212,6 +212,12 @@ nav_result run_edge(const screen_graph &_graph, const graph_edge &_edge,
 nav_result run_action(const screen_graph &_graph, const graph_action &_action,
                       const nav_io &_io, nav_limits _limits = {});
 
+/// The edge or action bundle the hop in progress is running, or empty. The
+/// script thread writes it for that hop, including a `goto`; the graph page
+/// reads it.
+std::string running_graph_bundle();
+void set_running_graph_bundle(std::string _bundle);
+
 /// What `list_scripts` says about a bundle beyond its description.
 struct bundle_tag {
     std::string anchor_of; ///< the graph whose anchor this bundle is

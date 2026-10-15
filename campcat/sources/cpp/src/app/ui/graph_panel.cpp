@@ -4,6 +4,7 @@
 #include "app/ui/gl_texture.h"
 #include "app/ui/script_editor_panel.h"
 #include "core/app_config.h"
+#include "core/llm/llm_tools.h"
 #include "core/script/ccat_bundle.h"
 #include "core/script/ccat_graph.h"
 
@@ -63,6 +64,8 @@ const ImU32 k_bad = IM_COL32(224, 106, 106, 255);
 /// human", which is what a popup is.
 const ImU32 k_accent = IM_COL32(62, 102, 135, 255);
 const ImU32 k_amber = IM_COL32(214, 178, 92, 255);
+/// The edge or anchor whose script the LLM is inside right now.
+const ImU32 k_run = IM_COL32(118, 196, 146, 255);
 
 const char *k_in_names[] = {"in"};
 const char *k_out_names[] = {"out"};
@@ -603,6 +606,30 @@ void draw_edge_labels(ImDrawList *_dl, ImVec2 _origin, ImVec2 _canvas,
     const float factor = _view.mFactor;
     const ImVec2 offset = _origin + _view.mPosition * factor;
     const ImRect canvas(_origin, _origin + _canvas);
+    // The bundle the LLM's run_script is inside: an action's anchor, or the
+    // edge `run` / `goto` is hopping.
+    const std::string running =
+        campcat::llm::script_running()
+            ? campcat::ccat_lang::running_graph_bundle()
+            : std::string{};
+    if (!running.empty()) {
+        for (const campcat::ccat_lang::graph_action &action :
+             g_loaded.graph.actions) {
+            if (action.script != running) {
+                continue;
+            }
+            const std::optional<GraphEditor::NodeIndex> idx =
+                node_index(action.anchor);
+            if (!idx.has_value()) {
+                continue;
+            }
+            const GraphEditor::Node node = g_delegate.GetNode(*idx);
+            const ImVec2 mn = offset + node.mRect.Min * factor;
+            const ImVec2 mx = offset + node.mRect.Max * factor;
+            _dl->AddRect(mn, mx, k_run, view_options().mRounding * factor, 0,
+                         3.0F * factor);
+        }
+    }
     ImFont *font = campcat::app::fonts_get(campcat::app::font_role::small);
     const float size = font->FontSize * factor;
     for (std::size_t i = 0; i < g_loaded.graph.edges.size(); ++i) {
@@ -650,6 +677,10 @@ void draw_edge_labels(ImDrawList *_dl, ImVec2 _origin, ImVec2 _canvas,
             const float thick = view_options().mLineThickness * 1.5F * factor;
             _dl->AddBezierCubic(p_from, c1, c2, p_to, col, thick);
         }
+        if (edge.script == running) {
+            _dl->AddBezierCubic(p_from, c1, c2, p_to, k_run,
+                                view_options().mLineThickness * 2.5F * factor);
+        }
         const ImVec2 mid = bezier_mid(p_from, c1, c2, p_to);
         const std::string_view label =
             edge_label(g_loaded.graph.name, edge.script);
@@ -664,7 +695,8 @@ void draw_edge_labels(ImDrawList *_dl, ImVec2 _origin, ImVec2 _canvas,
             continue;
         }
         _dl->AddRectFilled(box.Min, box.Max, view_options().mBackgroundColor);
-        _dl->AddText(font, size, mid - text * 0.5F, k_ink, label.data(),
+        _dl->AddText(font, size, mid - text * 0.5F,
+                     edge.script == running ? k_run : k_ink, label.data(),
                      label.data() + label.size());
         _hits->push_back({visible, {}, {}, edge.script});
     }

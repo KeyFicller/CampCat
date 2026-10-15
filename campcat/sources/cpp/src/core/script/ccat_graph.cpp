@@ -9,6 +9,7 @@
 #include <iterator>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <queue>
 #include <sstream>
 #include <thread>
@@ -17,6 +18,20 @@
 namespace campcat::ccat_lang {
 
 namespace {
+
+std::mutex g_running_mu;
+std::string g_running_bundle;
+
+struct running_bundle_guard {
+    std::string prev;
+    explicit running_bundle_guard(std::string _bundle)
+        : prev(running_graph_bundle()) {
+        set_running_graph_bundle(std::move(_bundle));
+    }
+    ~running_bundle_guard() { set_running_graph_bundle(std::move(prev)); }
+    running_bundle_guard(const running_bundle_guard &) = delete;
+    running_bundle_guard &operator=(const running_bundle_guard &) = delete;
+};
 
 const anchor_def *find_anchor(const screen_graph &_graph,
                               std::string_view _id) {
@@ -1013,6 +1028,9 @@ nav_result navigate(const screen_graph &_graph, const std::string &_target,
             continue;
         }
 
+        // `goto` runs the edge here, not through `run_edge`. Held across the
+        // script and the wait to land, then dropped before the next hop.
+        const running_bundle_guard hold(hop->script);
         const bundle_run ran = _io.run_bundle(hop->script);
         if (ran.stopped) {
             return stopped();
@@ -1064,6 +1082,9 @@ nav_result run_action(const screen_graph &_graph, const graph_action &_action,
 
 nav_result run_edge(const screen_graph &_graph, const graph_edge &_edge,
                     const nav_io &_io, nav_limits _limits) {
+    // The whole hop, including the wait to land. `goto` reaches an edge only
+    // through here, so this is what the graph page highlights.
+    const running_bundle_guard hold(_edge.script);
     const std::string where = "run " + _edge.script + ": ";
     nav_result r;
     const auto fail = [&](const std::string &_why) {
@@ -1221,6 +1242,16 @@ std::string graph_summary(const scanned_graph &_scanned) {
         }
     }
     return out;
+}
+
+std::string running_graph_bundle() {
+    std::lock_guard<std::mutex> lock(g_running_mu);
+    return g_running_bundle;
+}
+
+void set_running_graph_bundle(std::string _bundle) {
+    std::lock_guard<std::mutex> lock(g_running_mu);
+    g_running_bundle = std::move(_bundle);
 }
 
 } // namespace campcat::ccat_lang
