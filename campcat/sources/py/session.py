@@ -8,9 +8,11 @@ from __future__ import annotations
 
 import base64
 import io
+import json
 import re
 import struct
 import time
+from uuid import uuid4
 
 from langchain_core.messages import HumanMessage
 
@@ -29,6 +31,15 @@ MIME = "image/png"
 # what bounds a request's size. Beyond the newest, a picture is kept only as
 # context, so it is worth `_THUMB_PX` instead of the full frame.
 _KEEP_PICTURES = 3
+
+# Small pictures (a crop, a template) kept at full size. Cleared in a batch,
+# not one at a time: rewriting an earlier message invalidates the provider's
+# prefix cache from there on, so a new crop must not touch the ones before it
+# until a whole batch is due.
+_KEEP_CROPS = 4
+_CROP_HIGH = 8
+
+CROP_TOOLS = frozenset({"view_crop_box", "view_crop_circle", "view_template"})
 
 # The longest side any context frame is worth, whatever the screen it came from.
 # A request carries every picture still in the list and the provider answers 413
@@ -218,13 +229,26 @@ def recall_frame(shot: object, image: str) -> HumanMessage:
         f"screen, not the current one.", image))
 
 
-def picture_of(name: str, image: str) -> HumanMessage:
+def picture_of(name: str, image: str, args: dict | None = None) -> HumanMessage:
     """A marked-up copy some other tool returned, for the user to look at.
 
     Not stored as a frame: its box and label would be baked into any template
-    cut from it.
+    cut from it. `args` is the call that produced it, so a picture later dropped
+    can be asked for again by repeating that call. A small crop or template is
+    marked, which is how `demote_pictures` counts it apart from screenshots.
     """
-    return HumanMessage(content=_shot_content(f"Image after {name}.", image))
+    if args is None:
+        caption = f"Image after {name}."
+    else:
+        caption = (
+            f"Image after {name}"
+            f"({json.dumps(args, ensure_ascii=False, separators=(',', ':'))})."
+        )
+    message = HumanMessage(content=_shot_content(caption, image))
+    size = png_size(image)
+    if name in CROP_TOOLS and size is not None and max(size) <= _THUMB_PX:
+        message.id = f"crop:{uuid4().hex}"
+    return message
 
 
 def png_size(png_b64: str) -> tuple[int, int] | None:
@@ -297,8 +321,13 @@ def _detach_picture(m: HumanMessage) -> HumanMessage:
     """
     caption = " ".join(p["text"] for p in m.content if p.get("type") == "text")
     found = _SHOT_NUM.search(caption)
-    note = ("[image not attached; call view_shot(" + found[1] + ") to look again]"
-            if found else "[image not attached]")
+    if found:
+        note = ("[image not attached; call view_shot(" + found[1]
+                + ") to look again]")
+    elif caption.startswith("Image after "):
+        note = "[image not attached; make the same call again to look at it]"
+    else:
+        note = "[image not attached]"
     return HumanMessage(
         content=[p for p in m.content if p.get("type") != "image_url"]
         + [{"type": "text", "text": note}]
@@ -361,24 +390,79 @@ def _shrink_picture(m: HumanMessage) -> HumanMessage:
     ])
 
 
-def demote_pictures(messages: list, keep: int | None = None) -> list:
+def _is_crop(m: object) -> bool:
+    """A small crop or template, counted apart from screenshots."""
+    return _is_picture(m) and isinstance(getattr(m, "id", None), str) \
+        and m.id.startswith("crop:")
+
+
+def thumbnail_png(b64: str) -> str | None:
+    """`b64` scaled the way a context frame is, or None when that cannot be done.
+
+    A picture already within `_THUMB_PX` comes back unchanged, and that needs no
+    Pillow. Anything larger does, so a missing Pillow or a file it cannot read
+    is None rather than the original: the caller asked for a thumbnail.
+    """
+    size = png_size(b64)
+    if size is None:
+        return None
+    if max(size) <= _THUMB_PX:
+        return b64
+    small = _downscale(f"data:{MIME};base64,{b64}", size)
+    if small is None:
+        return None
+    return small[0].partition(",")[2]
+
+
+def crop_png(b64: str, box: tuple[int, int, int, int]) -> str | None:
+    """The rectangle `(x, y, w, h)` of a base64 PNG, or None when it cannot be cut."""
+    if Image is None:
+        return None
+    x, y, w, h = box
+    try:
+        im = Image.open(io.BytesIO(base64.b64decode(b64)))
+        im.load()
+        cut = im.crop((x, y, x + w, y + h))
+        buf = io.BytesIO()
+        cut.save(buf, "PNG")
+    except Exception:  # a frame the host sent and Pillow still cannot read
+        return None
+    return base64.b64encode(buf.getvalue()).decode()
+
+
+def demote_pictures(messages: list, keep: int | None = None,
+                    keep_crops: int | None = None) -> list:
     """Price each picture by what the model does with it.
 
-    The newest stays full size: a tap's box is measured on it and validated at
-    that resolution. The next few become thumbnails. The rest lose their image
-    and keep their caption, which already names the number `view_shot` wants
-    back.
+    Screenshots and small crops are counted apart, so looking at a crop does
+    not shrink the screenshot it was cut from. The newest screenshot stays full
+    size: a tap's box is measured on it and validated at that resolution. The
+    next few become thumbnails. The rest lose their image and keep their
+    caption, which already names the number `view_shot` wants back.
 
-    `keep` defaults to the window this module holds, resolved at the call rather
-    than bound as a default argument, so `_KEEP_PICTURES` stays the one knob.
+    Crops stay whole until more than `_CROP_HIGH` of them still carry their
+    picture, and then only the newest `keep_crops` do. Clearing them one at a
+    time would rewrite an earlier message on every call and drop the provider's
+    prefix cache from there on.
+
+    `keep` and `keep_crops` default to the windows this module holds, resolved
+    at the call rather than bound as a default argument, so the constants stay
+    the knobs.
     """
     keep = _KEEP_PICTURES if keep is None else keep
-    pics = [i for i, m in enumerate(messages) if _is_picture(m)]
-    for n, i in enumerate(reversed(pics)):
+    keep_crops = _KEEP_CROPS if keep_crops is None else keep_crops
+    frames = [i for i, m in enumerate(messages)
+              if _is_picture(m) and not _is_crop(m)]
+    crops = [i for i, m in enumerate(messages) if _is_crop(m)]
+    for n, i in enumerate(reversed(frames)):
         if n >= keep:
             messages[i] = _detach_picture(messages[i])
         elif n >= 1:
             messages[i] = _shrink_picture(messages[i])
+    if len(crops) > _CROP_HIGH:
+        for n, i in enumerate(reversed(crops)):
+            if n >= keep_crops:
+                messages[i] = _detach_picture(messages[i])
     return messages
 
 

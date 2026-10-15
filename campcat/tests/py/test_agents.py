@@ -38,20 +38,23 @@ def test_operator_and_scripter_split_the_host_table():
 
     assert _names(operator_table) == OPERATOR_NAMES
     assert "view_template" not in _names(operator_table)
-    assert len(scripter_table) == 18
+    assert len(scripter_table) == 19
     assert _names(scripter_table) == [
         name for name in HOST_NAMES
         if name in scripter.SCRIPTER_ONLY | scripter.SHARED
-    ]
-    assert set(_names(scripter_table)) == scripter.SCRIPTER_ONLY | scripter.SHARED
-    covered = (set(_names(operator_table)) | set(_names(scripter_table))) - {"author_script"}
+    ] + ["diagnose_template"]
+    assert set(_names(scripter_table)) == (
+        scripter.SCRIPTER_ONLY | scripter.SHARED | {"diagnose_template"})
+    assert "diagnose_template" not in _names(operator_table)
+    covered = (set(_names(operator_table)) | set(_names(scripter_table))) - {
+        "author_script", "diagnose_template"}
     assert covered == set(HOST_NAMES)
 
 
 def test_unknown_tool_stays_with_the_operator():
     host = [_tool("future_tool")]
     assert _names(operator.operator_tools(host)) == ["future_tool", "author_script"]
-    assert scripter.scripter_tools(host) == []
+    assert _names(scripter.scripter_tools(host)) == ["diagnose_template"]
 
 
 def test_nameless_tool_stays_with_the_operator():
@@ -59,7 +62,7 @@ def test_nameless_tool_stays_with_the_operator():
     operator_table = operator.operator_tools([nameless])
     assert operator_table[0] is nameless
     assert _names(operator_table) == ["author_script"]
-    assert scripter.scripter_tools([nameless]) == []
+    assert _names(scripter.scripter_tools([nameless])) == ["diagnose_template"]
 
 
 def test_brief_keeps_only_the_fields_that_were_given():

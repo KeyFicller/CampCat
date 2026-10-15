@@ -15,6 +15,7 @@ from langgraph.graph import END, StateGraph
 
 import agent.memorier as memorier
 import agent.operator as operator
+import agent.region_review as region_review
 import agent.scripter as scripter
 import models
 import observability
@@ -85,10 +86,11 @@ def build_messages(state: TurnState) -> dict:
 def _invoke(state: TurnState, offered: list) -> dict:
     """One model turn against `offered`.
 
-    The schemas are passed to bind_tools unchanged, so the model sees exactly
-    the signature the caller will enforce. The operator and the scripter share
-    this; each passes its own table.
+    The schemas are passed to bind_tools with `expect` added on region tools;
+    the check strips it before the host sees the call. The operator and the
+    scripter share this; each passes its own table.
     """
+    offered = region_review.with_expect(offered)
     exhausted = bool(offered) and state.get("tool_rounds", 0) >= MAX_TOOL_ROUNDS
     try:
         model = models.build_chat_model()
@@ -136,14 +138,37 @@ def invoke(state: TurnState) -> dict:
     return _invoke(state, operator.operator_tools(state.get("tools") or []))
 
 
+def run_subgraph(compiled, state: dict) -> dict:
+    """Run `compiled` with the parent's callbacks and nothing else of its config.
+
+    The whole config joins the two runs, and a picture coming back then stalls
+    the parent's stream. Outside a graph there is no config, and that is fine.
+    """
+    from langgraph.config import get_config
+    try:
+        callbacks = get_config().get("callbacks")
+    except Exception:  # noqa: BLE001 - outside a graph there is no config
+        callbacks = None
+    if callbacks:
+        return compiled.invoke(state, {"callbacks": callbacks})
+    return compiled.invoke(state)
+
+
 def _host_result(name: str, args: dict) -> tuple[object, list]:
     """One host tool. Pictures stay out of the result list; the caller appends them."""
+    args, note, rejected = region_review.review(name, args)
+    if rejected:
+        return "error: self-check rejected this region: " + rejected, []
     reply = tools.call_cpp(name, args)
     if reply.get("ok"):
         content: object = reply.get("text") or "ok"
     else:
         content = "error: " + str(reply.get("error", ""))
+    if note and isinstance(content, str):
+        content += note
     image = reply.get("image_b64") or ""
+    if isinstance(content, str):
+        region_review.remember_human_region(content)
     if not image:
         return content, []
     if name == "screenshot":
@@ -151,7 +176,7 @@ def _host_result(name: str, args: dict) -> tuple[object, list]:
         return content, [frame] if frame is not None else []
     if name == "view_shot":
         return content, [session.recall_frame(args.get("shot"), image)]
-    return content, [session.picture_of(name, image)]
+    return content, [session.picture_of(name, image, args)]
 
 
 def _interrupted_from(calls: list, start: int) -> list:
@@ -184,9 +209,9 @@ def _run_calls(calls: list, run_one) -> tuple[list, list, bool]:
 def _run_host_tools(messages: list) -> tuple[list, bool]:
     """Run every tool call on the last message on the host.
 
-    `author_script` is not special here. The scripter uses this, and a handoff
-    tool it emits has to reach the host as an unknown tool rather than start
-    another scripter. The bool is true when the user interrupted the batch.
+    `author_script` is not special here. A handoff tool emitted here reaches
+    the host as an unknown tool rather than starting another scripter. The
+    bool is true when the user interrupted the batch.
     """
     calls = getattr(messages[-1], "tool_calls", None) or []
 

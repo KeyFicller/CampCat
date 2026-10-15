@@ -14,6 +14,7 @@
 #include <opencv2/imgproc.hpp>
 
 #include <gtest/gtest.h>
+#include <nlohmann/json.hpp>
 
 #include <chrono>
 #include <string>
@@ -280,6 +281,158 @@ TEST(ShapeSchema, ADiscToolOffersOnlyTheDisc) {
     ASSERT_NE(box, nullptr);
     EXPECT_NE(box->schema.find("\"x\""), std::string_view::npos);
     EXPECT_EQ(box->schema.find("\"cx\""), std::string_view::npos);
+}
+
+// --- a named frame, not only the current screen ----------------------------
+
+/// Hands back the pictures it was given, in order. `screenshot` is the only
+/// call that reaches it; everything else is a no-op, same as `SilentAdb`.
+class SequencedAdb final : public campcat::adb_api {
+public:
+    explicit SequencedAdb(std::vector<cv::Mat> _frames)
+        : m_frames(std::move(_frames)) {}
+
+    std::vector<std::string> list_devices(int) override { return {}; }
+    void set_serial(const std::string &) override {}
+    bool run(const std::vector<std::string> &, std::string *, std::string *,
+             int) override {
+        return false;
+    }
+    bool connect_remote(std::string_view, int, std::string *,
+                        std::string *) override {
+        return false;
+    }
+    bool tap(int, int) override { return true; }
+    bool swipe(int, int, int, int, int) override { return false; }
+    bool keyevent(int) override { return false; }
+    bool home_and_kill_all(int) override { return false; }
+    bool screencap_bgr(cv::Mat *_out, int, std::string *) override {
+        if (m_next >= m_frames.size()) {
+            return false;
+        }
+        *_out = m_frames[m_next++].clone();
+        return true;
+    }
+    bool delay_after_action(std::chrono::milliseconds) const override {
+        return true;
+    }
+
+private:
+    std::vector<cv::Mat> m_frames;
+    std::size_t m_next = 0;
+};
+
+/// 100x80, left half white and right half black, so a crop of the corner is
+/// nothing like a crop of the grey frame that follows it.
+cv::Mat split_frame() {
+    cv::Mat img(kScreenH, kScreenW, CV_8UC3, cv::Scalar(255, 255, 255));
+    img(cv::Rect(kScreenW / 2, 0, kScreenW / 2, kScreenH))
+        .setTo(cv::Scalar(0, 0, 0));
+    return img;
+}
+
+cv::Mat grey_frame() {
+    return cv::Mat(kScreenH, kScreenW, CV_8UC3, cv::Scalar(128, 128, 128));
+}
+
+bool all_pixels(const cv::Mat &_img, const cv::Scalar &_color) {
+    for (int y = 0; y < _img.rows; ++y) {
+        for (int x = 0; x < _img.cols; ++x) {
+            const cv::Vec3b px = _img.at<cv::Vec3b>(y, x);
+            if (px[0] != _color[0] || px[1] != _color[1] ||
+                px[2] != _color[2]) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+/// Two screenshots, so frame 1 and frame 2 both exist and the current screen
+/// is frame 2. `forget_frames` first: numbering is process-global.
+class FrameTools : public ::testing::Test {
+protected:
+    void SetUp() override {
+        campcat::llm::forget_frames();
+        m_adb = std::make_unique<SequencedAdb>(
+            std::vector<cv::Mat>{split_frame(), grey_frame()});
+        campcat::llm::tool_context ctx;
+        ctx.adb = m_adb.get();
+        campcat::llm::set_context(ctx);
+        ASSERT_TRUE(call("screenshot", "{}").ok);
+        ASSERT_TRUE(call("screenshot", "{}").ok);
+    }
+
+    void TearDown() override {
+        campcat::llm::set_context({});
+        campcat::llm::forget_frames();
+    }
+
+    static campcat::llm::tool_reply call(const std::string &_name,
+                                         const std::string &_args) {
+        return campcat::llm::dispatch(_name, _args);
+    }
+
+private:
+    std::unique_ptr<SequencedAdb> m_adb;
+};
+
+TEST_F(FrameTools, CropReadsTheNamedFrame) {
+    const auto named = call(
+        "view_crop_box", R"({"box":{"x":0,"y":0,"w":10,"h":10},"shot":1})");
+    ASSERT_TRUE(named.ok) << named.error;
+    EXPECT_TRUE(all_pixels(decode_png(named.image_png),
+                           cv::Scalar(255, 255, 255)));
+
+    const auto current =
+        call("view_crop_box", R"({"box":{"x":0,"y":0,"w":10,"h":10}})");
+    ASSERT_TRUE(current.ok) << current.error;
+    EXPECT_TRUE(
+        all_pixels(decode_png(current.image_png), cv::Scalar(128, 128, 128)));
+}
+
+TEST_F(FrameTools, CropOfAnOldFrameKeepsTheCurrentScreen) {
+    const auto named = call(
+        "view_crop_box", R"({"box":{"x":0,"y":0,"w":10,"h":10},"shot":1})");
+    ASSERT_TRUE(named.ok) << named.error;
+    // The named crop has to be frame 1, or this only checks the current screen
+    // twice and passes while `shot` is ignored.
+    EXPECT_TRUE(all_pixels(decode_png(named.image_png),
+                           cv::Scalar(255, 255, 255)));
+    const auto current =
+        call("view_crop_box", R"({"box":{"x":0,"y":0,"w":10,"h":10}})");
+    ASSERT_TRUE(current.ok) << current.error;
+    EXPECT_TRUE(
+        all_pixels(decode_png(current.image_png), cv::Scalar(128, 128, 128)));
+}
+
+TEST_F(FrameTools, MarkDrawsOnTheNamedFrame) {
+    const auto marked = call(
+        "mark",
+        R"({"label":"","box":{"x":0,"y":0,"w":10,"h":10},"shot":1})");
+    ASSERT_TRUE(marked.ok) << marked.error;
+    const cv::Vec3b px = decode_png(marked.image_png).at<cv::Vec3b>(5, 95);
+    EXPECT_EQ(px, cv::Vec3b(0, 0, 0));
+}
+
+TEST_F(FrameTools, UnknownShotIsRefusedWithFrameForWording) {
+    const auto reply = call(
+        "view_crop_circle", R"({"circle":{"cx":50,"cy":40,"r":12},"shot":9})");
+    EXPECT_FALSE(reply.ok);
+    EXPECT_NE(reply.error.find("no screenshot #9 in this session"),
+              std::string::npos)
+        << reply.error;
+}
+
+TEST(FrameToolsSchema, MarkShotIsOptional) {
+    const campcat::llm::js::tool_entry *entry = tool_named("mark");
+    ASSERT_NE(entry, nullptr);
+    const auto schema = nlohmann::json::parse(std::string(entry->schema));
+    const auto &params = schema.at("function").at("parameters");
+    EXPECT_TRUE(params.at("properties").contains("shot"));
+    for (const auto &name : params.at("required")) {
+        EXPECT_NE(name.get<std::string>(), "shot");
+    }
 }
 
 // --- scoring a disc ---------------------------------------------------------

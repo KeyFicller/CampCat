@@ -9,9 +9,9 @@ from __future__ import annotations
 from pathlib import Path
 
 from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
-from langgraph.config import get_config
 from langgraph.graph import END, StateGraph
 
+import agent.diagnoser as diagnoser
 import agent.memorier as memorier
 import session
 import tools
@@ -42,9 +42,10 @@ def _name(tool: dict) -> str | None:
 
 
 def scripter_tools(host_tools: list) -> list:
-    """Host tools the scripter is allowed to call, in the host's order."""
+    """Host tools the scripter may call, in the host's order, then diagnose_template."""
     offered = SCRIPTER_ONLY | SHARED
-    return [tool for tool in host_tools if _name(tool) in offered]
+    return [tool for tool in host_tools if _name(tool) in offered] + [
+        diagnoser.DIAGNOSE_TEMPLATE]
 
 
 def brief_of(args: dict) -> str:
@@ -125,6 +126,14 @@ RULES = {
         "circular template is matched through its alpha mask, which leaves it less to "
         "go on than a square one, so the two are held to different bars. Find out which "
         "side is wrong before changing anything:\n"
+        "\n"
+        "0. When the error carries `best=` and `box=`, you may call "
+        "`diagnose_template(bundle, template, error, expect)` first, with the error "
+        "verbatim and the step's `//` comment as `expect`. Act on its verdict: "
+        "`crop_issue` -- re-cut that template from the `shot` it returns, tight "
+        "around the control and nothing behind it, then `update_script` and run "
+        "again; `wrong_screen` -- do not re-cut, fix the step before it; "
+        "`inconclusive` -- go on with steps 1 to 3 yourself.\n"
         "\n"
         "1. `view_template(bundle, name)` -- what it was looking for (the name is in "
         "the error's path; `read_script` lists them).\n"
@@ -304,16 +313,10 @@ def run_scripter(args: dict, host_tools: list) -> str:
         "tool_rounds": 0,
     }
     try:
+        import graph
         # Callbacks only. The parent's whole config joins the two Pregel runs,
         # and a picture coming back then stalls the parent's stream.
-        try:
-            callbacks = get_config().get("callbacks")
-        except Exception:  # noqa: BLE001 - outside a graph there is no config
-            callbacks = None
-        if callbacks:
-            out = _scripter_graph().invoke(state, {"callbacks": callbacks})
-        else:
-            out = _scripter_graph().invoke(state)
+        out = graph.run_subgraph(_scripter_graph(), state)
     except tools.TurnInterrupted:
         raise
     except Exception as exc:  # noqa: BLE001 - the operator hears it as a tool error
@@ -358,8 +361,30 @@ def _scripter_invoke(state: dict) -> dict:
 
 def _apply_scripter_tools(state: dict) -> dict:
     import graph
-    messages, interrupted = graph._run_host_tools(list(state.get("messages") or []))
-    out = {"messages": messages, "tool_rounds": state.get("tool_rounds", 0) + 1}
+    messages = list(state.get("messages") or [])
+    calls = getattr(messages[-1], "tool_calls", None) or []
+
+    def run_one(call: dict) -> tuple[object, list]:
+        name = call.get("name", "")
+        args = call.get("args") or {}
+        if name == diagnoser.DIAGNOSE_TEMPLATE_NAME:
+            # The shot this diagnosis takes is the one a re-cut is checked
+            # against, so it has to stay in the scripter's messages.
+            before = session._LATEST_NUM
+            content = diagnoser.run_diagnoser(args)
+            pics: list = []
+            if session._LATEST_NUM != before:
+                frame = session.latest_frame()
+                if frame is not None:
+                    pics.append(frame)
+            return content, pics
+        return graph._host_result(name, args)
+
+    results, pictures, interrupted = graph._run_calls(calls, run_one)
+    out = {
+        "messages": session.demote_pictures(messages + results + pictures),
+        "tool_rounds": state.get("tool_rounds", 0) + 1,
+    }
     if interrupted:
         out["interrupted"] = True
     return out

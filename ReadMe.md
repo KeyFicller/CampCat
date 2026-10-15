@@ -26,4 +26,50 @@
 
 **跨会话记忆** —— 记录用户习惯和游戏内黑话，落在 `ccat_library/memory.md`。
 
+**LangGraph** —— 一轮对话是下面的回合图。`author_script` 和 `diagnose_template`、以及每次带区域的工具，都在工具节点里另起一张图，不挂在父图上。
+
+```mermaid
+flowchart TD
+  subgraph turn["回合"]
+    precheck -->|通过| compact
+    precheck -->|出错| turnEnd([结束])
+    compact --> build_messages --> invoke
+    invoke -->|要调工具| run_tools
+    invoke -->|直接回答 / 出错 / 轮数到顶| commit
+    run_tools -->|没被打断| invoke
+    run_tools -->|打断| commit
+    commit --> turnEnd
+  end
+
+  run_tools -->|author_script| scripter_build
+  run_tools -->|带区域的工具| review_render
+  scripter_tools -->|diagnose_template| diagnose_parse
+  scripter_tools -->|带区域的工具| review_render
+
+  subgraph scripter["scripter"]
+    scripter_build --> scripter_invoke
+    scripter_invoke -->|要调工具| scripter_tools
+    scripter_invoke -->|写完 / 出错 / 轮数到顶| scripter_commit
+    scripter_tools -->|没被打断| scripter_invoke
+    scripter_tools -->|打断| scripter_commit
+    scripter_commit --> scripterEnd([结束])
+  end
+
+  subgraph review["区域自检，最多 3 轮"]
+    review_render -->|裁得出图| review_judge
+    review_render -->|裁不出| reviewEnd([结束])
+    review_judge -->|adjust 且未满 3 轮| review_render
+    review_judge -->|不是 adjust，或已满 3 轮| reviewEnd
+  end
+
+  subgraph diagnose["模板排查"]
+    diagnose_parse -->|解析出 box| diagnose_gather
+    diagnose_parse -->|没有 box| diagnose_finish
+    diagnose_gather -->|三张图齐| diagnose_judge
+    diagnose_gather -->|宿主报错| diagnose_finish
+    diagnose_judge --> diagnose_finish
+    diagnose_finish --> diagnoseEnd([结束])
+  end
+```
+
 ![intro](campcat/sources/cpp/assets/images/intro.jpg)

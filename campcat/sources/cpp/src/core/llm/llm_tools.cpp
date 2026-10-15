@@ -809,20 +809,27 @@ CPP_REFLECT_TOOL(view_template)
 
 [[= js::image_result]][[= js::doc{
     .text = js::str(
-        "Shows one box of the last screenshot at its own size, with nothing "
+        "Shows one box of a screenshot at its own size, with nothing "
         "drawn on it. Use it with the box a failed statement reported, to see "
         "what is there now at the same scale as the template it was looking "
         "for: the whole-screen view is scaled down, so this is the only way to "
         "compare the two pixel for pixel. It does not change the current "
         "screen.")}]]
-    [[= js::param_docs(js::str("The box to cut out."))]] std::string
-    view_crop_box(box box) {
+    [[= js::param_docs(
+        js::str("The box to cut out."),
+        js::str("Which screenshot to look at: the number its caption showed. "
+                "Omit for the current screen; looking at another frame does "
+                "not make it current."))]] std::string
+    view_crop_box(box box, std::optional<int> shot) {
+    cv::Mat bgr;
     std::string error;
-    const llm::region region = to_region(box);
-    if (!region_on_screen(g_ctx.screen.w, g_ctx.screen.h, region, &error)) {
+    if (!frame_mat(shot, &bgr, &error)) {
         throw js::bind_error(error);
     }
-    const cv::Mat bgr = decode_current_screen();
+    const llm::region region = to_region(box);
+    if (!region_on_screen(bgr.cols, bgr.rows, region, &error)) {
+        throw js::bind_error(error);
+    }
     std::vector<unsigned char> png;
     if (!cv::imencode(".png", crop_region(bgr, region), png)) {
         throw js::bind_error("png encode failed");
@@ -839,14 +846,21 @@ CPP_REFLECT_TOOL(view_crop_box)
         "save_template_circle writes them and as the matcher reads them, so a "
         "mismatch can be traced to the shape or to the pixels. It does not "
         "change the current screen.")}]]
-    [[= js::param_docs(js::str("The circle to cut out."))]] std::string
-    view_crop_circle(circle circle) {
+    [[= js::param_docs(
+        js::str("The circle to cut out."),
+        js::str("Which screenshot to look at: the number its caption showed. "
+                "Omit for the current screen; looking at another frame does "
+                "not make it current."))]] std::string
+    view_crop_circle(circle circle, std::optional<int> shot) {
+    cv::Mat bgr;
     std::string error;
-    const llm::region region = to_region(circle);
-    if (!region_on_screen(g_ctx.screen.w, g_ctx.screen.h, region, &error)) {
+    if (!frame_mat(shot, &bgr, &error)) {
         throw js::bind_error(error);
     }
-    const cv::Mat bgr = decode_current_screen();
+    const llm::region region = to_region(circle);
+    if (!region_on_screen(bgr.cols, bgr.rows, region, &error)) {
+        throw js::bind_error(error);
+    }
     std::vector<unsigned char> png;
     if (!cv::imencode(".png", crop_region(bgr, region), png)) {
         throw js::bind_error("png encode failed");
@@ -857,20 +871,26 @@ CPP_REFLECT_TOOL(view_crop_circle)
 
 [[= js::image_result]][[= js::doc{
     .text = js::str(
-        "Draws a box on the last screenshot and returns the marked image, "
+        "Draws a box on a screenshot and returns the marked image, "
         "so the user can see where you think something is. Nothing is "
         "tapped and nothing needs approval; the box lives in the picture.")}]][
     [= js::param_docs(
         js::str(
             "Short label for what the box marks, e.g. \"the login button\"."),
-        js::str("The box to mark."))]] std::string mark(std::string label,
-                                                       box box) {
+        js::str("The box to mark."),
+        js::str("Which screenshot to look at: the number its caption showed. "
+                "Omit for the current screen; looking at another frame does "
+                "not make it current."))]] std::string
+    mark(std::string label, box box, std::optional<int> shot) {
+    cv::Mat bgr;
     std::string error;
-    const llm::region region = to_region(box);
-    if (!region_on_screen(g_ctx.screen.w, g_ctx.screen.h, region, &error)) {
+    if (!frame_mat(shot, &bgr, &error)) {
         throw js::bind_error(error);
     }
-    cv::Mat bgr = decode_current_screen();
+    const llm::region region = to_region(box);
+    if (!region_on_screen(bgr.cols, bgr.rows, region, &error)) {
+        throw js::bind_error(error);
+    }
     const cv::Scalar color(60, 200, 255); // BGR, near-orange against most UIs
     const llm::box b = region_bounds(region);
     cv::rectangle(bgr, cv::Rect(b.x, b.y, b.w, b.h), color, 4);
@@ -890,19 +910,25 @@ CPP_REFLECT_TOOL(mark)
 
 [[= js::image_result]][[= js::doc{
     .text = js::str(
-        "Draws a circle on the last screenshot and returns the marked image, "
+        "Draws a circle on a screenshot and returns the marked image, "
         "for an element that is round: the same thing mark does for a box. "
         "Nothing is tapped and nothing needs approval.")}]]
     [[= js::param_docs(
         js::str("Short label for what the circle marks."),
-        js::str("The circle to mark."))]] std::string
-    mark_circle(std::string label, circle circle) {
+        js::str("The circle to mark."),
+        js::str("Which screenshot to look at: the number its caption showed. "
+                "Omit for the current screen; looking at another frame does "
+                "not make it current."))]] std::string
+    mark_circle(std::string label, circle circle, std::optional<int> shot) {
+    cv::Mat bgr;
     std::string error;
-    const llm::region region = to_region(circle);
-    if (!region_on_screen(g_ctx.screen.w, g_ctx.screen.h, region, &error)) {
+    if (!frame_mat(shot, &bgr, &error)) {
         throw js::bind_error(error);
     }
-    cv::Mat bgr = decode_current_screen();
+    const llm::region region = to_region(circle);
+    if (!region_on_screen(bgr.cols, bgr.rows, region, &error)) {
+        throw js::bind_error(error);
+    }
     const cv::Scalar color(60, 200, 255); // BGR, near-orange against most UIs
     const llm::circle c = std::get<llm::circle>(region);
     cv::circle(bgr, cv::Point(c.cx, c.cy), c.r, color, 4);
