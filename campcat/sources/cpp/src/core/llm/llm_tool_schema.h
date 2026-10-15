@@ -31,6 +31,7 @@ namespace campcat::llm::js {
 
 // --- the generic layer, from CppReflectKit ----------------------------------
 using ::js::bind_error;
+using ::js::desc;
 using ::js::doc;
 using ::js::invoke_with_json;
 using ::js::is_optional;

@@ -32,10 +32,11 @@ jobs:
       - name: Configure
         run: >
           cmake -S . -B build -G Ninja
-          -DLLVM_ROOT=/opt/clang-p2996
+          -DCPPREF_LLVM_ROOT=/opt/clang-p2996
           -DOpenCV_DIR=/opt/opencv/lib/cmake/opencv4
       # Both are given explicitly because the image keeps them outside any prefix
-      # CMake searches by default.
+      # CMake searches by default. CPPREF_LLVM_ROOT rather than a bare LLVM_ROOT
+      # is the name CppReflectKit reads too, so one -D pins both.
 
       - name: Build
         # Builds campcat too, so a broken GUI translation unit is a failure here

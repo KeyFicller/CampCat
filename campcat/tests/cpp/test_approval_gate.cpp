@@ -23,6 +23,7 @@ const gate_case k_cases[] = {
     {"tap", &approval_gates::tap},
     {"run_script", &approval_gates::run_script},
     {"save_script", &approval_gates::save_script},
+    {"save_anchor", &approval_gates::save_script},
     {"save_template", &approval_gates::save_template},
     {"update_script", &approval_gates::update_script},
     {"delete_script", &approval_gates::delete_script},

@@ -1,5 +1,7 @@
 #include "core/script/ccat_parser.h"
 
+#include "core/script/ccat_graph.h"
+
 #include <algorithm>
 #include <cctype>
 #include <cmath>
@@ -56,6 +58,8 @@ bool is_simple_def_name(const std::string &_name) {
 bool is_cond_action(TokKind _k) {
     switch (_k) {
     case TokKind::KwHas:
+    case TokKind::KwGoto:
+    case TokKind::KwAt:
     case TokKind::KwTap:
     case TokKind::KwTapOffset:
     case TokKind::KwSwipe:
@@ -351,6 +355,11 @@ private:
             // guessing; `has("x.png")` on its own is a real mistake to make.
             fail("has(\"a.png\") is a condition: write it inside if (...) or "
                  "while (...)");
+        case TokKind::KwAt:
+            fail("at(\"graph:anchor\") is a condition: write it inside if "
+                 "(...) or while (...)");
+        case TokKind::KwGoto:
+            return parse_goto();
         case TokKind::KwDo:
             return parse_do_while();
         case TokKind::KwLoop:
@@ -371,7 +380,7 @@ private:
             fail("expected statement (if, tap, wait, log, swipe, tap_at, "
                  "tap_offset, "
                  "swipe_at, wait_until, do, loop, break, return, home, "
-                 "run, "
+                 "run, goto, "
                  "$Debug, or block)");
         }
     }
@@ -672,6 +681,10 @@ private:
         switch (m_lex.peek().kind) {
         case TokKind::KwHas:
             return parse_has();
+        case TokKind::KwAt:
+            return parse_at();
+        case TokKind::KwGoto:
+            return parse_goto();
         case TokKind::KwTap:
             return parse_tap();
         case TokKind::KwTapOffset:
@@ -703,6 +716,36 @@ private:
         auto node = std::make_unique<HasStmt>();
         node->image_path = parse_image_ref();
         expect(TokKind::RParen, "expected ')' after has template");
+        return node;
+    }
+
+    /// `"graph:anchor"`, a string or a string def. One colon, both sides a
+    /// plain name: the reference is a path into the library and a key.
+    std::string parse_anchor_ref(const char *_what) {
+        const std::string ref = parse_image_ref();
+        std::string graph;
+        std::string anchor;
+        if (!split_anchor_ref(ref, &graph, &anchor)) {
+            fail(std::string(_what) + " target must be \"graph:anchor\"");
+        }
+        return ref;
+    }
+
+    std::unique_ptr<GotoStmt> parse_goto() {
+        expect(TokKind::KwGoto, "expected goto");
+        expect(TokKind::LParen, "expected '(' after goto");
+        auto node = std::make_unique<GotoStmt>();
+        node->target = parse_anchor_ref("goto");
+        expect(TokKind::RParen, "expected ')' after goto target");
+        return node;
+    }
+
+    std::unique_ptr<AtStmt> parse_at() {
+        expect(TokKind::KwAt, "expected at");
+        expect(TokKind::LParen, "expected '(' after at");
+        auto node = std::make_unique<AtStmt>();
+        node->target = parse_anchor_ref("at");
+        expect(TokKind::RParen, "expected ')' after at target");
         return node;
     }
 

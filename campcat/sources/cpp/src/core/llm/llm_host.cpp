@@ -28,11 +28,6 @@ constexpr int k_startup_timeout_ms = 60000;
 /// but healthy turn dies as "sidecar timed out" rather than finishing.
 constexpr int k_request_timeout_ms = 86400000;
 
-/// Hard stop on a runaway tool loop, kept above the sidecar's round budget: a
-/// round may issue several calls, and this must not cut a turn the sidecar
-/// still considers legal. The deadline above is what bounds total time.
-constexpr int k_max_tool_calls = 1000000;
-
 /// How many of the turn's newest screenshots keep their bytes. Past this the
 /// oldest is dropped and its timeline step renders as unavailable.
 constexpr int k_event_image_stash = 32;
@@ -116,10 +111,12 @@ void llm_host::handle_line(const std::string &_line) {
         std::lock_guard<std::mutex> lk(m_mu);
         if (msg.id == m_pending_id) {
             m_result.ok = msg.ok;
+            m_result.interrupted = msg.interrupted;
             m_result.text = msg.text;
             m_result.error = msg.error;
             m_result.turns = msg.turns;
             m_has_result = true;
+            llm_protocol::apply_usage(&m_usage, msg);
         }
     }
         m_cv.notify_all();
@@ -141,6 +138,7 @@ void llm_host::handle_line(const std::string &_line) {
         if (msg.id == m_pending_id) {
             m_tool_call = msg;
             m_has_tool = true;
+            llm_protocol::apply_usage(&m_usage, msg);
         }
     }
         m_cv.notify_all();
@@ -378,9 +376,9 @@ std::string llm_host::run_tool(const llm_protocol::message &_call) {
         std::lock_guard<std::mutex> lk(m_mu);
         call_index = ++m_tool_calls;
     }
-    if (call_index > k_max_tool_calls) {
+    if (call_index > m_turn_max_calls) {
         const std::string error = "tool call limit reached (" +
-                                  std::to_string(k_max_tool_calls) + ")";
+                                  std::to_string(m_turn_max_calls) + ")";
         record_note(tool_note(_call.tool_name, "error", error));
         return llm_protocol::build_tool_result(_call.call_id, false, "", error,
                                                "");
@@ -459,9 +457,25 @@ llm_result llm_host::exchange(const std::string &_request_line,
         }
 
         const llm_protocol::message call = m_tool_call;
+        const long id = m_pending_id;
         m_has_tool = false;
+        // A message the user already sent stops the turn here: the tool has
+        // not started, so it does not run. The sidecar is blocked in this
+        // call and reads `interrupt` instead of a result.
+        const bool stop_first = m_interrupt.load();
         lk.unlock();
-        const std::string reply = run_tool(call);
+        std::string reply;
+        if (stop_first) {
+            reply = llm_protocol::build_interrupt_request(id);
+        } else {
+            reply = run_tool(call);
+            // The tool that was already running finishes, then the same line
+            // replaces its result. Checked after, so a stop that arrives
+            // mid-tool is not lost.
+            if (m_interrupt.load()) {
+                reply = llm_protocol::build_interrupt_request(id);
+            }
+        }
         // Time spent waiting on a human does not count against the request
         // budget: the worker was blocked inside service_approval, so wait_until
         // never ran, and without this top-up the next wait_until would time out
@@ -476,10 +490,21 @@ llm_result llm_host::exchange(const std::string &_request_line,
     }
 }
 
+llm_protocol::usage_stats llm_host::usage() const {
+    std::lock_guard<std::mutex> lk(m_mu);
+    return m_usage;
+}
+
 llm_result llm_host::run_turn(const std::filesystem::path &_config_home,
                               const std::string &_provider,
-                              const std::string &_prompt) {
+                              const std::string &_prompt, int _max_tool_calls,
+                              int _max_tool_rounds) {
     llm_result r;
+    m_turn_max_calls = _max_tool_calls >= 1 ? _max_tool_calls
+                                            : llm::k_default_max_tool_calls;
+    if (_max_tool_rounds < 1) {
+        _max_tool_rounds = llm::k_default_max_tool_rounds;
+    }
     if (_prompt.empty()) {
         r.error = "empty request";
         return r;
@@ -506,18 +531,24 @@ llm_result llm_host::run_turn(const std::filesystem::path &_config_home,
     // Read fresh every turn rather than cached: the file is small, and editing
     // it outside the app then has to show up on the very next request.
     std::string memory;
-    if (!llm::read_memory(_config_home, &memory)) {
-        // Unreadable is not empty, but it is also no reason to refuse the turn:
-        // the model just goes without notes this time, and `memorize` will
-        // refuse to overwrite the file it cannot read.
+    if (!llm::read_memory(_config_home, llm::memory_kind::operator_notes,
+                          &memory)) {
         memory.clear();
         record_note(
-            "long-term memory file is unreadable; continuing without it");
+            "operator long-term memory file is unreadable; continuing without it");
+    }
+    std::string scripter_memory;
+    if (!llm::read_memory(_config_home, llm::memory_kind::scripter_notes,
+                          &scripter_memory)) {
+        scripter_memory.clear();
+        record_note(
+            "scripter long-term memory file is unreadable; continuing without it");
     }
 
     const long id = next_request_id();
     std::string request = llm_protocol::build_turn_request(
-        id, _prompt, llm::tools_json(), memory, _provider);
+        id, _prompt, llm::tools_json(), memory, scripter_memory, _provider,
+        _max_tool_rounds);
     request.push_back('\n');
     const llm_result turn = exchange(request, k_request_timeout_ms);
     // This turn may have replaced the screenshot; take it back for the next one
@@ -529,12 +560,13 @@ llm_result llm_host::run_turn(const std::filesystem::path &_config_home,
 
 llm_result llm_host::memorize(const std::filesystem::path &_config_home,
                               const std::string &_provider,
-                              int _timeout_ms) {
+                              llm::memory_kind _kind, int _timeout_ms) {
     llm_result r;
 
     std::string current;
-    if (!llm::read_memory(_config_home, &current)) {
-        r.error = "long-term memory file is unreadable; not overwriting it";
+    if (!llm::read_memory(_config_home, _kind, &current)) {
+        r.error = std::string(llm::memory_agent_name(_kind)) +
+                  " long-term memory file is unreadable; not overwriting it";
         return r;
     }
 
@@ -545,11 +577,20 @@ llm_result llm_host::memorize(const std::filesystem::path &_config_home,
     }
 
     const long id = next_request_id();
-    std::string request = llm_protocol::build_memorize_request(id, current, _provider);
+    std::string request = llm_protocol::build_memorize_request(
+        id, current, _provider, llm::memory_agent_name(_kind));
     request.push_back('\n');
     const llm_result out = exchange(request, _timeout_ms);
     if (!out.ok) {
         return out;
+    }
+    // The user sent a message while this pass ran. The notes stay as they
+    // were; the message is the next turn. No `interrupt` line: a memorize
+    // request has no tool call to replace.
+    if (m_interrupt.load()) {
+        r.ok = true;
+        r.text = current;
+        return r;
     }
 
     // Nothing new since the last pass: the sidecar hands the notes straight
@@ -560,10 +601,10 @@ llm_result llm_host::memorize(const std::filesystem::path &_config_home,
         return r;
     }
 
-    if (!llm::write_memory(_config_home, out.text)) {
-        r.error =
-            "long-term memory was not written (unreadable, empty, or over " +
-            std::to_string(llm::k_memory_max_chars) + " characters)";
+    if (!llm::write_memory(_config_home, _kind, out.text)) {
+        r.error = std::string(llm::memory_agent_name(_kind)) +
+                  " long-term memory was not written (unreadable, empty, or over " +
+                  std::to_string(llm::k_memory_max_chars) + " characters)";
         return r;
     }
     r.ok = true;
@@ -585,6 +626,7 @@ llm_result llm_host::reset(const std::filesystem::path &_repo_root) {
             // No child, so no history: report success without spawning one.
             r.ok = true;
             r.turns = 0;
+            m_usage = {};
             return r;
         }
     }
@@ -593,7 +635,12 @@ llm_result llm_host::reset(const std::filesystem::path &_repo_root) {
     const long id = next_request_id();
     std::string request = llm_protocol::build_reset_request(id);
     request.push_back('\n');
-    return exchange(request, k_request_timeout_ms);
+    llm_result out = exchange(request, k_request_timeout_ms);
+    if (out.ok) {
+        std::lock_guard<std::mutex> lk(m_mu);
+        m_usage = {};
+    }
+    return out;
 }
 
 void llm_host::teardown() {
@@ -668,15 +715,20 @@ bool llm_host::ensure_running(const std::filesystem::path &,
     return false;
 }
 
+llm_protocol::usage_stats llm_host::usage() const {
+    return {};
+}
+
 llm_result llm_host::run_turn(const std::filesystem::path &,
-                              const std::string &, const std::string &) {
+                              const std::string &, const std::string &, int,
+                              int) {
     llm_result r;
     r.error = "the LLM sidecar is not supported on Windows";
     return r;
 }
 
 llm_result llm_host::memorize(const std::filesystem::path &, const std::string &,
-                              int) {
+                              llm::memory_kind, int) {
     llm_result r;
     r.error = "the LLM sidecar is not supported on Windows";
     return r;
@@ -698,6 +750,27 @@ void llm_host::teardown() {}
 
 void llm_host::stop() { teardown(); }
 
+void llm_host::request_interrupt() { m_interrupt.store(true); }
+
+void llm_host::clear_interrupt() { m_interrupt.store(false); }
+
+bool llm_host::interrupt_pending() const { return m_interrupt.load(); }
+
+llm_host::timeline llm_host::copy_timeline() const {
+    std::lock_guard<std::mutex> lk(m_mu);
+    return timeline{m_events, m_event_images};
+}
+
+void llm_host::release_approval() {
+    std::lock_guard<std::mutex> lk(m_approval_mu);
+    if (!m_approval_pending || m_approval_answered || m_approval_cancelled) {
+        return;
+    }
+    m_approval_approved = false;
+    m_approval_cancelled = true;
+    m_approval_cv.notify_all();
+}
+
 llm::approval_decision
 llm_host::service_approval(const llm::approval_request &_req) {
     const auto start = std::chrono::steady_clock::now();
@@ -712,7 +785,7 @@ llm_host::service_approval(const llm::approval_request &_req) {
     m_approval_cancelled = false;
     m_approval_guidance
         .clear(); // a stale correction must not leak into this one
-    m_approval_box.reset();
+    m_approval_region.reset();
     ++m_next_approval_id;
     // Deliberately no notify: the UI polls pending_approval() per frame, so no
     // thread is waiting on publication.
@@ -720,20 +793,20 @@ llm_host::service_approval(const llm::approval_request &_req) {
         lk, [this] { return m_approval_answered || m_approval_cancelled; });
     const bool approved = m_approval_approved && !m_approval_cancelled;
     const std::string guidance = approved ? std::string{} : m_approval_guidance;
-    const std::optional<llm::rect> box =
-        approved ? std::nullopt : m_approval_box;
+    const std::optional<llm::region> redrawn =
+        approved ? std::nullopt : m_approval_region;
     m_approval_pending = false;
     lk.unlock();
     m_approval_wait += std::chrono::steady_clock::now() - start;
-    return {approved, guidance, box};
+    return {approved, guidance, redrawn};
 }
 
 llm_approval llm_host::pending_approval() const {
     std::lock_guard<std::mutex> lk(m_approval_mu);
     return llm_approval{m_approval_pending,       m_next_approval_id,
                         m_approval_req.tool,      m_approval_req.summary,
-                        m_approval_req.highlight, m_approval_req.box_editable,
-                        m_approval_req.given_box};
+                        m_approval_req.highlight, m_approval_req.editable,
+                        m_approval_req.given_region};
 }
 
 std::string llm_host::approval_screen_png() const {
@@ -742,17 +815,17 @@ std::string llm_host::approval_screen_png() const {
 }
 
 void llm_host::answer_approval(bool _approved, std::string _guidance,
-                               std::optional<llm::rect> _box) {
+                               std::optional<llm::region> _redrawn) {
     std::lock_guard<std::mutex> lk(m_approval_mu);
     if (!m_approval_pending || m_approval_answered || m_approval_cancelled) {
         return;
     }
     m_approval_approved = _approved;
-    // An approval means "the box is right", so any text or redrawn box is
+    // An approval means "the region is right", so any text or redrawn region is
     // dropped. Enforced here rather than in the UI: no caller can sneak a
     // correction onto an approval.
     m_approval_guidance = _approved ? std::string{} : std::move(_guidance);
-    m_approval_box = _approved ? std::nullopt : std::move(_box);
+    m_approval_region = _approved ? std::nullopt : std::move(_redrawn);
     m_approval_answered = true;
     m_approval_cv.notify_all();
 }

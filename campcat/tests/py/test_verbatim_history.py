@@ -5,7 +5,7 @@ first. No network: the compaction case drives the real middleware with the
 `scripted` fake as its summary model.
 """
 
-import models
+import agent.memorier as memorier
 import session
 from langchain.agents.middleware import SummarizationMiddleware
 from langchain_core.messages import (
@@ -56,19 +56,19 @@ def test_tokens_anchors_on_what_the_provider_charged():
         "input_tokens": 100, "output_tokens": 20, "total_tokens": 120})
 
     # Nothing after it: the anchor is the whole answer, nothing estimated.
-    assert session._tokens([charged]) == 120
+    assert memorier._tokens([charged]) == 120
     # Only the tail is approximated.
     tail = [HumanMessage("hi")]
-    assert session._tokens([charged, *tail]) == 120 + session._tokens(tail)
+    assert memorier._tokens([charged, *tail]) == 120 + memorier._tokens(tail)
 
 
 def test_tokens_falls_back_before_any_usage_is_known():
-    assert session._tokens([HumanMessage("hi")]) > 0
+    assert memorier._tokens([HumanMessage("hi")]) > 0
 
 
 def test_the_trigger_line_default_clears_the_model_window(monkeypatch):
     monkeypatch.delenv("CAMPCAT_LLM_CONTEXT_TOKENS", raising=False)
-    assert models.context_tokens() == 200000
+    assert memorier.context_tokens() == 200000
 
 
 def test_compaction_lowers_the_turn_count_and_keeps_calls_paired(scripted):
@@ -77,12 +77,12 @@ def test_compaction_lowers_the_turn_count_and_keeps_calls_paired(scripted):
         session.append_turn(f"turn {n}", _turn(n))
     assert session.size() == 3
 
-    session._MW = SummarizationMiddleware(
+    memorier._MW = SummarizationMiddleware(
         model=scripted([AIMessage(content="earlier turns, summarized")]),
         trigger=("messages", 4),
         keep=("messages", 1),
     )
-    session.compact()
+    memorier.compact()
 
     assert session.size() < 3
     # Whatever survived still answers every call it kept: a `tool_calls` block

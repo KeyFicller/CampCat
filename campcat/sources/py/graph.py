@@ -13,6 +13,10 @@ from typing import Iterator, TypedDict
 from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
 from langgraph.graph import END, StateGraph
 
+import agent.memorier as memorier
+import agent.operator as operator
+import agent.region_review as region_review
+import agent.scripter as scripter
 import models
 import observability
 import session
@@ -23,6 +27,17 @@ import tools
 # rounds plus their model latencies, or a long turn dies on "sidecar timed out"
 # instead. Both caps move together.
 MAX_TOOL_ROUNDS = 100000
+
+
+def rounds_of(raw: object) -> int:
+    """The per-turn round cap from a request field.
+
+    A JSON bool is an int in Python, and `true` is not a cap. Missing or
+    unusable values keep the default the sidecar used before the field existed.
+    """
+    if isinstance(raw, int) and not isinstance(raw, bool) and raw >= 1:
+        return raw
+    return MAX_TOOL_ROUNDS
 
 # Said to the model once the rounds above are spent. With the tools withdrawn it
 # otherwise reaches for one anyway and writes the call into its answer as text.
@@ -41,7 +56,9 @@ class TurnState(TypedDict, total=False):
     input_len: int  # built by build_messages: where this turn's own messages start
     reply: str      # response: model output
     turns: int      # response: turns retained in the conversation
+    max_tool_rounds: int  # request: per-turn round cap; default MAX_TOOL_ROUNDS
     error: str
+    interrupted: bool  # the user sent a new message; commit, then stop
 
 
 def precheck(state: TurnState) -> dict:
@@ -58,7 +75,7 @@ def precheck(state: TurnState) -> dict:
 
 
 def compact(state: TurnState) -> dict:
-    session.compact()
+    memorier.compact()
     return {}
 
 
@@ -66,8 +83,8 @@ def build_messages(state: TurnState) -> dict:
     """The model input: prompt, conversation, the last screen, this turn's text."""
     messages: list[object] = [
         SystemMessage(
-            content=models.system_prompt()
-            + models.memory_block(state.get("memory") or "")
+            content=operator.operator_prompt()
+            + memorier.memory_block(state.get("memory") or "")
         )
     ]
     messages.extend(session.history())
@@ -78,16 +95,18 @@ def build_messages(state: TurnState) -> dict:
     return {"messages": messages, "input_len": len(messages)}
 
 
-def invoke(state: TurnState) -> dict:
-    """One model turn.
+def _invoke(state: TurnState, offered: list) -> dict:
+    """One model turn against `offered`.
 
-    The tool schemas come straight from the host and are passed to bind_tools
-    unchanged, so the model sees exactly the signature C++ will enforce.
+    The schemas are passed to bind_tools with `expect` added on region tools;
+    the check strips it before the host sees the call. The operator and the
+    scripter share this; each passes its own table.
     """
-    offered = state.get("tools") or []
-    exhausted = bool(offered) and state.get("tool_rounds", 0) >= MAX_TOOL_ROUNDS
+    offered = region_review.with_expect(offered)
+    cap = state.get("max_tool_rounds", MAX_TOOL_ROUNDS)
+    exhausted = bool(offered) and state.get("tool_rounds", 0) >= cap
     try:
-        model = models.build_chat_model()
+        model = models.build_chat_model(context=True)
         # Past the round cap the tools are withdrawn, so the model has to answer
         # in text instead of the request ending on an empty tool call.
         if offered and not exhausted:
@@ -127,6 +146,95 @@ def invoke(state: TurnState) -> dict:
     return {"messages": messages, "reply": reply}
 
 
+def invoke(state: TurnState) -> dict:
+    """The operator's model turn: every host tool except the scripter's own."""
+    return _invoke(state, operator.operator_tools(state.get("tools") or []))
+
+
+def run_subgraph(compiled, state: dict) -> dict:
+    """Run `compiled` with the parent's callbacks and nothing else of its config.
+
+    The whole config joins the two runs, and a picture coming back then stalls
+    the parent's stream. Outside a graph there is no config, and that is fine.
+    """
+    from langgraph.config import get_config
+    try:
+        callbacks = get_config().get("callbacks")
+    except Exception:  # noqa: BLE001 - outside a graph there is no config
+        callbacks = None
+    if callbacks:
+        return compiled.invoke(state, {"callbacks": callbacks})
+    return compiled.invoke(state)
+
+
+def _host_result(name: str, args: dict) -> tuple[object, list]:
+    """One host tool. Pictures stay out of the result list; the caller appends them."""
+    args, note, rejected = region_review.review(name, args)
+    if rejected:
+        return "error: self-check rejected this region: " + rejected, []
+    reply = tools.call_cpp(name, args)
+    if reply.get("ok"):
+        content: object = reply.get("text") or "ok"
+    else:
+        content = "error: " + str(reply.get("error", ""))
+    if note and isinstance(content, str):
+        content += note
+    image = reply.get("image_b64") or ""
+    if isinstance(content, str):
+        region_review.remember_human_region(content)
+    if not image:
+        return content, []
+    if name == "screenshot":
+        frame = session.screenshot_frame(reply.get("shot"), image)
+        return content, [frame] if frame is not None else []
+    if name == "view_shot":
+        return content, [session.recall_frame(args.get("shot"), image)]
+    return content, [session.picture_of(name, image, args)]
+
+
+def _interrupted_from(calls: list, start: int) -> list:
+    """Tool results for `calls[start:]`: the one in flight, and the ones not sent."""
+    return [
+        ToolMessage(content=tools.INTERRUPTED_TEXT, tool_call_id=call.get("id", ""))
+        for call in calls[start:]
+    ]
+
+
+def _run_calls(calls: list, run_one) -> tuple[list, list, bool]:
+    """Run `calls` until one is interrupted.
+
+    `run_one(call)` returns `(content, pictures)` or raises `TurnInterrupted`.
+    An interrupt fills that call and every call after it, and stops the batch.
+    """
+    results: list = []
+    pictures: list = []
+    for index, call in enumerate(calls):
+        try:
+            content, pics = run_one(call)
+        except tools.TurnInterrupted:
+            results.extend(_interrupted_from(calls, index))
+            return results, pictures, True
+        results.append(ToolMessage(content=content, tool_call_id=call.get("id", "")))
+        pictures.extend(pics)
+    return results, pictures, False
+
+
+def _run_host_tools(messages: list) -> tuple[list, bool]:
+    """Run every tool call on the last message on the host.
+
+    `author_script` is not special here. A handoff tool emitted here reaches
+    the host as an unknown tool rather than starting another scripter. The
+    bool is true when the user interrupted the batch.
+    """
+    calls = getattr(messages[-1], "tool_calls", None) or []
+
+    def run_one(call: dict) -> tuple[object, list]:
+        return _host_result(call.get("name", ""), call.get("args") or {})
+
+    results, pictures, interrupted = _run_calls(calls, run_one)
+    return session.demote_pictures(messages + results + pictures), interrupted
+
+
 def run_tools(state: TurnState) -> dict:
     """Run the tool calls the model just asked for, one by one.
 
@@ -136,35 +244,46 @@ def run_tools(state: TurnState) -> dict:
     """
     messages = list(state.get("messages") or [])
     calls = getattr(messages[-1], "tool_calls", None) or []
-    results: list = []
     # The pictures are held back and appended after every result, never between
     # them. Once a round asks for more than one tool, a user turn wedged in
     # mid-way makes the provider read the round as having answered only the
     # calls before it and reject the whole request (400 "insufficient tool
     # messages following tool_calls message").
-    pictures: list = []
-    for call in calls:
+    host_tools = state.get("tools") or []
+
+    def run_one(call: dict) -> tuple[object, list]:
         name = call.get("name", "")
         args = call.get("args") or {}
-        reply = tools.call_cpp(name, args)
-        if reply.get("ok"):
-            content: object = reply.get("text") or "ok"
-        else:
-            content = "error: " + str(reply.get("error", ""))
-        results.append(ToolMessage(content=content, tool_call_id=call.get("id", "")))
-        image = reply.get("image_b64") or ""
-        if not image:
-            continue
-        if name == "screenshot":
-            frame = session.screenshot_frame(reply.get("shot"), image)
-            if frame is not None:
-                pictures.append(frame)
-        elif name == "view_shot":
-            pictures.append(session.recall_frame(args.get("shot"), image))
-        else:
-            pictures.append(session.picture_of(name, image))
-    return {"messages": session.demote_pictures(messages + results + pictures),
-            "tool_rounds": state.get("tool_rounds", 0) + 1}
+        if name == operator.AUTHOR_SCRIPT_NAME:
+            # The screen belongs to the device. A shot the scripter took is the
+            # one a later tap in this turn is checked against, so the operator
+            # has to see it before that tap. An interrupt inside the scripter
+            # propagates, and the calls after this one are filled in by
+            # `_run_calls`.
+            before = session._LATEST_NUM
+            content = scripter.run_scripter(
+                args, host_tools, state.get("max_tool_rounds", MAX_TOOL_ROUNDS))
+            pics: list = []
+            if session._LATEST_NUM != before:
+                frame = session.latest_frame()
+                if frame is not None:
+                    pics.append(frame)
+            return content, pics
+        return _host_result(name, args)
+
+    results, pictures, interrupted = _run_calls(calls, run_one)
+    out: dict = {"messages": session.demote_pictures(messages + results + pictures),
+                 "tool_rounds": state.get("tool_rounds", 0) + 1}
+    if interrupted:
+        out["interrupted"] = True
+    return out
+
+
+def route_after_tools(state: TurnState) -> str:
+    """Another model round, unless the user already sent the next message."""
+    if state.get("interrupted"):
+        return "commit"
+    return "invoke"
 
 
 def route_after_invoke(state: TurnState) -> str:
@@ -174,7 +293,7 @@ def route_after_invoke(state: TurnState) -> str:
     calls = getattr(messages[-1], "tool_calls", None) if messages else None
     if not calls:
         return "commit"
-    if state.get("tool_rounds", 0) >= MAX_TOOL_ROUNDS:
+    if state.get("tool_rounds", 0) >= state.get("max_tool_rounds", MAX_TOOL_ROUNDS):
         return "commit"
     return "run_tools"
 
@@ -216,8 +335,13 @@ def build_graph():
         route_after_invoke,
         {"run_tools": "run_tools", "commit": "commit"},
     )
-    # Another model turn, with the results now in the message list.
-    graph.add_edge("run_tools", "invoke")
+    # Another model turn, with the results now in the message list. An
+    # interrupt commits what finished and does not call the model again.
+    graph.add_conditional_edges(
+        "run_tools",
+        route_after_tools,
+        {"invoke": "invoke", "commit": "commit"},
+    )
     graph.add_edge("commit", END)
     return graph.compile()
 

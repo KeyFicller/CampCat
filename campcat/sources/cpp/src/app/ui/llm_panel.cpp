@@ -1,11 +1,14 @@
 #include "app/ui/llm_panel.h"
 
+#include <cstdio>
+#include <cstring>
+
 #include "core/adb_client.h"
 #include "core/app_config.h"
-#include "core/mumu_launcher.h"
 #include "core/automation_log.h"
 #include "core/llm/llm_host.h"
 #include "core/llm/llm_memory.h"
+#include "core/mumu_launcher.h"
 
 #include "app/shell_state.h"
 
@@ -34,6 +37,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cctype>
+#include <cmath>
 #include <deque>
 #include <filesystem>
 #include <mutex>
@@ -84,6 +88,9 @@ struct llm_turn {
     std::string user_text;
     std::vector<llm_item> items; ///< what happened, in the order it happened
     bool pending = false; ///< sent but unanswered; drives the waiting bubble
+    bool queued = false;  ///< shown, not yet handed to the worker
+    bool frozen = false;  ///< stop growing; the user already sent the next one
+    bool interrupted = false; ///< the turn was cut by that next message
     bool ok = false;
     std::string error;
 };
@@ -94,6 +101,9 @@ struct handoff {
     bool is_reset = false;
     bool is_memory = false;
     campcat::llm_result res;
+    /// Timeline at the moment the turn finished. The live stream is cleared
+    /// for the next turn before the UI may read it.
+    campcat::llm_host::timeline timeline;
 };
 
 // UI-thread state: never touched by the worker.
@@ -144,9 +154,18 @@ ImGui::MarkdownConfig &md_config() {
 
 // Worker state.
 std::atomic<bool> g_running{false};
+/// True while Clear conversation is in flight. Send stays disabled: a message
+/// queued under a reset would be wiped when the log is dropped.
+std::atomic<bool> g_resetting{false};
+/// The worker sets this after it clears the stream for a queued message. The
+/// UI then marks that message as the turn in flight.
+std::atomic<bool> g_promote{false};
+/// Latest message the user sent while a turn was running. Empty when none.
+std::mutex g_queue_mu;
+std::string g_next_prompt;
 /// True while the worker is consolidating memory rather than answering a turn.
-/// Only changes what the Send button's tooltip says; the disable itself is
-/// `g_running`.
+/// Only changes the Send button's tooltip. A message sent during the pass
+/// discards the notes.
 /// Set and cleared inside the worker that does the consolidating, so there is
 /// no path that can leave it stuck on.
 std::atomic<bool> g_memorizing{false};
@@ -156,7 +175,10 @@ std::thread g_thread;
 std::thread g_shutdown_thread;
 campcat::llm_host g_host;
 std::mutex g_done_mu;
-handoff g_done;
+/// More than one job can finish before the UI draws: a turn that ended on its
+/// own, then the message that was queued behind it. A single slot would drop
+/// the first result into the second bubble.
+std::deque<handoff> g_done;
 
 /// UI-thread only. Time of the last LLM request, which is what "idle" is
 /// measured from: an agent nobody is talking to is an agent that can tidy up.
@@ -170,9 +192,13 @@ std::filesystem::path g_config_home;
 /// provider, and only the draw call sees the config.
 std::string g_provider = "deepseek";
 
+/// The page the memory window is showing.
+campcat::llm::memory_kind g_mem_kind = campcat::llm::memory_kind::operator_notes;
 /// The Long-term memory window, and the copy it displays.
 bool g_mem_open = false;
 std::string g_mem_buf;
+/// Characters in the page being shown. The status line keeps its own count.
+int g_mem_page_chars = 0;
 
 /// The sidecar's own count of the turns it still holds verbatim, taken from
 /// each successful reply. Deliberately not `g_turns.size()`: that counts
@@ -188,10 +214,14 @@ double g_memory_read_at = 0.0;
 /// (Re)read the memory file into the window's buffer.
 void reload_memory() {
     std::string text;
-    if (!campcat::llm::read_memory(g_config_home, &text)) {
+    if (!campcat::llm::read_memory(g_config_home, g_mem_kind, &text)) {
         text = "(the memory file could not be read)";
-    } else if (text.empty()) {
-        text = "(no memory yet)";
+        g_mem_page_chars = 0;
+    } else {
+        g_mem_page_chars = static_cast<int>(text.size());
+        if (text.empty()) {
+            text = "(no memory yet)";
+        }
     }
     g_mem_buf = std::move(text);
 }
@@ -206,42 +236,44 @@ void refresh_memory_chars() {
     }
     g_memory_read_at = now;
     std::string text;
-    if (campcat::llm::read_memory(g_config_home, &text)) {
+    if (campcat::llm::read_memory(g_config_home,
+                                  campcat::llm::memory_kind::operator_notes,
+                                  &text)) {
         g_memory_chars = static_cast<int>(text.size());
     }
 }
 
-/// Read-only view of the notes, with the one destructive action behind a
-/// confirmation: the app never edits them here, so there is nothing to save.
-void draw_memory_window() {
-    if (!g_mem_open) {
-        return;
+/// Read-only view of one notebook. Switching pages reloads that file.
+void draw_memory_page(campcat::llm::memory_kind _kind) {
+    if (g_mem_kind != _kind) {
+        g_mem_kind = _kind;
+        reload_memory();
     }
-    ImGui::SetNextWindowSize(ImVec2(620.0F, 440.0F), ImGuiCond_FirstUseEver);
-    if (!ImGui::Begin("Long-term memory", &g_mem_open)) {
-        ImGui::End();
-        return;
-    }
+    const bool scripter = _kind == campcat::llm::memory_kind::scripter_notes;
+    const char *popup =
+        scripter ? "clear_scripter_memory" : "clear_operator_memory";
+    const char *ask = scripter ? "Delete the scripter long-term memory file?"
+                               : "Delete the operator long-term memory file?";
 
-    // Shown selectable on purpose: the point of it is that the user can open
-    // the file in an editor of their own instead of fighting this box.
     ImGui::TextUnformatted(
-        campcat::llm::memory_path(g_config_home).string().c_str());
+        campcat::llm::memory_path(g_config_home, _kind).string().c_str());
     ImGui::TextDisabled("Kept in this file. Written when the conversation goes "
                         "idle, and before "
                         "it is cleared.");
+    ImGui::Text("%d/%d", g_mem_page_chars,
+                static_cast<int>(campcat::llm::k_memory_max_chars));
     if (ImGui::Button("Reload")) {
         reload_memory();
     }
     ImGui::SameLine();
     if (ImGui::Button("Clear memory")) {
-        ImGui::OpenPopup("clear_memory_confirm");
+        ImGui::OpenPopup(popup);
     }
-    if (ImGui::BeginPopupModal("clear_memory_confirm", nullptr,
+    if (ImGui::BeginPopupModal(popup, nullptr,
                                ImGuiWindowFlags_AlwaysAutoResize)) {
-        ImGui::TextUnformatted("Delete the long-term memory file?");
+        ImGui::TextUnformatted(ask);
         if (ImGui::Button("Delete", ImVec2(120.0F, 0.0F))) {
-            if (!campcat::llm::clear_memory(g_config_home)) {
+            if (!campcat::llm::clear_memory(g_config_home, _kind)) {
                 campcat::automation_log::emit("[llm] memory file not deleted");
             }
             reload_memory();
@@ -258,6 +290,31 @@ void draw_memory_window() {
     ImGui::InputTextMultiline("##memory", &g_mem_buf,
                               ImGui::GetContentRegionAvail(),
                               ImGuiInputTextFlags_ReadOnly);
+}
+
+/// Read-only view of the notes, with the one destructive action behind a
+/// confirmation: the app never edits them here, so there is nothing to save.
+void draw_memory_window() {
+    if (!g_mem_open) {
+        return;
+    }
+    ImGui::SetNextWindowSize(ImVec2(620.0F, 440.0F), ImGuiCond_FirstUseEver);
+    if (!ImGui::Begin("Long-term memory", &g_mem_open)) {
+        ImGui::End();
+        return;
+    }
+
+    if (ImGui::BeginTabBar("##memory_books")) {
+        if (ImGui::BeginTabItem("Operator")) {
+            draw_memory_page(campcat::llm::memory_kind::operator_notes);
+            ImGui::EndTabItem();
+        }
+        if (ImGui::BeginTabItem("Scripter")) {
+            draw_memory_page(campcat::llm::memory_kind::scripter_notes);
+            ImGui::EndTabItem();
+        }
+        ImGui::EndTabBar();
+    }
     ImGui::End();
 }
 
@@ -341,20 +398,24 @@ void ensure_texture(llm_item &_it) {
     _it.tex_tried = true;
     const cv::Mat buf(1, static_cast<int>(_it.png.size()), CV_8UC1,
                       _it.png.data());
-    const cv::Mat bgr = cv::imdecode(buf, cv::IMREAD_COLOR);
+    cv::Mat img = cv::imdecode(buf, cv::IMREAD_UNCHANGED);
     _it.png.clear();
     _it.png.shrink_to_fit();
-    if (bgr.empty()) {
+    if (img.empty()) {
         return;
     }
-    if (bgr.cols > k_turn_img_max_w) {
-        const double scale = static_cast<double>(k_turn_img_max_w) / bgr.cols;
-        cv::Mat small;
-        cv::resize(bgr, small, cv::Size(), scale, scale, cv::INTER_AREA);
-        _it.tex = campcat::app::upload_bgr(small, &_it.tex_w, &_it.tex_h);
-    } else {
-        _it.tex = campcat::app::upload_bgr(bgr, &_it.tex_w, &_it.tex_h);
+    if (img.channels() == 1) {
+        cv::cvtColor(img, img, cv::COLOR_GRAY2BGR);
     }
+    if (img.cols > k_turn_img_max_w) {
+        const double scale = static_cast<double>(k_turn_img_max_w) / img.cols;
+        cv::Mat small;
+        cv::resize(img, small, cv::Size(), scale, scale, cv::INTER_AREA);
+        img = small;
+    }
+    _it.tex = img.channels() == 4
+                  ? campcat::app::upload_bgra(img, &_it.tex_w, &_it.tex_h)
+                  : campcat::app::upload_bgr(img, &_it.tex_w, &_it.tex_h);
     if (_it.tex == 0) {
         _it.tex_dropped = true;
         return;
@@ -437,10 +498,11 @@ float g_footer_h = 160.0F;
 
 /// Queue the outgoing turn the moment it is sent, so the log shows the user's
 /// message while the reply is still in flight.
-void append_user_turn(std::string _prompt) {
+void append_user_turn(std::string _prompt, bool _queued = false) {
     llm_turn t;
     t.user_text = std::move(_prompt);
     t.pending = true;
+    t.queued = _queued;
 
     g_turns.push_back(std::move(t));
     while (static_cast<int>(g_turns.size()) > k_turn_cap) {
@@ -450,10 +512,21 @@ void append_user_turn(std::string _prompt) {
     g_pin_bottom = true;
 }
 
-/// The turn still waiting for its reply, if any.
-llm_turn *pending_turn() {
+/// The turn the worker is answering. A queued message is on screen already
+/// but is not this turn until the worker takes it.
+llm_turn *in_flight_turn() {
     for (auto it = g_turns.rbegin(); it != g_turns.rend(); ++it) {
-        if (it->pending) {
+        if (it->pending && !it->queued) {
+            return &*it;
+        }
+    }
+    return nullptr;
+}
+
+/// The message waiting to be sent, if the user typed one during a turn.
+llm_turn *queued_turn() {
+    for (auto it = g_turns.rbegin(); it != g_turns.rend(); ++it) {
+        if (it->queued) {
             return &*it;
         }
     }
@@ -461,19 +534,53 @@ llm_turn *pending_turn() {
 }
 
 /// Fill the waiting turn with the reply. UI thread only.
-void fill_reply(const campcat::llm_result &_res) {
-    llm_turn *t = pending_turn();
+/// Same growth rules as `sync_items`, reading a finished copy rather than the
+/// live stream. Image bytes come from the copy: the host may already have
+/// dropped them for the next turn.
+void apply_snap(llm_turn &_t, const campcat::llm_host::timeline &_tl) {
+    for (size_t i = 0; i < _tl.events.size(); ++i) {
+        const campcat::llm_event &e = _tl.events[i];
+        if (i < _t.items.size()) {
+            if (e.type == campcat::llm_event::kind::text &&
+                _t.items[i].text != e.text) {
+                _t.items[i].text = e.text;
+            }
+            continue;
+        }
+        llm_item it;
+        it.type = e.type;
+        it.text = e.text;
+        it.ok = e.ok;
+        it.image_id = e.image_id;
+        if (e.type == campcat::llm_event::kind::image) {
+            for (const auto &image : _tl.images) {
+                if (image.first == e.image_id) {
+                    it.png = image.second;
+                    break;
+                }
+            }
+            it.tex_dropped = it.png.empty();
+        }
+        _t.items.push_back(std::move(it));
+    }
+}
+
+void fill_reply(const campcat::llm_result &_res,
+                const campcat::llm_host::timeline &_tl) {
+    llm_turn *t = in_flight_turn();
     if (t == nullptr) {
         return;
     }
-    // Once more, because a tool image can arrive in the same frame the turn
-    // finished, which the per-frame pump would have missed.
-    sync_items(*t);
+    // Once more, from the copy taken as the turn finished. The live stream
+    // may already belong to the next message.
+    apply_snap(*t, _tl);
     t->pending = false;
+    t->frozen = false;
+    t->interrupted = _res.ok && _res.interrupted;
     t->ok = _res.ok;
     if (!_res.ok) {
         t->error = _res.error;
-    } else if (!_res.text.empty()) {
+    } else if (!t->interrupted && !_res.text.empty()) {
         // The timeline is what was streamed, and it normally ends with the
         // reply. An empty one means the stream never reached us; keeping the
         // result here is what stops the answer going missing.
@@ -492,12 +599,88 @@ void fill_reply(const campcat::llm_result &_res) {
 
 /// Mirror the in-flight stream into the waiting turn so its bubble grows.
 void pump_stream() {
-    llm_turn *t = pending_turn();
-    if (t == nullptr) {
+    llm_turn *t = in_flight_turn();
+    // Frozen once the user has sent the next message: the bubble stays on
+    // what had already arrived. The finished copy lands in `fill_reply`.
+    if (t == nullptr || t->frozen) {
+        g_thinking = g_host.is_thinking();
         return;
     }
     sync_items(*t);
     g_thinking = g_host.is_thinking();
+}
+
+/// Hand a finished turn to the UI, timeline included, before the stream is
+/// cleared for whatever runs next.
+void post_turn(campcat::llm_result _res) {
+    handoff done;
+    done.has = true;
+    done.res = std::move(_res);
+    done.timeline = g_host.copy_timeline();
+    std::lock_guard<std::mutex> lk(g_done_mu);
+    g_done.push_back(std::move(done));
+}
+
+/// The message the user sent while a turn was running, if there is one.
+/// Clears the interrupt flag: the message is about to become a turn of its own.
+std::optional<std::string> take_queued() {
+    std::lock_guard<std::mutex> lk(g_queue_mu);
+    if (g_next_prompt.empty()) {
+        return std::nullopt;
+    }
+    std::string prompt = std::move(g_next_prompt);
+    g_next_prompt.clear();
+    g_host.clear_interrupt();
+    return prompt;
+}
+
+/// Run `_prompt`, then any message the user sends while it runs. One thread:
+/// the next message does not start another. `adb` lives for the whole loop.
+/// `_promote` is false for the turn the UI just started itself.
+void run_prompt_loop(campcat::shell_state *_st, const campcat::app_config &_cfg,
+                     std::string _prompt, bool _promote) {
+    const std::string addr = campcat::mumu_adb_address(
+        _cfg.mumu.tool_path, _cfg.mumu.device_index);
+    campcat::adb_client adb(_cfg.adb.path,
+                            addr.empty() ? _cfg.adb.serial : addr);
+    adb.connect_remote(addr);
+    campcat::llm::tool_context ctx;
+    ctx.adb = &adb;
+    ctx.adb_busy = [] { return g_adb_busy.load(); };
+    // Both read live rather than folded here: the settings popup can change
+    // them mid-turn, and a gate that keeps asking after it was switched off
+    // is the bug this avoids. `snapshot_cfg` is the thread-safe read, and
+    // `_st` outlives the thread (it is a `main` local). `_cfg` stays this
+    // thread's snapshot: it is what the adb client was built from.
+    ctx.needs_approval = [_st](std::string_view _tool) {
+        return campcat::llm::approval_gate_required(
+            _st->snapshot_cfg().approval, _tool);
+    };
+    ctx.box_snap = [_st] { return _st->snapshot_cfg().box_snap; };
+    ctx.cfg = &_cfg;
+    ctx.script_dir = std::filesystem::path(_cfg.config_home);
+    ctx.start_emulator = [_st](const std::function<bool()> &_should_stop) {
+        return _st->start_mumu_blocking(_should_stop);
+    };
+    g_host.set_tool_context(ctx);
+    while (true) {
+        if (_promote) {
+            g_host.clear_stream();
+            g_promote.store(true);
+        }
+        _promote = true;
+        campcat::llm_result res = g_host.run_turn(
+            _cfg.config_home, _cfg.llm.provider, _prompt,
+            _cfg.llm.max_tool_calls, _cfg.llm.max_tool_rounds);
+        post_turn(std::move(res));
+        std::optional<std::string> next = take_queued();
+        if (!next.has_value()) {
+            break;
+        }
+        _prompt = std::move(*next);
+    }
+    g_host.set_tool_context({}); // `adb` dies with this function
+    g_running.store(false);
 }
 
 /// Run one turn on the worker.
@@ -508,74 +691,64 @@ void start_turn(campcat::shell_state &_st, const campcat::app_config &_cfg,
     }
     g_running.store(true);
     // The whole snapshot, by value: the script tools need the interpreter's
-    // config
-    // (`tool_context::cfg`), and `_cfg` is a per-frame copy in the caller's
-    // frame, so a pointer to it would dangle the moment the frame ends. `_st`
-    // outlives the thread instead (it is a `main` local, and this thread is
-    // joined by `llm_panel_shutdown_gl`), so the shell is held by pointer: it
-    // is where the emulator launch the model may ask for lives.
+    // config (`tool_context::cfg`), and `_cfg` is a per-frame copy in the
+    // caller's frame, so a pointer to it would dangle the moment the frame
+    // ends. `_st` outlives the thread (it is a `main` local, and this thread
+    // is joined by `llm_panel_shutdown_gl`).
     g_thread = std::thread([st = &_st, cfg_snapshot = _cfg,
                             prompt = std::move(_prompt)]() {
-        // A per-turn client, built the way the automation cycle builds one.
-        // Every tool runs on this thread, so nothing here races the UI.
-        const std::string addr = campcat::mumu_adb_address(
-            cfg_snapshot.mumu.tool_path, cfg_snapshot.mumu.device_index);
-        campcat::adb_client adb(cfg_snapshot.adb.path,
-                                addr.empty() ? cfg_snapshot.adb.serial : addr);
-        adb.connect_remote(addr);
-        campcat::llm::tool_context ctx;
-        ctx.adb = &adb;
-        ctx.adb_busy = [] { return g_adb_busy.load(); };
-        // Both read live rather than folded here: the settings popup can change
-        // them mid-turn, and a gate that keeps asking after it was switched off
-        // is the bug this avoids. `snapshot_cfg` is the thread-safe read, and
-        // `st` outlives the thread (see below). `cfg` itself stays the turn's
-        // snapshot: it is what the adb client was built from.
-        ctx.needs_approval = [st](std::string_view _tool) {
-            return campcat::llm::approval_gate_required(
-                st->snapshot_cfg().approval, _tool);
-        };
-        ctx.box_snap = [st] { return st->snapshot_cfg().box_snap; };
-        ctx.cfg = &cfg_snapshot;
-        ctx.script_dir = std::filesystem::path(cfg_snapshot.config_home);
-        ctx.start_emulator = [st](const std::function<bool()> &_should_stop) {
-            return st->start_mumu_blocking(_should_stop);
-        };
-        g_host.set_tool_context(ctx);
-        campcat::llm_result res =
-            g_host.run_turn(cfg_snapshot.config_home, cfg_snapshot.llm.provider,
-                            prompt);
-        g_host.set_tool_context({}); // `adb` dies with this lambda
-        {
-            std::lock_guard<std::mutex> lk(g_done_mu);
-            g_done = handoff{};
-            g_done.has = true;
-            g_done.res = std::move(res);
-        }
-        g_running.store(false);
+        run_prompt_loop(st, cfg_snapshot, prompt, false);
     });
 }
 
+/// Operator first, then scripter. A failed operator pass still writes scripter.
+/// A message queued during the first pass skips the second. `*_operator_out`
+/// is the operator pass, which is what the status line counts.
+void memorize_both(const std::filesystem::path &_home, const std::string &_provider,
+                   int _timeout_ms, campcat::llm_result *_operator_out) {
+    *_operator_out = g_host.memorize(
+        _home, _provider, campcat::llm::memory_kind::operator_notes, _timeout_ms);
+    // operator 失败也要写 scripter。只有用户已经发来新消息才停。
+    if (g_host.interrupt_pending()) {
+        return;
+    }
+    campcat::llm_result scripter = g_host.memorize(
+        _home, _provider, campcat::llm::memory_kind::scripter_notes, _timeout_ms);
+    if (!scripter.ok) {
+        campcat::automation_log::emit("[llm] scripter memory not saved: " +
+                                      scripter.error);
+    }
+}
+
 /// Consolidate the session into the long-term notes, on the worker.
-void start_memorize(std::filesystem::path _config_home, std::string _provider) {
+/// A message sent while this runs discards the notes and becomes the next turn.
+void start_memorize(campcat::shell_state &_st, const campcat::app_config &_cfg) {
     if (g_thread.joinable()) {
         g_thread.join();
     }
     g_running.store(true);
     g_memorizing.store(true);
-    g_thread = std::thread([config_home = std::move(_config_home),
-                            provider = std::move(_provider)]() {
-        campcat::llm_result res =
-            g_host.memorize(config_home, provider, campcat::k_memorize_timeout_ms);
+    g_thread = std::thread([st = &_st, cfg_snapshot = _cfg]() {
+        campcat::llm_result res;
+        memorize_both(cfg_snapshot.config_home, cfg_snapshot.llm.provider,
+                      campcat::k_memorize_timeout_ms, &res);
         g_memorizing.store(false);
-        {
+        // Checked before the queue is taken: taking it clears the flag.
+        const bool dropped = g_host.interrupt_pending();
+        if (!dropped) {
+            handoff done;
+            done.has = true;
+            done.is_memory = true;
+            done.res = std::move(res);
             std::lock_guard<std::mutex> lk(g_done_mu);
-            g_done = handoff{};
-            g_done.has = true;
-            g_done.is_memory = true;
-            g_done.res = std::move(res);
+            g_done.push_back(std::move(done));
         }
-        g_running.store(false);
+        std::optional<std::string> next = take_queued();
+        if (!next.has_value()) {
+            g_running.store(false);
+            return;
+        }
+        run_prompt_loop(st, cfg_snapshot, std::move(*next), true);
     });
 }
 
@@ -584,6 +757,7 @@ void start_reset(std::filesystem::path _config_home, std::string _provider) {
         g_thread.join();
     }
     g_running.store(true);
+    g_resetting.store(true);
     g_thread = std::thread([config_home = std::move(_config_home),
                             provider = std::move(_provider)]() {
         // Keep the session before forgetting it: `reset` is what drops the
@@ -591,8 +765,8 @@ void start_reset(std::filesystem::path _config_home, std::string _provider) {
         // point. A failed consolidation is not a reason to refuse the clear the
         // user asked for.
         g_memorizing.store(true);
-        campcat::llm_result kept =
-            g_host.memorize(config_home, provider, campcat::k_memorize_timeout_ms);
+        campcat::llm_result kept;
+        memorize_both(config_home, provider, campcat::k_memorize_timeout_ms, &kept);
         g_memorizing.store(false);
         if (!kept.ok) {
             campcat::automation_log::emit("[llm] memory not saved: " +
@@ -600,12 +774,14 @@ void start_reset(std::filesystem::path _config_home, std::string _provider) {
         }
         campcat::llm_result res = g_host.reset(config_home.parent_path());
         {
+            handoff done;
+            done.has = true;
+            done.is_reset = true;
+            done.res = std::move(res);
             std::lock_guard<std::mutex> lk(g_done_mu);
-            g_done = handoff{};
-            g_done.has = true;
-            g_done.is_reset = true;
-            g_done.res = std::move(res);
+            g_done.push_back(std::move(done));
         }
+        g_resetting.store(false);
         g_running.store(false);
     });
 }
@@ -615,11 +791,11 @@ void consume_handoff() {
     handoff h;
     {
         std::lock_guard<std::mutex> lk(g_done_mu);
-        if (!g_done.has) {
+        if (g_done.empty()) {
             return;
         }
-        h = std::move(g_done);
-        g_done = handoff{};
+        h = std::move(g_done.front());
+        g_done.pop_front();
     }
 
     // Every finished request restarts the idle clock, consolidation included:
@@ -633,13 +809,13 @@ void consume_handoff() {
             g_memory_chars = static_cast<int>(h.res.text.size());
         }
         campcat::automation_log::emit(
-            h.res.ok ? "[llm] long-term memory updated"
+            h.res.ok ? "[llm] operator long-term memory updated"
                      : "[llm] memory not saved: " + h.res.error);
         return;
     }
 
     if (!h.is_reset) {
-        fill_reply(h.res);
+        fill_reply(h.res, h.timeline);
         if (h.res.ok) {
             // Reported by the sidecar on a successful turn only: a result
             // without the field parses as 0, so a failure must not zero this.
@@ -676,6 +852,29 @@ void send_current(campcat::shell_state &_st, campcat::app_config &_cfg) {
     // the previous request's leftovers.
     g_host.clear_stream();
     start_turn(_st, _cfg, prompt);
+}
+
+/// Show `_prompt` now and stop the turn in flight at its next tool. A second
+/// send before that tool replaces the message; the earlier one is not sent.
+void queue_prompt(std::string _prompt) {
+    if (llm_turn *live = in_flight_turn()) {
+        live->frozen = true;
+    }
+    if (llm_turn *queued = queued_turn()) {
+        queued->user_text = _prompt;
+    } else {
+        append_user_turn(std::move(_prompt), true);
+        // append moved from the parameter; the queue still needs the text.
+        _prompt = g_turns.back().user_text;
+    }
+    {
+        std::lock_guard<std::mutex> lk(g_queue_mu);
+        g_next_prompt = std::move(_prompt);
+    }
+    g_host.request_interrupt();
+    campcat::llm::request_script_stop();
+    campcat::llm::request_emulator_stop();
+    g_host.release_approval();
 }
 
 /// "Thinking" (when the sidecar says so) plus 1..3 dots on the frame clock, so
@@ -743,10 +942,10 @@ void draw_turn(llm_turn &_t, int _index) {
     // images need the full width too, or a note would be wrapped into a narrow
     // column and an image clipped into a narrow strip.
     const bool placeholder = _t.pending && _t.items.empty();
-    const float aw = placeholder
-                         ? bubble_width(g_thinking ? "Thinking..." : "...",
-                                        max_w, 0.0F, pad)
-                         : max_w;
+    const float aw =
+        placeholder
+            ? bubble_width(g_thinking ? "Thinking..." : "...", max_w, 0.0F, pad)
+            : max_w;
     const bool failed = !_t.pending && !_t.ok;
     ImGui::PushStyleColor(ImGuiCol_ChildBg, failed ? k_err_bg : k_bot_bg);
     ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, k_bubble_rounding);
@@ -792,6 +991,8 @@ void draw_turn(llm_turn &_t, int _index) {
         _t.items.back().type == campcat::llm_event::kind::text;
     if (_t.pending && !has_text) {
         ImGui::TextDisabled("%s", waiting_label().c_str());
+    } else if (_t.interrupted) {
+        ImGui::TextDisabled("Interrupted");
     } else if (failed) {
         WITH_FONT(bold, { ImGui::TextColored(k_err_col, "Request failed"); });
         ImGui::TextWrapped("%s", _t.error.c_str());
@@ -837,10 +1038,11 @@ bool sync_approval_texture(const campcat::llm_approval &_a) {
 /// The gear next to Send, and the approval gates behind it.
 ///
 /// The gear, relative to the working directory the app is started from (the
-/// same base `fonts.cpp` resolves `campcat/sources/cpp/assets/fonts/` against). Drawn rather than
-/// designed: a white disc at radius 0.63 of the half-size, eight teeth out to
-/// 0.875, a hub punched back out at 0.22, all 8x supersampled and INTER_AREA'd
-/// down. White on an alpha channel is the shape `load_icon` uploads.
+/// same base `fonts.cpp` resolves `campcat/sources/cpp/assets/fonts/` against).
+/// Drawn rather than designed: a white disc at radius 0.63 of the half-size,
+/// eight teeth out to 0.875, a hub punched back out at 0.22, all 8x
+/// supersampled and INTER_AREA'd down. White on an alpha channel is the shape
+/// `load_icon` uploads.
 constexpr char k_gear_path[] = "campcat/sources/cpp/assets/icons/gear.png";
 
 /// The paper plane on Send. White on purpose, like the gear: `load_icon` hands
@@ -860,6 +1062,70 @@ constexpr float k_send_icon_side = 20.0F;
 
 /// Wide enough for the longest snap mode name ("Otsu blobs") plus the arrow.
 constexpr float k_snap_combo_w = 130.0F;
+
+/// Empty or the infinity mark means the built-in stand-in. Anything else must
+/// be a positive integer of at most seven digits; a half-typed field is not
+/// written.
+bool parse_cap(const char *_text, int _fallback, int *_out) {
+    if (_text[0] == '\0' || std::strcmp(_text, "\xE2\x88\x9E") == 0) {
+        *_out = _fallback;
+        return true;
+    }
+    int n = 0;
+    int digits = 0;
+    for (const char *p = _text; *p != '\0'; ++p) {
+        if (*p < '0' || *p > '9' || digits == 7) {
+            return false;
+        }
+        n = n * 10 + (*p - '0');
+        ++digits;
+    }
+    if (n < 1) {
+        return false;
+    }
+    *_out = n;
+    return true;
+}
+
+void show_cap(char *_buf, std::size_t _n, int _value) {
+    if (campcat::llm::fuse_is_unlimited(_value)) {
+        std::snprintf(_buf, _n, "\xE2\x88\x9E");
+    } else {
+        std::snprintf(_buf, _n, "%d", _value);
+    }
+}
+
+/// Per-turn fuse caps. Drawn inside the status font so infinity has a glyph.
+void draw_fuse_settings(campcat::app_config &_c) {
+    static char calls_buf[32];
+    static char rounds_buf[32];
+    static bool fresh = true;
+    if (!ImGui::BeginPopup("llm_fuse_settings")) {
+        fresh = true;
+        return;
+    }
+    if (fresh) {
+        show_cap(calls_buf, sizeof calls_buf, _c.llm.max_tool_calls);
+        show_cap(rounds_buf, sizeof rounds_buf, _c.llm.max_tool_rounds);
+        fresh = false;
+    }
+    ImGui::InputText("Tool calls per turn", calls_buf, sizeof calls_buf);
+    ImGui::InputText("Tool rounds per turn", rounds_buf, sizeof rounds_buf);
+    int calls = 0;
+    int rounds = 0;
+    const bool calls_ok =
+        parse_cap(calls_buf, campcat::llm::k_default_max_tool_calls, &calls);
+    const bool rounds_ok =
+        parse_cap(rounds_buf, campcat::llm::k_default_max_tool_rounds, &rounds);
+    if (calls_ok && rounds_ok && campcat::llm::fuse_pair_ok(calls, rounds)) {
+        _c.llm.max_tool_calls = calls;
+        _c.llm.max_tool_rounds = rounds;
+    } else if (calls_ok && rounds_ok) {
+        ImGui::TextDisabled(
+            "Tool rounds per turn cannot exceed tool calls per turn.");
+    }
+    ImGui::EndPopup();
+}
 
 /// Which tools ask the human before acting. The master switch keeps its old
 /// meaning -- off means nothing asks -- and the seven under it only matter
@@ -921,12 +1187,12 @@ void draw_approval_settings(campcat::app_config &_c) {
     }
     ImGui::Separator();
     // Not an approval gate: the snap is something the tool does on the way to
-    // acting. It sits here because this is where a human comes when a tap landed
-    // wrong, and it needs the same kind of kill switch. One control rather than
-    // a checkbox over a pair of radios: "off" is just the third mode, so the two
-    // answers cannot disagree.
-    // The list is the enum in declaration order, `none` first, so a mode index
-    // and a strategy are the same number.
+    // acting. It sits here because this is where a human comes when a tap
+    // landed wrong, and it needs the same kind of kill switch. One control
+    // rather than a checkbox over a pair of radios: "off" is just the third
+    // mode, so the two answers cannot disagree. The list is the enum in
+    // declaration order, `none` first, so a mode index and a strategy are the
+    // same number.
     const char *const k_snap_modes[] = {"None", "Otsu blobs", "Edge step"};
     int snap_mode = static_cast<int>(_c.box_snap.strategy);
     ImGui::SetNextItemWidth(k_snap_combo_w);
@@ -944,54 +1210,127 @@ void draw_approval_settings(campcat::app_config &_c) {
     ImGui::EndPopup();
 }
 
-/// The box-annotation window, opened by double-clicking the preview. The box is
-/// the user's redraw, kept apart from the model's so Cancel costs nothing.
+/// Draw `_region` on a canvas whose top-left is `_mn` at scale `_s` (1.0 for
+/// the correction window, smaller for a thumbnail). A circle is drawn as a
+/// disc: the corners a box would add are exactly what the shape exists to
+/// exclude.
+/// `_fill` of 0 means no fill.
+void draw_region(ImDrawList *_dl, const ImVec2 &_mn, float _s,
+                 const campcat::llm::region &_region, ImU32 _fill,
+                 ImU32 _stroke, float _thickness) {
+    if (const auto *b = std::get_if<campcat::llm::box>(&_region)) {
+        const ImVec2 p0(_mn.x + static_cast<float>(b->x) * _s,
+                        _mn.y + static_cast<float>(b->y) * _s);
+        const ImVec2 p1(_mn.x + static_cast<float>(b->x + b->w) * _s,
+                        _mn.y + static_cast<float>(b->y + b->h) * _s);
+        if (_fill != 0) {
+            _dl->AddRectFilled(p0, p1, _fill);
+        }
+        _dl->AddRect(p0, p1, _stroke, 0.0F, 0, _thickness);
+        return;
+    }
+    const auto &c = std::get<campcat::llm::circle>(_region);
+    const ImVec2 centre(_mn.x + static_cast<float>(c.cx) * _s,
+                        _mn.y + static_cast<float>(c.cy) * _s);
+    const float radius = static_cast<float>(c.r) * _s;
+    if (_fill != 0) {
+        _dl->AddCircleFilled(centre, radius, _fill);
+    }
+    _dl->AddCircle(centre, radius, _stroke, 0, _thickness);
+}
+
+/// A region's bounding box in image pixels: what the correction window's drag
+/// handles and its readout work in.
+campcat::llm::box region_bounds_ui(const campcat::llm::region &_region) {
+    if (const auto *b = std::get_if<campcat::llm::box>(&_region)) {
+        return *b;
+    }
+    const auto &c = std::get<campcat::llm::circle>(_region);
+    return campcat::llm::box{c.cx - c.r, c.cy - c.r, 2 * c.r + 1, 2 * c.r + 1};
+}
+
+/// The region-annotation window, opened by double-clicking the preview. What it
+/// holds is the user's redraw, kept apart from the model's so Cancel costs
+/// nothing.
 bool g_annot_open = false;
 long g_annot_id = -1; ///< which question this edit belongs to (`_a.id`)
 bool g_annot_dragging = false;
-bool g_annot_has_box = false;
+bool g_annot_has_region = false;
+/// Which shape the drag draws. Seeded from the region under correction, and
+/// switchable: a box the model got wrong may be a circle the user wants.
+enum class edit_shape { box, circle };
+edit_shape g_annot_shape = edit_shape::box;
 int g_annot_ax = 0; ///< drag anchor, image px
 int g_annot_ay = 0;
 int g_annot_cx = 0; ///< drag current point, image px
 int g_annot_cy = 0;
-int g_annot_x0 = 0; ///< committed box, inclusive image px
+int g_annot_x0 = 0; ///< committed box (x,y,w,h layout) or circle centre
 int g_annot_y0 = 0;
-int g_annot_x1 = 0;
+int g_annot_x1 = 0; ///< box far corner, inclusive image px
 int g_annot_y1 = 0;
+int g_annot_r = 0; ///< committed circle radius
 
-/// A redrawn box waiting to go with the reply. The send bar shows it, and Send
-/// and Reject carry it; it belongs to exactly one question.
-std::optional<campcat::llm::rect> g_staged_box;
+/// A redrawn region waiting to go with the reply. The send bar shows it, and
+/// Send and Reject carry it; it belongs to exactly one question.
+std::optional<campcat::llm::region> g_staged_region;
 long g_staged_id = -1;
 
 /// Drop the staged redraw, because the question it belonged to is gone.
 void clear_staged() {
-    g_staged_box.reset();
+    g_staged_region.reset();
     g_staged_id = -1;
 }
 
-/// Open the annotation window for `_a`. The box is seeded from a staged redraw
-/// when there is one (reopening must not lose the last edit), else from the
-/// model's.
+/// What the annotation drag currently stands for: the live drag while the mouse
+/// is down, the last committed one otherwise.
+campcat::llm::region annot_draft() {
+    if (g_annot_shape == edit_shape::circle) {
+        const int ax = g_annot_dragging ? g_annot_ax : g_annot_x0;
+        const int ay = g_annot_dragging ? g_annot_ay : g_annot_y0;
+        const int r = g_annot_dragging
+                          ? static_cast<int>(std::lround(std::hypot(
+                                static_cast<double>(g_annot_cx - ax),
+                                static_cast<double>(g_annot_cy - ay))))
+                          : g_annot_r;
+        return campcat::llm::circle{ax, ay, r};
+    }
+    const int x0 = g_annot_dragging ? g_annot_ax : g_annot_x0;
+    const int y0 = g_annot_dragging ? g_annot_ay : g_annot_y0;
+    const int x1 = g_annot_dragging ? g_annot_cx : g_annot_x1;
+    const int y1 = g_annot_dragging ? g_annot_cy : g_annot_y1;
+    return campcat::llm::box{std::min(x0, x1), std::min(y0, y1),
+                             std::abs(x1 - x0) + 1, std::abs(y1 - y0) + 1};
+}
+
+/// Open the annotation window for `_a`. The region is seeded from a staged
+/// redraw when there is one (reopening must not lose the last edit), else from
+/// the model's.
 void open_annotation(const campcat::llm_approval &_a) {
     g_annot_open = true;
     g_annot_id = _a.id;
     g_annot_dragging = false;
-    campcat::llm::rect seed;
-    bool has = false;
-    if (g_staged_box && g_staged_id == _a.id) {
-        seed = *g_staged_box;
-        has = true;
+    std::optional<campcat::llm::region> seed;
+    if (g_staged_region && g_staged_id == _a.id) {
+        seed = g_staged_region;
     } else if (!_a.highlight.empty()) {
         seed = _a.highlight[0];
-        has = true;
     }
-    g_annot_has_box = has;
-    if (has) {
-        g_annot_x0 = seed.x;
-        g_annot_y0 = seed.y;
-        g_annot_x1 = seed.x + seed.w - 1;
-        g_annot_y1 = seed.y + seed.h - 1;
+    g_annot_has_region = seed.has_value();
+    g_annot_shape = seed && std::holds_alternative<campcat::llm::circle>(*seed)
+                        ? edit_shape::circle
+                        : edit_shape::box;
+    if (seed) {
+        if (const auto *c = std::get_if<campcat::llm::circle>(&*seed)) {
+            g_annot_x0 = c->cx;
+            g_annot_y0 = c->cy;
+            g_annot_r = c->r;
+        } else {
+            const campcat::llm::box b = region_bounds_ui(*seed);
+            g_annot_x0 = b.x;
+            g_annot_y0 = b.y;
+            g_annot_x1 = b.x + b.w - 1;
+            g_annot_y1 = b.y + b.h - 1;
+        }
     }
 }
 
@@ -1009,11 +1348,12 @@ void draw_annotation_window() {
     }
     ImGui::SetNextWindowSize(ImVec2(560.0F, 520.0F), ImGuiCond_FirstUseEver);
     bool open = true;
-    if (ImGui::Begin("Correct the box", &open)) {
+    if (ImGui::Begin("Correct the region", &open)) {
         ImGui::TextDisabled(
-            a.given_box
-                ? "Drag a new box. Thin: the model's. Solid: after snapping."
-                : "Drag a new box on the image. The thin one is the model's.");
+            a.given_region
+                ? "Drag a new region. Thin: the model's. Solid: after snapping."
+                : "Drag a new region on the image. The thin one is the "
+                  "model's.");
         // Two rows below the canvas: the box readout and the button row.
         const float footer = ImGui::GetFrameHeightWithSpacing() * 2.0F;
         ImGui::BeginChild("annot_scroll", ImVec2(0.0F, -footer),
@@ -1050,72 +1390,93 @@ void draw_annotation_window() {
         if (g_annot_dragging) {
             to_px(io.MousePos, &g_annot_cx, &g_annot_cy);
             if (!held) {
+                // Read the live drag before clearing the flag: annot_draft()
+                // falls back to the committed region once dragging is false.
+                const campcat::llm::region draft = annot_draft();
                 g_annot_dragging = false;
-                // A click that never moved is a stray click, not a zero-size
-                // box.
-                if (g_annot_cx != g_annot_ax || g_annot_cy != g_annot_ay) {
+                // A drag that never moved is a stray click, not a zero-size box
+                // or a zero-radius circle.
+                if (g_annot_shape == edit_shape::circle) {
+                    const auto &c = std::get<campcat::llm::circle>(draft);
+                    if (c.r > 0) {
+                        g_annot_x0 = c.cx;
+                        g_annot_y0 = c.cy;
+                        g_annot_r = c.r;
+                        g_annot_has_region = true;
+                    }
+                } else if (g_annot_cx != g_annot_ax ||
+                           g_annot_cy != g_annot_ay) {
                     g_annot_x0 = std::min(g_annot_ax, g_annot_cx);
                     g_annot_y0 = std::min(g_annot_ay, g_annot_cy);
                     g_annot_x1 = std::max(g_annot_ax, g_annot_cx);
                     g_annot_y1 = std::max(g_annot_ay, g_annot_cy);
-                    g_annot_has_box = true;
+                    g_annot_has_region = true;
                 }
             }
         }
         ImDrawList *dl = ImGui::GetWindowDrawList();
-        // What the user is correcting, plus the box the model gave when the snap
-        // moved it: without the model's own box on screen there is nothing to
-        // judge the snap against. The model's is a different colour and a thinner
-        // line, the same encoding the approval bubble uses, so "which is which"
-        // does not depend on telling two offsets apart.
-        for (const campcat::llm::rect &r : a.highlight) {
-            dl->AddRect(ImVec2(mn.x + static_cast<float>(r.x),
-                               mn.y + static_cast<float>(r.y)),
-                        ImVec2(mn.x + static_cast<float>(r.x + r.w),
-                               mn.y + static_cast<float>(r.y + r.h)),
-                        a.given_box ? IM_COL32(255, 200, 60, 230)
-                                    : IM_COL32(255, 200, 60, 130),
-                        0.0F, 0, a.given_box ? 2.0F : 1.0F);
+        // What the user is correcting, plus the box the model gave when the
+        // snap moved it: without the model's own box on screen there is nothing
+        // to judge the snap against. The model's is a different colour and a
+        // thinner line, the same encoding the approval bubble uses, so "which
+        // is which" does not depend on telling two offsets apart.
+        for (const campcat::llm::region &r : a.highlight) {
+            draw_region(dl, mn, 1.0F, r,
+                        a.given_region ? IM_COL32(255, 200, 60, 230)
+                                       : IM_COL32(255, 200, 60, 130),
+                        a.given_region ? IM_COL32(255, 200, 60, 230)
+                                       : IM_COL32(255, 200, 60, 130),
+                        a.given_region ? 2.0F : 1.0F);
         }
-        if (a.given_box) {
-            const campcat::llm::rect &r = *a.given_box;
-            dl->AddRect(ImVec2(mn.x + static_cast<float>(r.x),
-                               mn.y + static_cast<float>(r.y)),
-                        ImVec2(mn.x + static_cast<float>(r.x + r.w),
-                               mn.y + static_cast<float>(r.y + r.h)),
-                        IM_COL32(200, 120, 255, 220), 0.0F, 0, 1.0F);
+        if (a.given_region) {
+            draw_region(dl, mn, 1.0F, *a.given_region, 0,
+                        IM_COL32(200, 120, 255, 220), 1.0F);
         }
-        if (g_annot_dragging || g_annot_has_box) {
-            const int x0 = g_annot_dragging ? g_annot_ax : g_annot_x0;
-            const int y0 = g_annot_dragging ? g_annot_ay : g_annot_y0;
-            const int x1 = g_annot_dragging ? g_annot_cx : g_annot_x1;
-            const int y1 = g_annot_dragging ? g_annot_cy : g_annot_y1;
-            const ImVec2 s0(mn.x + static_cast<float>(std::min(x0, x1)),
-                            mn.y + static_cast<float>(std::min(y0, y1)));
-            const ImVec2 s1(mn.x + static_cast<float>(std::max(x0, x1)),
-                            mn.y + static_cast<float>(std::max(y0, y1)));
-            dl->AddRectFilled(s0, s1, IM_COL32(80, 200, 255, 55));
-            dl->AddRect(s0, s1, IM_COL32(255, 220, 80, 255), 0.0F, 0, 2.0F);
+        if (g_annot_dragging || g_annot_has_region) {
+            draw_region(dl, mn, 1.0F, annot_draft(), IM_COL32(80, 200, 255, 55),
+                        IM_COL32(255, 220, 80, 255), 2.0F);
         }
         ImGui::EndChild();
-        if (g_annot_has_box) {
-            ImGui::TextDisabled("box %d,%d %dx%d px", g_annot_x0, g_annot_y0,
-                                g_annot_x1 - g_annot_x0 + 1,
-                                g_annot_y1 - g_annot_y0 + 1);
+        if (g_annot_has_region) {
+            if (g_annot_shape == edit_shape::circle) {
+                ImGui::TextDisabled("circle %d,%d r=%d px", g_annot_x0,
+                                    g_annot_y0, g_annot_r);
+            } else {
+                ImGui::TextDisabled("box %d,%d %dx%d px", g_annot_x0,
+                                    g_annot_y0, g_annot_x1 - g_annot_x0 + 1,
+                                    g_annot_y1 - g_annot_y0 + 1);
+            }
         } else {
-            ImGui::TextDisabled("drag on the image to pick a box");
+            ImGui::TextDisabled(g_annot_shape == edit_shape::circle
+                                    ? "drag from the centre to set the radius"
+                                    : "drag on the image to pick a box");
         }
-        if (!g_annot_has_box) {
+        // Switching shape drops the committed region: a box must not ride along
+        // as a circle (or the other way round) just because it was drawn first.
+        // Re-clicking the active radio is not a switch -- RadioButton reports
+        // the click either way, and dropping the region there would throw away
+        // what was just drawn.
+        ImGui::SameLine();
+        if (ImGui::RadioButton("box", g_annot_shape == edit_shape::box) &&
+            g_annot_shape != edit_shape::box) {
+            g_annot_shape = edit_shape::box;
+            g_annot_has_region = false;
+        }
+        ImGui::SameLine();
+        if (ImGui::RadioButton("circle", g_annot_shape == edit_shape::circle) &&
+            g_annot_shape != edit_shape::circle) {
+            g_annot_shape = edit_shape::circle;
+            g_annot_has_region = false;
+        }
+        if (!g_annot_has_region) {
             ImGui::BeginDisabled();
         }
-        if (ImGui::Button("Use this box")) {
-            g_staged_box = campcat::llm::rect{g_annot_x0, g_annot_y0,
-                                              g_annot_x1 - g_annot_x0 + 1,
-                                              g_annot_y1 - g_annot_y0 + 1};
+        if (ImGui::Button("Use this region")) {
+            g_staged_region = annot_draft();
             g_staged_id = g_annot_id;
             g_annot_open = false;
         }
-        if (!g_annot_has_box) {
+        if (!g_annot_has_region) {
             ImGui::EndDisabled();
         }
         ImGui::SameLine();
@@ -1147,16 +1508,10 @@ void draw_staged_thumb(const std::string &_tool) {
     // Where the next row starts; the overlay below is put back here so it costs
     // no layout.
     const ImVec2 below = ImGui::GetCursorScreenPos();
-    const campcat::llm::rect &r = *g_staged_box;
-    const ImVec2 p0(img_min.x + static_cast<float>(r.x) * s,
-                    img_min.y + static_cast<float>(r.y) * s);
-    const ImVec2 p1(img_min.x + static_cast<float>(r.x + r.w) * s,
-                    img_min.y + static_cast<float>(r.y + r.h) * s);
-    ImDrawList *dl = ImGui::GetWindowDrawList();
-    dl->AddRectFilled(p0, p1, IM_COL32(80, 200, 255, 55));
-    dl->AddRect(p0, p1, IM_COL32(255, 220, 80, 255), 0.0F, 0, 2.0F);
+    draw_region(ImGui::GetWindowDrawList(), img_min, s, *g_staged_region,
+                IM_COL32(80, 200, 255, 55), IM_COL32(255, 220, 80, 255), 2.0F);
     ImGui::SameLine();
-    ImGui::TextDisabled("Corrected %s box will be sent with your reply.",
+    ImGui::TextDisabled("Corrected %s region will be sent with your reply.",
                         _tool.c_str());
     ImGui::SetCursorScreenPos(ImVec2(img_max.x - 20.0F, img_min.y + 1.0F));
     if (ImGui::SmallButton("x##staged_clear")) {
@@ -1183,47 +1538,39 @@ void draw_approval_bubble(const campcat::llm_approval &_a) {
             ImVec2(0.0F, 0.0F), ImVec2(1.0F, 1.0F));
         // Read off the Image before anything else touches the "last item"
         // state.
-        const bool dbl = _a.box_editable && ImGui::IsItemHovered() &&
+        const bool dbl = _a.editable && ImGui::IsItemHovered() &&
                          ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left);
         // The boxes are in screenshot pixels; the image is drawn scaled.
         const ImVec2 origin = ImGui::GetItemRectMin();
         const float scale = size.x / static_cast<float>(g_appr_w);
         ImDrawList *dl = ImGui::GetWindowDrawList();
-        for (const campcat::llm::rect &r : _a.highlight) {
-            const ImVec2 p0(origin.x + static_cast<float>(r.x) * scale,
-                            origin.y + static_cast<float>(r.y) * scale);
-            const ImVec2 p1(origin.x + static_cast<float>(r.x + r.w) * scale,
-                            origin.y + static_cast<float>(r.y + r.h) * scale);
-            dl->AddRectFilled(p0, p1, IM_COL32(255, 200, 60, 48));
-            dl->AddRect(p0, p1, IM_COL32(255, 200, 60, 230), 0.0F, 0, 2.0F);
+        for (const campcat::llm::region &r : _a.highlight) {
+            draw_region(dl, origin, scale, r, IM_COL32(255, 200, 60, 48),
+                        IM_COL32(255, 200, 60, 230), 2.0F);
         }
-        // The box the model gave, when the snap moved it. A different colour, not
-        // just a thinner line: the preview is drawn at ~0.16 scale on a phone
-        // resolution, so a 20px snap is a 3px offset and the two frames would read
-        // as one if they were both yellow.
-        if (_a.given_box) {
-            const campcat::llm::rect &r = *_a.given_box;
-            dl->AddRect(
-                ImVec2(origin.x + static_cast<float>(r.x) * scale,
-                       origin.y + static_cast<float>(r.y) * scale),
-                ImVec2(origin.x + static_cast<float>(r.x + r.w) * scale,
-                       origin.y + static_cast<float>(r.y + r.h) * scale),
-                IM_COL32(200, 120, 255, 220), 0.0F, 0, 1.0F);
+        // The region the model gave, when the snap moved it. A different
+        // colour, not just a thinner line: the preview is drawn at ~0.16 scale
+        // on a phone resolution, so a 20px snap is a 3px offset and the two
+        // frames would read as one if they were both yellow.
+        if (_a.given_region) {
+            draw_region(dl, origin, scale, *_a.given_region, 0,
+                        IM_COL32(200, 120, 255, 220), 1.0F);
         }
         if (dbl) {
             open_annotation(_a);
         }
-        if (_a.given_box) {
-            ImGui::TextDisabled(
-                "Thin frame: the box the model gave. Solid: after snapping.");
+        if (_a.given_region) {
+            ImGui::TextDisabled("Thin frame: the region the model gave. Solid: "
+                                "after snapping.");
         }
     }
-    if (_a.box_editable) {
-        ImGui::TextDisabled("Double-click the image to correct the box.");
+    if (_a.editable) {
+        ImGui::TextDisabled("Double-click the image to correct the region.");
     }
     if (ImGui::Button("Approve")) {
         g_host.answer_approval(true);
-        clear_staged(); // an approval means the box is right; a redraw is moot
+        clear_staged(); // an approval means the region is right; a redraw is
+                        // moot
     }
     ImGui::SameLine();
     // Rejection with a typed correction goes through the prompt box, which
@@ -1234,7 +1581,7 @@ void draw_approval_bubble(const campcat::llm_approval &_a) {
     if (ImGui::Button("Reject")) {
         // A staged redraw rides along: the user staged it to be sent, and
         // dropping it silently here would surprise them.
-        g_host.answer_approval(false, {}, g_staged_box);
+        g_host.answer_approval(false, {}, g_staged_region);
         clear_staged();
     }
     ImGui::EndChild();
@@ -1386,8 +1733,9 @@ void llm_panel_shutdown_gl() {
     // in `llm_panel_shutdown_finish`, once there is nothing left to freeze.
     if (!g_config_home.empty()) {
         g_shutdown_thread = std::thread([]() {
-            const campcat::llm_result res = g_host.memorize(
-                g_config_home, g_provider, campcat::k_shutdown_memorize_timeout_ms);
+            campcat::llm_result res;
+            memorize_both(g_config_home, g_provider,
+                          campcat::k_shutdown_memorize_timeout_ms, &res);
             if (!res.ok) {
                 campcat::automation_log::emit("[llm] memory not saved: " +
                                               res.error);
@@ -1447,6 +1795,14 @@ void llm_panel_draw_panel(campcat::shell_state &_st, campcat::app_config &_cfg,
                           bool _adb_busy) {
     // Finished work is folded in on the UI thread, which owns g_turns.
     consume_handoff();
+    // The worker cleared the stream for a message that was only queued. It is
+    // the turn in flight now, so the pump below writes into it and not into
+    // the one that just finished.
+    if (g_promote.exchange(false)) {
+        if (llm_turn *queued = queued_turn()) {
+            queued->queued = false;
+        }
+    }
 
     // An automation cycle or the scheduler is using adb, so tools must refuse
     // rather than contend with it.
@@ -1487,10 +1843,10 @@ void llm_panel_draw_panel(campcat::shell_state &_st, campcat::app_config &_cfg,
     const bool awaiting = approval.pending;
     // A staged redraw belongs to exactly one question. Drop it as soon as that
     // question is gone, so it cannot ride the next one.
-    if (g_staged_box && (!awaiting || g_staged_id != approval.id)) {
+    if (g_staged_region && (!awaiting || g_staged_id != approval.id)) {
         clear_staged();
     }
-    if (awaiting && g_staged_box && g_appr_tex != 0 && g_appr_w > 0) {
+    if (awaiting && g_staged_region && g_appr_tex != 0 && g_appr_w > 0) {
         draw_staged_thumb(approval.tool);
     }
 
@@ -1502,7 +1858,7 @@ void llm_panel_draw_panel(campcat::shell_state &_st, campcat::app_config &_cfg,
     if (!g_running.load() && !awaiting && !g_turns.empty() &&
         is_blank(g_input) && !g_config_home.empty() &&
         ImGui::GetTime() - g_last_llm > k_idle_seconds) {
-        start_memorize(g_config_home, g_provider);
+        start_memorize(_st, _cfg);
     }
 
     // The button is square like the gear: the icon carries the meaning, so no
@@ -1518,15 +1874,15 @@ void llm_panel_draw_panel(campcat::shell_state &_st, campcat::app_config &_cfg,
                           awaiting ? "Optional: tell it what to do instead"
                                    : "Tell CampCat what to do...",
                           &g_input);
-    // Attached here rather than inside prompt_input_text: that helper paints the
-    // IME pre-edit without submitting an item, so the box is still the last item
-    // at this point. The target would silently leave the box if the helper ever
-    // submitted one.
+    // Attached here rather than inside prompt_input_text: that helper paints
+    // the IME pre-edit without submitting an item, so the box is still the last
+    // item at this point. The target would silently leave the box if the helper
+    // ever submitted one.
     if (ImGui::BeginDragDropTarget()) {
         if (const ImGuiPayload *payload =
                 ImGui::AcceptDragDropPayload(k_script_drag_payload)) {
-            // `@name` glued to the text before it would not read as a mention, so
-            // a separator goes in unless one is already there.
+            // `@name` glued to the text before it would not read as a mention,
+            // so a separator goes in unless one is already there.
             if (!g_input.empty() &&
                 !std::isspace(static_cast<unsigned char>(g_input.back()))) {
                 g_input.push_back(' ');
@@ -1539,7 +1895,10 @@ void llm_panel_draw_panel(campcat::shell_state &_st, campcat::app_config &_cfg,
     }
 
     ImGui::SameLine();
-    const bool can_send = awaiting || (!busy && !is_blank(g_input));
+    // A turn in flight still accepts a message: that message is how the user
+    // stops it. Clear conversation does not, because the reset drops the log.
+    const bool can_send =
+        awaiting || (!g_resetting.load() && !is_blank(g_input));
     if (!can_send) {
         ImGui::BeginDisabled();
     }
@@ -1581,12 +1940,10 @@ void llm_panel_draw_panel(campcat::shell_state &_st, campcat::app_config &_cfg,
     ImGui::SameLine();
     draw_approval_settings(_cfg);
 
-    // What the conversation currently holds, as a three-column grid so the
-    // numbers line up instead of running together. Two turn counts, because
-    // they answer different questions and drift apart: `turns` is what the
-    // model still holds verbatim, `shown` is what this panel has kept, capped
-    // at `k_turn_cap`.
+    // Four counts. Tool calls is the only one with a fuse, and that fuse is
+    // per turn while the number is the conversation total.
     refresh_memory_chars();
+    const campcat::llm_protocol::usage_stats usage = g_host.usage();
     ImGui::Indent(k_stat_indent);
     WITH_FONT(small, {
         // Zero vertical cell padding: a row's height is its content plus
@@ -1595,23 +1952,39 @@ void llm_panel_draw_panel(campcat::shell_state &_st, campcat::app_config &_cfg,
         // horizontal half stays, so the columns keep their inset.
         const float pad_x = ImGui::GetStyle().CellPadding.x;
         ImGui::PushStyleVar(ImGuiStyleVar_CellPadding, ImVec2(pad_x, 0.0F));
-        if (ImGui::BeginTable("##llm_stats", 3,
+        // Opened after the table: a popup id pushed inside the table does not
+        // match BeginPopup outside it.
+        bool open_fuse = false;
+        const auto cell = [&](const char *_label, const std::string &_value) {
+            ImGui::TableNextColumn();
+            ImGui::TextDisabled("%s", _label);
+            if (ImGui::IsItemHovered() &&
+                ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
+                open_fuse = true;
+            }
+            ImGui::SameLine();
+            ImGui::TextUnformatted(_value.c_str());
+            if (ImGui::IsItemHovered() &&
+                ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
+                open_fuse = true;
+            }
+        };
+        if (ImGui::BeginTable("##llm_stats", 4,
                               ImGuiTableFlags_SizingStretchSame)) {
-            ImGui::TableNextColumn();
-            ImGui::TextDisabled("Turns");
-            ImGui::SameLine();
-            ImGui::Text("%d", g_sidecar_turns);
-            ImGui::TableNextColumn();
-            ImGui::TextDisabled("Shown");
-            ImGui::SameLine();
-            ImGui::Text("%d/%d", static_cast<int>(g_turns.size()), k_turn_cap);
-            ImGui::TableNextColumn();
-            ImGui::TextDisabled("Memory (chars)");
-            ImGui::SameLine();
-            ImGui::Text("%d/%d", g_memory_chars,
-                        static_cast<int>(campcat::llm::k_memory_max_chars));
+            cell("Turns", std::to_string(g_sidecar_turns));
+            cell("LLM calls", std::to_string(usage.llm_calls));
+            cell("Tool calls",
+                 std::to_string(usage.tool_calls) + "/" +
+                     campcat::llm::format_fuse(_cfg.llm.max_tool_calls));
+            cell("Context", usage.context_tokens < 0
+                               ? std::string("\xE2\x80\x94")
+                               : std::to_string(usage.context_tokens));
             ImGui::EndTable();
         }
+        if (open_fuse) {
+            ImGui::OpenPopup("llm_fuse_settings");
+        }
+        draw_fuse_settings(_cfg);
         ImGui::PopStyleVar();
     });
     ImGui::Unindent(k_stat_indent);
@@ -1620,9 +1993,13 @@ void llm_panel_draw_panel(campcat::shell_state &_st, campcat::app_config &_cfg,
         if (awaiting) {
             const bool blank = is_blank(g_input);
             g_host.answer_approval(false, blank ? std::string() : g_input,
-                                   g_staged_box);
+                                   g_staged_region);
             clear_staged();
             g_input.clear(); // consumed as the answer, not as a prompt
+        } else if (busy) {
+            const std::string prompt = g_input;
+            g_input.clear();
+            queue_prompt(prompt);
         } else {
             send_current(_st, _cfg);
         }

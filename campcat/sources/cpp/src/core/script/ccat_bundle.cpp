@@ -1,5 +1,6 @@
 #include "core/script/ccat_bundle.h"
 
+#include "core/script/ccat_graph.h"
 #include "core/script/ccat_lexer.h" // Lexer: a run() target is edited as source text
 #include "core/script/ccat_parser.h"
 
@@ -130,8 +131,8 @@ void collect_run_targets(const Stmt &_s, std::vector<std::string> *_out) {
 /// say.
 struct bundle_scan {
     bool parsed = false;
-    std::vector<std::string> deps; ///< bundle names, sorted, no duplicates
-    std::string why;               ///< set when !parsed
+    std::vector<std::string> deps; ///< run() targets, sorted
+    std::string why; ///< set when !parsed
 };
 
 /// The bundles `_name` reaches with run(). `_known` is the sorted list
@@ -261,8 +262,19 @@ delete_status check_bundle_deletable(const std::filesystem::path &_script_dir,
                         (existing.empty() ? "none yet" : existing) + ")");
     }
 
-    const std::vector<std::string> known = bundle_names(_script_dir);
     std::vector<std::string> referrers;
+    const bundle_tag tag = bundle_tags(_script_dir, name);
+    if (!tag.anchor_of.empty()) {
+        const std::string id = name.substr(tag.anchor_of.size() + 1);
+        for (const graph_edge &e :
+             scan_graph(_script_dir, tag.anchor_of).graph.edges) {
+            if (e.from == id || e.to == id) {
+                referrers.push_back(e.script);
+            }
+        }
+    }
+
+    const std::vector<std::string> known = bundle_names(_script_dir);
     for (const std::string &other : known) {
         if (other == name) {
             continue;
@@ -278,11 +290,14 @@ delete_status check_bundle_deletable(const std::filesystem::path &_script_dir,
             referrers.push_back(other);
         }
     }
+    std::sort(referrers.begin(), referrers.end());
+    referrers.erase(std::unique(referrers.begin(), referrers.end()),
+                    referrers.end());
     if (!referrers.empty()) {
         const bool one = referrers.size() == 1;
         return fail(delete_status::referenced,
-                    "cannot delete " + name + ": run(...) from " +
-                        join(referrers) + (one ? " reaches it" : " reach it") +
+                    "cannot delete " + name + ": referenced by " +
+                        join(referrers) +
                         "; update or delete " +
                         (one ? "that script" : "those scripts") + " first");
     }
@@ -458,7 +473,7 @@ rewrite_run_targets(const std::filesystem::path &_script_dir,
 
 /// Everything a rename will do, worked out without touching a byte of it.
 struct rename_plan {
-    std::vector<std::string> referrers; ///< sorted
+    std::vector<std::string> referrers; ///< sorted; main.ccat rewrites
     std::vector<std::string> edits;     ///< parallel to referrers
     std::vector<std::string>
         old_texts; ///< parallel to referrers, for the write guard
@@ -491,6 +506,20 @@ rename_status plan_rename(const std::filesystem::path &_script_dir,
         return fail(rename_status::not_found,
                     "no script bundle \"" + _name + "\" (existing: " +
                         (existing.empty() ? "none yet" : existing) + ")");
+    }
+
+    // A graph's shape is its bundle names, so a rename would silently drop or
+    // add an anchor or an edge.
+    const bundle_tag from_tag = bundle_tags(_script_dir, _name);
+    if (!from_tag.anchor_of.empty() || !from_tag.edge_of.empty()) {
+        return fail(rename_status::bad_name,
+                    _name + " is part of graph " + from_tag.anchor_of +
+                        from_tag.edge_of +
+                        "; delete it and create the new one instead");
+    }
+    if (!bundle_tags(_script_dir, _new_name).edge_of.empty()) {
+        return fail(rename_status::bad_name,
+                    "\"" + _new_name + "\" would be read as a graph edge");
     }
 
     // Compared by exact spelling rather than existence: on a case-insensitive
@@ -611,7 +640,7 @@ rename_status rename_bundle(const std::filesystem::path &_script_dir,
         // old one.
         if (_err != nullptr) {
             *_err = "renamed " + name + " to " + new_name +
-                    ", but these scripts still run \"" + name +
+                    ", but these scripts still name \"" + name +
                     "\": " + join(stale) + "; update them by hand";
         }
         return rename_status::rewrite_failed;

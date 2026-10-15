@@ -15,24 +15,32 @@ namespace campcat::llm {
 /// host then refuses.
 constexpr std::size_t k_memory_max_chars = 4000;
 
-/// `<config_home>/memory.md`.
-std::filesystem::path memory_path(const std::filesystem::path &_config_home);
+/// `<config_home>/operator.md` or `<config_home>/scripter.md`.
+enum class memory_kind { operator_notes, scripter_notes };
+
+/// Wire name for a `memorize` request: `operator` or `scripter`.
+const char *memory_agent_name(memory_kind _kind);
+
+std::filesystem::path memory_path(const std::filesystem::path &_config_home,
+                                  memory_kind _kind);
 
 /// Read the notes into `_out`.
 ///
 /// A missing file is an empty memory, not an error. Returns false only when the
 /// file exists and cannot be read, which is what stops `write_memory` from
-/// overwriting something it could not see.
-bool read_memory(const std::filesystem::path &_config_home, std::string *_out);
+/// overwriting something it could not see. For `operator_notes`, a leftover
+/// `memory.md` is renamed to `operator.md` when that file is absent.
+bool read_memory(const std::filesystem::path &_config_home, memory_kind _kind,
+                 std::string *_out);
 
 /// Replace the notes, atomically: a temp file in the same directory, then a
 /// rename, so a process killed mid-write leaves the old file intact instead of
 /// half of the new one. Refused, with the old file untouched, when the text is
 /// empty, is over `k_memory_max_chars`, or the current file cannot be read.
-bool write_memory(const std::filesystem::path &_config_home,
+bool write_memory(const std::filesystem::path &_config_home, memory_kind _kind,
                   const std::string &_text);
 
-/// Delete the memory file. Already absent counts as success.
-bool clear_memory(const std::filesystem::path &_config_home);
+/// Delete one memory file. Already absent counts as success.
+bool clear_memory(const std::filesystem::path &_config_home, memory_kind _kind);
 
 } // namespace campcat::llm

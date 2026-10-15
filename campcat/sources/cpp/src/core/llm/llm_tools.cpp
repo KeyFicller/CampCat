@@ -6,6 +6,7 @@
 #include "core/automation_log.h"
 #include "core/box_snap.h"
 #include "core/script/ccat_bundle.h" // bundle_main / bundle_names / ...
+#include "core/script/ccat_graph.h"  // screen graph: scan / summary / tags
 #include "core/script/ccat_parser.h" // parse_program / parse_error
 
 // Private: <meta> and the consteval cost stay out of include/.
@@ -56,12 +57,12 @@ int g_next_shot = 0;
 /// one call's number can never be reported for the next.
 int g_last_shot = 0;
 
-/// The box the human drew, the last time a rejection handed one out. The
-/// human's box comes back as a fresh `tap` / `save_template` the model relays
+/// The region the human drew, the last time a rejection handed one out. The
+/// human's region comes back as a fresh `tap` / `save_template` the model relays
 /// (see the box-correction spec, §9-1), so this is the only way the tools can
 /// tell it from one the model guessed -- and it must not be snapped. Cleared at
 /// session reset, with the frames it was measured on.
-std::optional<rect> g_human_box;
+std::optional<llm::region> g_human_region;
 
 /// A script is executing (the UI polls this) and it has been asked to stop (the
 /// UI writes it, the interpreter reads it). Both cross threads, hence atomics.
@@ -152,20 +153,36 @@ bool in_screen(int _x, int _y, std::string *_error) {
     return true;
 }
 
-/// Rejects a box that is not wholly inside a picture of `_img_w` x `_img_h`.
-/// The size is a parameter, not read from any single global: the box may be cut
-/// out of an older screenshot, whose size need not match the screen's current
-/// one. Same rejection-not-clamping rule as in_screen().
-bool box_on_screen(int _img_w, int _img_h, int _x, int _y, int _w, int _h,
-                   std::string *_error) {
+/// True when `_region` is wholly inside a picture of `_img_w` x `_img_h`,
+/// filling `*_error` with the reason when it is not. The size is a parameter
+/// because the region may come from an older, differently sized screenshot.
+/// Refuses rather than clamps, as `in_screen` does.
+bool region_on_screen(int _img_w, int _img_h, const llm::region &_region,
+                      std::string *_error) {
     if (_img_w <= 0 || _img_h <= 0) {
         *_error = "no screenshot yet; call screenshot first";
         return false;
     }
-    if (_w <= 0 || _h <= 0 || _x < 0 || _y < 0 || _x + _w > _img_w ||
-        _y + _h > _img_h) {
-        *_error = "box (" + std::to_string(_x) + "," + std::to_string(_y) +
-                  " " + std::to_string(_w) + "x" + std::to_string(_h) +
+    if (const llm::box *b = std::get_if<llm::box>(&_region)) {
+        if (b->w <= 0 || b->h <= 0 || b->x < 0 || b->y < 0 ||
+            b->x + b->w > _img_w || b->y + b->h > _img_h) {
+            *_error = "box (" + std::to_string(b->x) + "," +
+                      std::to_string(b->y) + " " + std::to_string(b->w) + "x" +
+                      std::to_string(b->h) + ") out of range (screen " +
+                      std::to_string(_img_w) + "x" + std::to_string(_img_h) +
+                      ")";
+            return false;
+        }
+        return true;
+    }
+    // The disc, not just its centre: every pixel it covers has to be in frame,
+    // and the rightmost is cx+r (the bounding box is 2r+1 wide), so the test is
+    // strict on that side.
+    const llm::circle &c = std::get<llm::circle>(_region);
+    if (c.r < 1 || c.cx - c.r < 0 || c.cy - c.r < 0 || c.cx + c.r >= _img_w ||
+        c.cy + c.r >= _img_h) {
+        *_error = "circle (" + std::to_string(c.cx) + "," +
+                  std::to_string(c.cy) + " r" + std::to_string(c.r) +
                   ") out of range (screen " + std::to_string(_img_w) + "x" +
                   std::to_string(_img_h) + ")";
         return false;
@@ -173,21 +190,30 @@ bool box_on_screen(int _img_w, int _img_h, int _x, int _y, int _w, int _h,
     return true;
 }
 
-/// What to append to a refusal when the human redrew the box. Empty when they
+/// One region as the `region` argument, so a sentence read back to the model
+/// can be passed straight in again: a box `{x,y,w,h}` or a circle `{cx,cy,r}`.
+std::string region_arg_json(const llm::region &_region) {
+    if (const llm::box *b = std::get_if<llm::box>(&_region)) {
+        return "\"region\":{\"x\":" + std::to_string(b->x) + ",\"y\":" +
+               std::to_string(b->y) + ",\"w\":" + std::to_string(b->w) +
+               ",\"h\":" + std::to_string(b->h) + "}";
+    }
+    const llm::circle &c = std::get<llm::circle>(_region);
+    return "\"region\":{\"cx\":" + std::to_string(c.cx) + ",\"cy\":" +
+           std::to_string(c.cy) + ",\"r\":" + std::to_string(c.r) + "}";
+}
+
+/// What to append to a refusal when the human redrew the region; empty when they
 /// did not, so the caller keeps its own wording byte for byte. `_shot` names the
-/// frame the box was drawn on: `save_template` cuts from the number it is given,
-/// so a correction measured on an older frame must carry it back.
-std::string corrected_box_note(const llm::approval_decision &_d,
-                               const char *_tool, int _shot) {
-    if (!_d.box) {
+/// frame they drew on, which `save_template` needs when it is not the current one.
+std::string corrected_region_note(const llm::approval_decision &_d,
+                                  const char *_tool, int _shot) {
+    if (!_d.redrawn) {
         return {};
     }
     return "; call " + std::string(_tool) +
-           " again with this corrected box {\"shot\":" +
-           std::to_string(_shot) + ",\"x\":" +
-           std::to_string(_d.box->x) + ",\"y\":" + std::to_string(_d.box->y) +
-           ",\"w\":" + std::to_string(_d.box->w) +
-           ",\"h\":" + std::to_string(_d.box->h) + "}";
+           " again with this corrected region {\"shot\":" +
+           std::to_string(_shot) + "," + region_arg_json(*_d.redrawn) + "}";
 }
 
 /// The names, comma-separated, for a sentence read back to the model.
@@ -229,6 +255,12 @@ std::string joined(const std::vector<std::string> &_items, const char *_none) {
         out += item;
     }
     return out.empty() ? _none : out;
+}
+
+/// The graphs in the library, for an error message that offers the model
+/// somewhere else to look: "none yet" when the library has no graph at all.
+std::string existing_graphs() {
+    return joined(ccat_lang::graph_names(g_ctx.script_dir), "none yet");
 }
 
 /// `"ok"` -> `"ok.png"`; unchanged when it already ends in `.png`.
@@ -301,18 +333,21 @@ check_new_bundle(const std::string &_name, const std::string &_source) {
     return prog;
 }
 
-/// Validates a template target and hands back the picture to cut. The box is
+/// Validates a template target and hands back the picture to cut. The region is
 /// checked against that picture's own size, not the screen's, because the
 /// picture may be an older frame of a different size.
 ///
 /// `*_frame_png` receives that same frame's raw PNG -- the approval bubble
 /// draws on the frame being cut, not on the current screen, so seeing it is how
-/// a human notices a box aimed at the wrong one. Handed back here so the caller
-/// does not have to look the frame up a second time and hope it is still there.
+/// a human notices a region aimed at the wrong one. Handed back here so the
+/// caller does not have to look the frame up a second time and hope it is still
+/// there.
 cv::Mat check_template_target(const std::string &_bundle,
-                              const std::string &_name, const rect &_box,
+                              const std::string &_name,
+                              const llm::region &_region,
                               const std::optional<int> &_shot,
-                              std::string *_file, std::string *_frame_png) {
+                              std::string *_file, std::string *_frame_png,
+                              bool _require_bundle = true) {
     if (!ccat_lang::safe_leaf_name(_bundle)) {
         throw js::bind_error("bundle \"" + _bundle +
                              "\" is not a plain file name");
@@ -321,7 +356,8 @@ cv::Mat check_template_target(const std::string &_bundle,
         throw js::bind_error("name \"" + _name + "\" is not a plain file name");
     }
     std::error_code ec;
-    if (!std::filesystem::is_regular_file(
+    if (_require_bundle &&
+        !std::filesystem::is_regular_file(
             ccat_lang::bundle_main(g_ctx.script_dir, _bundle), ec)) {
         throw js::bind_error(
             "unknown script bundle \"" + _bundle +
@@ -341,8 +377,7 @@ cv::Mat check_template_target(const std::string &_bundle,
         throw js::bind_error(
             "the stored screenshot is not a decodable picture");
     }
-    if (!box_on_screen(img.cols, img.rows, _box.x, _box.y, _box.w, _box.h,
-                       &error)) {
+    if (!region_on_screen(img.cols, img.rows, _region, &error)) {
         throw js::bind_error(error);
     }
     *_frame_png = frame->png;
@@ -369,8 +404,8 @@ cv::Mat current_screen_mat() {
 ///
 /// An empty `_frame` is not an error here: it means the snap cannot run, and the
 /// model's own box is returned untouched.
-rect snap_model_box(const cv::Mat &_frame, const rect &_box,
-                    const box_snap_config &_cfg) {
+llm::box snap_model_box(const cv::Mat &_frame, const llm::box &_box,
+                        const box_snap_config &_cfg) {
     box_snap_options opts;
     opts.strategy = _cfg.strategy;
     const box_snap_result snapped =
@@ -378,15 +413,93 @@ rect snap_model_box(const cv::Mat &_frame, const rect &_box,
     if (!snapped.moved) {
         return _box;
     }
-    return rect{snapped.box.x, snapped.box.y, snapped.box.width,
-                snapped.box.height};
+    return llm::box{snapped.box.x, snapped.box.y, snapped.box.width,
+                    snapped.box.height};
 }
 
-/// The four ints, all of them. The codebase spells this comparison out inline
-/// (twice already); it earns a name here because it guards the "never snap a
-/// human's box" rule.
-bool same_box(const rect &_a, const rect &_b) {
-    return _a.x == _b.x && _a.y == _b.y && _a.w == _b.w && _a.h == _b.h;
+/// Whether two regions are the same shape in the same place. It earns a name
+/// because it guards the "never snap a human's region" rule.
+bool same_region(const llm::region &_a, const llm::region &_b) {
+    return _a == _b;
+}
+
+/// The region's bounding box, in screenshot pixels: what the snap works in, and
+/// what a disc's crop, label and draw all need.
+llm::box region_bounds(const llm::region &_region) {
+    if (const llm::box *b = std::get_if<llm::box>(&_region)) {
+        return *b;
+    }
+    const llm::circle &c = std::get<llm::circle>(_region);
+    return llm::box{c.cx - c.r, c.cy - c.r, 2 * c.r + 1, 2 * c.r + 1};
+}
+
+/// The point a region acts at: a box acts at its centre, a disc at its own.
+std::pair<int, int> region_center(const llm::region &_region) {
+    if (const llm::box *b = std::get_if<llm::box>(&_region)) {
+        return {b->x + b->w / 2, b->y + b->h / 2};
+    }
+    const llm::circle &c = std::get<llm::circle>(_region);
+    return {c.cx, c.cy};
+}
+
+/// A region's size and place, for a sentence read by a human: "40x30 at 10,20"
+/// or "r=20 at 100,200".
+std::string region_phrase(const llm::region &_region) {
+    if (const llm::box *b = std::get_if<llm::box>(&_region)) {
+        return std::to_string(b->w) + "x" + std::to_string(b->h) + " at " +
+               std::to_string(b->x) + "," + std::to_string(b->y);
+    }
+    const llm::circle &c = std::get<llm::circle>(_region);
+    return "r=" + std::to_string(c.r) + " at " + std::to_string(c.cx) + "," +
+           std::to_string(c.cy);
+}
+
+/// The region's pixels, as a template: BGR for a box, BGRA for a disc with the
+/// alpha carrying the shape. That alpha makes the template self-describing --
+/// the matcher reads the same channel back for its mask, so nothing on disk has
+/// to remember which shape was cut.
+cv::Mat crop_region(const cv::Mat &_img, const llm::region &_region) {
+    const llm::box b = region_bounds(_region);
+    if (std::holds_alternative<llm::box>(_region)) {
+        return _img(cv::Rect(b.x, b.y, b.w, b.h)).clone();
+    }
+    const llm::circle &c = std::get<llm::circle>(_region);
+    cv::Mat out;
+    cv::cvtColor(_img(cv::Rect(b.x, b.y, b.w, b.h)), out, cv::COLOR_BGR2BGRA);
+    for (int y = 0; y < out.rows; ++y) {
+        auto *row = out.ptr<cv::Vec4b>(y);
+        for (int x = 0; x < out.cols; ++x) {
+            const int dx = b.x + x - c.cx;
+            const int dy = b.y + y - c.cy;
+            row[x][3] = dx * dx + dy * dy <= c.r * c.r ? 255 : 0;
+        }
+    }
+    return out;
+}
+
+/// A template of one flat colour has no variance, and normalized correlation is
+/// undefined without it: OpenCV scores such a template 1.0 everywhere, so it
+/// would match every screen and its anchor would be useless. Refused at the
+/// cut, where the model can still aim somewhere else.
+///
+/// `_what` names the file for the message, since both cut paths call this.
+void require_textured(const cv::Mat &_crop, const std::string &_what) {
+    cv::Scalar mean;
+    cv::Scalar sd;
+    cv::meanStdDev(_crop, mean, sd);
+    // One channel varying is enough -- a solid red control leaves green and
+    // blue flat -- and a disc's alpha is its shape, not its content.
+    double most = 0;
+    for (int c = 0; c < std::min(3, _crop.channels()); ++c) {
+        most = std::max(most, sd[c]);
+    }
+    if (most >= 1.0) {
+        return;
+    }
+    throw js::bind_error(
+        _what + " is a patch of one flat colour, so it would match every "
+                "screen; cut a control with an edge in it -- a button, a label, "
+                "a border");
 }
 
 /// Appended to a tool's success sentence when the snap moved the box, so the
@@ -394,9 +507,9 @@ bool same_box(const rect &_a, const rect &_b) {
 /// them. Empty when the box came through unchanged, which keeps that wording
 /// byte for byte what it was.
 ///
-/// Shorter than `corrected_box_note` on purpose: that one asks the model to call
-/// again with the human's box, while this call has already happened.
-std::string snapped_box_note(const rect &_from, const rect &_to) {
+/// Shorter than `corrected_region_note` on purpose: that one asks the model to
+/// call again with the human's region, while this call has already happened.
+std::string snapped_box_note(const llm::box &_from, const llm::box &_to) {
     if (_from.x == _to.x && _from.y == _to.y && _from.w == _to.w &&
         _from.h == _to.h) {
         return {};
@@ -419,8 +532,11 @@ std::string shot_phrase(const std::optional<int> &_shot) {
 /// approval request exists.
 struct pending_cut {
     std::string file;
-    int shot;
-    rect box;
+    /// Resolved to a frame number: an entry that omitted `shot` cuts from the
+    /// latest frame, and the bubble compares cuts by number to decide which
+    /// regions belong on the one picture it shows.
+    int shot = 0;
+    llm::region region;
     cv::Mat crop;
     /// The frame being cut, raw, for the approval bubble.
     std::string frame_png;
@@ -431,40 +547,46 @@ struct pending_cut {
 /// when they stand as a condition -- `if (tap("x.png"))` really runs, so its
 /// template has to be in the bundle.
 ///
-/// Deliberately not `has(...)`: "that template is not here" is the `false` a
-/// `has` exists to report, not a failure, so a typo in it is the author's to
-/// find in the else branch. Not `run()`'s target either, which is another .ccat
-/// resolved at run time.
+/// Not `has(...)` unless `_with_has`: "that template is not here" is the
+/// `false` a `has` exists to report, not a failure, so a typo in it is the
+/// author's to find in the else branch. An anchor is the exception -- a `has`
+/// it can never match makes the anchor never recognise its screen. Not
+/// `run()`'s target either, which is another .ccat resolved at run time.
 ///
 /// ponytail: a statement type carrying a template must be added here; the
 /// language only grows in the parser, so nothing can appear unseen.
 void collect_required_templates(const ccat_lang::Stmt &_s,
-                                std::vector<std::string> *_out) {
+                                std::vector<std::string> *_out,
+                                bool _with_has = false) {
     using namespace ccat_lang;
     if (const auto *b = dynamic_cast<const BlockStmt *>(&_s)) {
         for (const auto &child : b->body) {
-            collect_required_templates(*child, _out);
+            collect_required_templates(*child, _out, _with_has);
         }
     } else if (const auto *i = dynamic_cast<const IfStmt *>(&_s)) {
         if (i->action) {
-            collect_required_templates(*i->action, _out);
+            collect_required_templates(*i->action, _out, _with_has);
         }
         if (i->then_branch) {
-            collect_required_templates(*i->then_branch, _out);
+            collect_required_templates(*i->then_branch, _out, _with_has);
         }
         if (i->else_branch) {
-            collect_required_templates(*i->else_branch, _out);
+            collect_required_templates(*i->else_branch, _out, _with_has);
         }
     } else if (const auto *d = dynamic_cast<const DoWhileStmt *>(&_s)) {
         if (d->condition_action) {
-            collect_required_templates(*d->condition_action, _out);
+            collect_required_templates(*d->condition_action, _out, _with_has);
         }
         if (d->body) {
-            collect_required_templates(*d->body, _out);
+            collect_required_templates(*d->body, _out, _with_has);
         }
     } else if (const auto *l = dynamic_cast<const LoopStmt *>(&_s)) {
         if (l->body) {
-            collect_required_templates(*l->body, _out);
+            collect_required_templates(*l->body, _out, _with_has);
+        }
+    } else if (const auto *h = dynamic_cast<const HasStmt *>(&_s)) {
+        if (_with_has) {
+            _out->push_back(h->image_path);
         }
     } else if (const auto *t = dynamic_cast<const TapStmt *>(&_s)) {
         _out->push_back(t->image_path);
@@ -475,6 +597,43 @@ void collect_required_templates(const ccat_lang::Stmt &_s,
         _out->push_back(s->to_image_path);
     } else if (const auto *w = dynamic_cast<const WaitUntilStmt *>(&_s)) {
         _out->push_back(w->image_path);
+    }
+}
+
+/// A template path that is not a file name in this bundle. `run("../other/...")`
+/// is a different statement and is not collected here.
+bool template_leaves_bundle(const std::string &_path) {
+    return _path.find('/') != std::string::npos ||
+           _path.find("..") != std::string::npos;
+}
+
+/// Refuses a script whose PNG paths reach outside its own bundle. `has` counts
+/// too: borrowing another bundle's template is the same coupling as tapping it.
+void require_local_templates(const ccat_lang::Program &_prog) {
+    std::vector<std::string> paths;
+    for (const auto &stmt : _prog.stmts) {
+        collect_required_templates(*stmt, &paths, true);
+    }
+    std::vector<std::string> bad;
+    for (const std::string &path : paths) {
+        if (!template_leaves_bundle(path) ||
+            std::find(bad.begin(), bad.end(), path) != bad.end()) {
+            continue;
+        }
+        bad.push_back(path);
+    }
+    if (!bad.empty()) {
+        std::string listed;
+        for (const std::string &path : bad) {
+            if (!listed.empty()) {
+                listed += ", ";
+            }
+            listed += "\"" + path + "\"";
+        }
+        throw js::bind_error(
+            "template " + listed +
+            " is outside this bundle; cut it into this bundle and use the "
+            "file name");
     }
 }
 
@@ -512,6 +671,59 @@ void draw_label(cv::Mat &_img, const std::string &_text, int _x, int _y,
 } // namespace
 
 namespace tools {
+
+/// A rectangle on a screenshot, in screenshot pixels. Reflected, so its member
+/// names are the JSON keys the model writes. No default member initializers: an
+/// absent key must be an error rather than a silent zero, and defaulted shapes
+/// would decode into each other, making `shape` below ambiguous.
+struct box {
+    [[= js::desc{.text =
+                     js::str("Left edge X, in screenshot pixels.")}]] int x;
+    [[= js::desc{.text =
+                     js::str("Top edge Y, in screenshot pixels.")}]] int y;
+    [[= js::desc{.text = js::str("Width in pixels.")}]] int w;
+    [[= js::desc{.text = js::str("Height in pixels.")}]] int h;
+};
+
+/// A filled disc: centre (cx,cy) and radius r, in screenshot pixels. Covers the
+/// pixels where `dx*dx + dy*dy <= r*r`.
+struct circle {
+    [[= js::desc{.text =
+                     js::str("Centre X, in screenshot pixels.")}]] int cx;
+    [[= js::desc{.text =
+                     js::str("Centre Y, in screenshot pixels.")}]] int cy;
+    [[= js::desc{.text =
+                     js::str("Radius in pixels, at least 1.")}]] int r;
+};
+
+/// Either shape, told apart by its fields (`{x,y,w,h}` or `{cx,cy,r}`), so a
+/// tool that takes a region is one tool. No tag for the model to name: each
+/// alternative carries its own fields and none has a default.
+using shape = std::variant<box, circle>;
+
+/// The model's spelling of a shape as the shared one. The only place the two
+/// sets of types meet: everything below `region_on_screen` speaks `llm::region`,
+/// and `tools::box` / `tools::circle` must not travel past this file.
+llm::region to_region(const shape &_shape) {
+    if (const box *b = std::get_if<box>(&_shape)) {
+        return llm::box{b->x, b->y, b->w, b->h};
+    }
+    const circle &c = std::get<circle>(_shape);
+    return llm::circle{c.cx, c.cy, c.r};
+}
+
+/// The current screen decoded, or a `bind_error` when it cannot be. Every tool
+/// that cuts something out of it works on this one picture.
+cv::Mat decode_current_screen() {
+    const cv::Mat buf(1, static_cast<int>(g_ctx.screen.png.size()), CV_8UC1,
+                      const_cast<char *>(g_ctx.screen.png.data()));
+    cv::Mat bgr = cv::imdecode(buf, cv::IMREAD_COLOR);
+    if (bgr.empty()) {
+        // Only reachable if a stored PNG got corrupted, which no tool can do.
+        throw js::bind_error("the stored screenshot is not a decodable picture");
+    }
+    return bgr;
+}
 
 /// Swipe duration used when the model omits it. Declared as an optional
 /// parameter rather than a C++ default argument: reflection can detect a
@@ -625,31 +837,30 @@ CPP_REFLECT_TOOL(view_template)
 
 [[= js::image_result]][[= js::doc{
     .text = js::str(
-        "Shows one box of the last screenshot at its own size, with nothing "
-        "drawn on it. Use it with the box a failed statement reported, to see "
-        "what is there now at the same scale as the template it was looking "
-        "for: the whole-screen view is scaled down, so this is the only way to "
-        "compare the two pixel for pixel. It does not change the current "
-        "screen.")}]]
+        "Shows one region of a screenshot at its own size, with nothing drawn "
+        "on it. A box is {x,y,w,h}; a circle is {cx,cy,r}, and the pixels "
+        "outside that disc are transparent, exactly as save_template writes "
+        "them. Use it with the region a failed statement reported, to see what "
+        "is there now at the same scale as the template: the whole-screen view "
+        "is scaled down, so this is the only way to compare the two pixel for "
+        "pixel. It does not change the current screen.")}]]
     [[= js::param_docs(
-        js::str("Left edge X of the box, in screenshot pixels."),
-        js::str("Top edge Y of the box, in screenshot pixels."),
-        js::str("Width of the box in pixels."),
-        js::str("Height of the box in pixels."))]] std::string
-    view_crop(int x, int y, int w, int h) {
+        js::str("The region to cut out: a box {x,y,w,h} or a circle {cx,cy,r}."),
+        js::str("Which screenshot to look at: the number its caption showed. "
+                "Omit for the current screen; looking at another frame does "
+                "not make it current."))]] std::string
+    view_crop(shape region, std::optional<int> shot) {
+    cv::Mat bgr;
     std::string error;
-    if (!box_on_screen(g_ctx.screen.w, g_ctx.screen.h, x, y, w, h, &error)) {
+    if (!frame_mat(shot, &bgr, &error)) {
         throw js::bind_error(error);
     }
-    const cv::Mat buf(1, static_cast<int>(g_ctx.screen.png.size()), CV_8UC1,
-                      const_cast<char *>(g_ctx.screen.png.data()));
-    const cv::Mat bgr = cv::imdecode(buf, cv::IMREAD_COLOR);
-    if (bgr.empty()) {
-        // Only reachable if a stored PNG got corrupted, which no tool can do.
-        throw js::bind_error("the stored screenshot is not a decodable picture");
+    const llm::region r = to_region(region);
+    if (!region_on_screen(bgr.cols, bgr.rows, r, &error)) {
+        throw js::bind_error(error);
     }
     std::vector<unsigned char> png;
-    if (!cv::imencode(".png", bgr(cv::Rect(x, y, w, h)), png)) {
+    if (!cv::imencode(".png", crop_region(bgr, r), png)) {
         throw js::bind_error("png encode failed");
     }
     return std::string(png.begin(), png.end());
@@ -658,31 +869,36 @@ CPP_REFLECT_TOOL(view_crop)
 
 [[= js::image_result]][[= js::doc{
     .text = js::str(
-        "Draws a box on the last screenshot and returns the marked image, "
-        "so the user can see where you think something is. Nothing is "
-        "tapped and nothing needs approval; the box lives in the picture.")}]][
-    [= js::param_docs(
-        js::str(
-            "Short label for what the box marks, e.g. \"the login button\"."),
-        js::str("Left edge X of the box, in screenshot pixels."),
-        js::str("Top edge Y of the box, in screenshot pixels."),
-        js::str("Width of the box in pixels."),
-        js::str("Height of the box in pixels."))]] std::string
-    mark(std::string label, int x, int y, int w, int h) {
+        "Draws a region on a screenshot and returns the marked image. Nothing "
+        "is tapped and nothing needs approval; the region lives in the "
+        "picture. A box is {x,y,w,h} and a circle is {cx,cy,r}.")}]]
+    [[= js::param_docs(
+        js::str("Short label for what the region marks, e.g. \"the login button\"."),
+        js::str("The region to mark: a box {x,y,w,h} or a circle {cx,cy,r}."),
+        js::str("Which screenshot to look at: the number its caption showed. "
+                "Omit for the current screen; looking at another frame does "
+                "not make it current."))]] std::string
+    mark(std::string label, shape region, std::optional<int> shot) {
+    cv::Mat bgr;
     std::string error;
-    if (!box_on_screen(g_ctx.screen.w, g_ctx.screen.h, x, y, w, h, &error)) {
+    if (!frame_mat(shot, &bgr, &error)) {
         throw js::bind_error(error);
     }
-    const cv::Mat buf(1, static_cast<int>(g_ctx.screen.png.size()), CV_8UC1,
-                      const_cast<char *>(g_ctx.screen.png.data()));
-    cv::Mat bgr = cv::imdecode(buf, cv::IMREAD_COLOR);
+    const llm::region r = to_region(region);
+    if (!region_on_screen(bgr.cols, bgr.rows, r, &error)) {
+        throw js::bind_error(error);
+    }
     const cv::Scalar color(60, 200, 255); // BGR, near-orange against most UIs
-    cv::rectangle(bgr, cv::Rect(x, y, w, h), color, 4);
+    const llm::box b = region_bounds(r);
+    if (const llm::circle *c = std::get_if<llm::circle>(&r)) {
+        cv::circle(bgr, cv::Point(c->cx, c->cy), c->r, color, 4);
+    } else {
+        cv::rectangle(bgr, cv::Rect(b.x, b.y, b.w, b.h), color, 4);
+    }
     if (!label.empty()) {
-        // Above the box, or below it when the box hugs the top edge.
         const int ty =
-            y >= k_label_font_h + 4 ? y - k_label_font_h - 2 : y + h + 4;
-        draw_label(bgr, label, x, ty, color);
+            b.y >= k_label_font_h + 4 ? b.y - k_label_font_h - 2 : b.y + b.h + 4;
+        draw_label(bgr, label, b.x, ty, color);
     }
     std::vector<unsigned char> png;
     if (!cv::imencode(".png", bgr, png)) {
@@ -692,76 +908,82 @@ CPP_REFLECT_TOOL(view_crop)
 }
 CPP_REFLECT_TOOL(mark)
 
-[[= js::doc{.text = js::str(
-                "Taps the element at this box, in screenshot pixels. While "
-                "human approval is on, the box is shown to the user and "
-                "nothing is tapped unless they approve it. The tap lands at "
-                "the box centre. Nothing else needs a prior call.")}]]
-    [[= js::param_docs(
-        js::str("Left edge X of the element box, in screenshot pixels."),
-        js::str("Top edge Y of the element box, in screenshot pixels."),
-        js::str("Width of the box in pixels."),
-        js::str("Height of the box in pixels."))]] std::string
-        tap(int x, int y, int w, int h) {
+/// The tap `tap` runs, for either shape.
+std::string tap_region(const llm::region &_given) {
     std::string error;
-    if (!box_on_screen(g_ctx.screen.w, g_ctx.screen.h, x, y, w, h, &error)) {
+    if (!region_on_screen(g_ctx.screen.w, g_ctx.screen.h, _given, &error)) {
         throw js::bind_error(error);
     }
-    // Snap first, then use that box everywhere below: the human's preview, the
-    // tap point and the sentence sent back all describe one box, so a person
-    // approving what they see is approving what happens.
-    const rect given{x, y, w, h};
-    const box_snap_config snap =
-        g_ctx.box_snap ? g_ctx.box_snap() : box_snap_config{};
-    // A box the human drew is the answer, not a guess: the CV must not move it.
-    const bool human = g_human_box && same_box(*g_human_box, given);
-    const rect use = (snap.strategy != box_snap_strategy::none && !human)
-                         ? snap_model_box(current_screen_mat(), given, snap)
-                         : given;
+    // Snap first, then use that region everywhere below: the preview, the tap
+    // point and the sentence back all describe one region, so approving what is
+    // seen approves what happens. A disc is skipped -- the snap reads an
+    // element's edges, which a boundary the human drew has no part in.
+    llm::region use = _given;
+    std::string snap_note;
+    if (const llm::box *given = std::get_if<llm::box>(&_given)) {
+        const box_snap_config snap =
+            g_ctx.box_snap ? g_ctx.box_snap() : box_snap_config{};
+        // A region the human drew is the answer, not a guess: the CV must not
+        // move it.
+        const bool human = g_human_region && same_region(*g_human_region, _given);
+        if (snap.strategy != box_snap_strategy::none && !human) {
+            use = snap_model_box(current_screen_mat(), *given, snap);
+            snap_note =
+                snapped_box_note(*given, std::get<llm::box>(use));
+        }
+    }
     if (needs_approval("tap")) {
         if (!g_ctx.request_approval) {
             throw js::bind_error("no human available to approve the tap");
         }
         llm::approval_request req;
         req.tool = "tap";
-        req.summary = "Tap the highlighted element (" +
-                      std::to_string(use.w) + "x" + std::to_string(use.h) +
-                      " at " + std::to_string(use.x) + "," +
-                      std::to_string(use.y) + ")";
+        req.summary =
+            "Tap the highlighted element (" + region_phrase(use) + ")";
         req.highlight.push_back(use);
         // Only when they differ: an identical second frame would just draw over
         // the first.
-        if (use.x != given.x || use.y != given.y || use.w != given.w ||
-            use.h != given.h) {
-            req.given_box = given;
+        if (use != _given) {
+            req.given_region = _given;
         }
         req.screen_png = g_ctx.screen.png;
-        req.box_editable = true;
+        req.editable = true;
         const llm::approval_decision decision = g_ctx.request_approval(req);
         if (!decision.approved) {
-            // Empty guidance and no redrawn box keep this string byte-for-byte
-            // the same as the bare refusal.
+            // Empty guidance and no redrawn region keep this string
+            // byte-for-byte the same as the bare refusal.
             std::string msg =
                 decision.guidance.empty()
                     ? std::string("user rejected the tap")
                     : "user rejected the tap: " + decision.guidance;
-            msg += corrected_box_note(decision, "tap", g_next_shot);
-            // The call relaying this box is the human's, not the model's.
-            g_human_box = decision.box;
+            msg += corrected_region_note(decision, "tap", g_next_shot);
+            // The call relaying this region is the human's, not the model's.
+            g_human_region = decision.redrawn;
             throw js::bind_error(msg);
         }
     }
-    // The tap lands at the box centre: the model marks the element, this picks
-    // the point. It used to send the centre as a separate tap() argument every
-    // time.
-    const int cx = use.x + use.w / 2;
-    const int cy = use.y + use.h / 2;
+    // The tap lands at the region's centre: the model marks the element, this
+    // picks the point. It used to send the centre as a separate tap() argument
+    // every time.
+    const auto [cx, cy] = region_center(use);
     if (!require_adb().tap(cx, cy)) {
         throw js::bind_error(std::string("adb tap failed") +
                              std::string(k_device_hint));
     }
     return "tapped " + std::to_string(cx) + "," + std::to_string(cy) +
-           snapped_box_note(given, use);
+           snap_note;
+}
+
+[[= js::doc{.text = js::str(
+                "Taps the element at this region, in screenshot pixels. A box "
+                "is {x,y,w,h} and a circle is {cx,cy,r}; the tap lands at its "
+                "centre. While human approval is on, the region is shown to "
+                "the user and nothing is tapped unless they approve it. "
+                "Nothing else needs a prior call.")}]]
+    [[= js::param_docs(js::str("The region to tap: a box {x,y,w,h} or a circle "
+                               "{cx,cy,r}."))]] std::string
+    tap(shape region) {
+    return tap_region(to_region(region));
 }
 CPP_REFLECT_TOOL(tap)
 
@@ -882,6 +1104,22 @@ CPP_REFLECT_TOOL(start_emulator)
 }
 CPP_REFLECT_TOOL(run_script)
 
+/// What the graph `_graph` looks like after a write into it, for the reply:
+/// a broken graph is refused by `goto`, so the author hears about it now.
+std::string graph_check(const std::string &_graph) {
+    const ccat_lang::scanned_graph scanned =
+        ccat_lang::scan_graph(g_ctx.script_dir, _graph);
+    if (scanned.problems.empty()) {
+        return "graph " + _graph + ": no problems";
+    }
+    std::string text = "graph " + _graph + " problems (goto refuses it until "
+                                           "they are fixed):";
+    for (const std::string &p : scanned.problems) {
+        text += "\n  - " + p;
+    }
+    return text;
+}
+
 [[= js::doc{
     .text = js::str(
         "Saves a .ccat script as a reusable bundle under the LLM script root: "
@@ -899,6 +1137,12 @@ CPP_REFLECT_TOOL(run_script)
         save_script(std::string name, std::string source) {
     const std::unique_ptr<ccat_lang::Program> prog =
         check_new_bundle(name, source);
+    if (const std::string block =
+            ccat_lang::script_graph_block(g_ctx.script_dir, name, *prog);
+        !block.empty()) {
+        throw js::bind_error(block);
+    }
+    require_local_templates(*prog);
     if (needs_approval("save_script")) {
         if (!g_ctx.request_approval) {
             throw js::bind_error(
@@ -931,56 +1175,48 @@ CPP_REFLECT_TOOL(run_script)
                              g_ctx.script_dir.string() +
                              " exist and allow writes?)");
     }
+    const ccat_lang::bundle_tag tag =
+        ccat_lang::bundle_tags(g_ctx.script_dir, name);
     return "saved \"" + name + "/main.ccat\" (" +
            std::to_string(prog->stmts.size()) + " statements, " +
            std::to_string(source.size()) +
            " chars); put its templates in the same bundle with save_template, "
            "and "
            "run it from a script with run(\"" +
-           name + "/main.ccat\")";
+           name + "/main.ccat\")" +
+           (tag.edge_of.empty() ? "" : "\n" + graph_check(tag.edge_of));
 }
 CPP_REFLECT_TOOL(save_script)
 
-[[= js::doc{
-    .text = js::str(
-        "Cuts a template PNG, out of one of the screenshots you have taken, "
-        "into "
-        "an existing script bundle, so that bundle's script can use it with "
-        "tap(\"name.png\"). While human approval is on, the box is shown to "
-        "the user and "
-        "nothing is cut unless they approve it. It cuts from the picture you "
-        "looked at, so it can only match as well as that picture does: "
-        "screenshot right "
-        "before you cut, and crop tight around the part that stays put.")}]]
-    [[= js::param_docs(
-        js::str("Bundle to put the template in; it must already exist (see "
-                "save_script)."),
-        js::str(
-            "Template name, a leaf name; \".png\" is appended when missing."),
-        js::str("Which screenshot to cut from: the number its caption showed. "
-                "Omit for the most "
-                "recent one."),
-        js::str("Left edge X of the crop box, in that screenshot's pixels."),
-        js::str("Top edge Y of the crop box, in that screenshot's pixels."),
-        js::str("Width of the crop in pixels."),
-        js::str("Height of the crop in pixels."))]] std::string
-        save_template(std::string bundle, std::string name,
-                      std::optional<int> shot, int x, int y, int w, int h) {
-    const rect box{x, y, w, h};
+/// The cut `save_template` writes, for either shape.
+std::string save_template_region(std::string bundle, std::string name,
+                                 const std::optional<int> &shot,
+                                 const llm::region &_given) {
     std::string file;
     std::string frame_png;
-    const cv::Mat img =
-        check_template_target(bundle, name, box, shot, &file, &frame_png);
-    // Given box first, so a bad one is refused on its own terms; then the snap,
-    // against the very frame this cut comes from. Everything below cuts, previews
-    // and reports `use`, so what the human approves is what lands on disk.
-    const box_snap_config snap =
-        g_ctx.box_snap ? g_ctx.box_snap() : box_snap_config{};
-    // A box the human drew is the answer, not a guess: the CV must not move it.
-    const bool human = g_human_box && same_box(*g_human_box, box);
-    const rect use = (snap.strategy != box_snap_strategy::none && !human)
-                         ? snap_model_box(img, box, snap)
-                         : box;
+    const cv::Mat img = check_template_target(bundle, name, _given, shot, &file,
+                                              &frame_png);
+    // Given region first, so a bad one is refused on its own terms; then the
+    // snap, against the very frame this cut comes from. Everything below cuts,
+    // previews and reports `use`. A disc is skipped -- the snap reads an
+    // element's edges, which a human's boundary has no part in.
+    llm::region use = _given;
+    std::string snap_note;
+    if (const llm::box *given = std::get_if<llm::box>(&_given)) {
+        const box_snap_config snap =
+            g_ctx.box_snap ? g_ctx.box_snap() : box_snap_config{};
+        // A region the human drew is the answer, not a guess: the CV must not
+        // move it.
+        const bool human = g_human_region && same_region(*g_human_region, _given);
+        if (snap.strategy != box_snap_strategy::none && !human) {
+            use = snap_model_box(img, *given, snap);
+            snap_note = snapped_box_note(*given, std::get<llm::box>(use));
+        }
+    }
+    // Before the approval gate: a flat patch is refused on the model's own
+    // numbers, and bothering the human to reject it would be a wasted round.
+    const cv::Mat crop = crop_region(img, use);
+    require_textured(crop, "template \"" + bundle + "/" + file + "\"");
     if (needs_approval("save_template")) {
         if (!g_ctx.request_approval) {
             throw js::bind_error(
@@ -989,29 +1225,26 @@ CPP_REFLECT_TOOL(save_script)
         llm::approval_request req;
         req.tool = "save_template";
         req.summary = "Save template \"" + bundle + "/" + file + "\" from " +
-                      shot_phrase(shot) + " at (" + std::to_string(use.x) + "," +
-                      std::to_string(use.y) + ") " + std::to_string(use.w) +
-                      "x" + std::to_string(use.h);
+                      shot_phrase(shot) + " at " + region_phrase(use);
         req.highlight.push_back(use);
-        if (use.x != box.x || use.y != box.y || use.w != box.w ||
-            use.h != box.h) {
-            req.given_box = box;
+        if (use != _given) {
+            req.given_region = _given;
         }
         // The frame the model named, not the current screen: that is what is
-        // being cut, and seeing it is how the human notices a box aimed at the
-        // wrong one.
+        // being cut, and seeing it is how the human notices a region aimed at
+        // the wrong one.
         req.screen_png = frame_png;
-        req.box_editable = true;
+        req.editable = true;
         const llm::approval_decision decision = g_ctx.request_approval(req);
         if (!decision.approved) {
             std::string msg =
                 decision.guidance.empty()
                     ? std::string("user rejected saving the template")
                     : "user rejected saving the template: " + decision.guidance;
-            msg += corrected_box_note(decision, "save_template",
-                                      shot.value_or(g_next_shot));
-            // The call relaying this box is the human's, not the model's.
-            g_human_box = decision.box;
+            msg += corrected_region_note(decision, "save_template",
+                                         shot.value_or(g_next_shot));
+            // The call relaying this region is the human's, not the model's.
+            g_human_region = decision.redrawn;
             throw js::bind_error(msg);
         }
     }
@@ -1023,8 +1256,7 @@ CPP_REFLECT_TOOL(save_script)
         // times before it is tight, and refusing would push the model to invent
         // new names and rewrite the script, costing another approval of the
         // whole script.
-        if (!cv::imwrite(path.string(),
-                         img(cv::Rect(use.x, use.y, use.w, use.h)))) {
+        if (!cv::imwrite(path.string(), crop)) {
             throw js::bind_error("could not write " + bundle + "/" + file);
         }
     } catch (const cv::Exception &e) {
@@ -1032,10 +1264,34 @@ CPP_REFLECT_TOOL(save_script)
                              e.what());
     }
     return std::string(existed ? "overwrote" : "saved") + " template \"" +
-           bundle + "/" + file + "\" (" + std::to_string(use.w) + "x" +
-           std::to_string(use.h) + " at " + std::to_string(use.x) + "," +
-           std::to_string(use.y) + "); use it as tap(\"" + file +
-           "\") inside that bundle's script" + snapped_box_note(box, use);
+           bundle + "/" + file + "\" (" + region_phrase(use) +
+           "); use it as tap(\"" + file +
+           "\") inside that bundle's script" + snap_note;
+}
+
+[[= js::doc{
+    .text = js::str(
+        "Cuts one template PNG, out of one of the screenshots you have taken, "
+        "into an existing script bundle, so that bundle's script can use it "
+        "with tap(\"name.png\"). The region is a box {x,y,w,h} or, for a round "
+        "element, a circle {cx,cy,r}: a circle is written with the disc's alpha "
+        "and matching then ignores every pixel outside it. While human approval "
+        "is on, the region is shown to the user and nothing is cut unless they "
+        "approve it. It cuts from the picture you looked at, so screenshot "
+        "right before you cut, and crop tight around the part that stays put.")}]]
+    [[= js::param_docs(
+        js::str("Bundle to put the template in; it must already exist (see "
+                "save_script)."),
+        js::str(
+            "Template name, a leaf name; \".png\" is appended when missing."),
+        js::str("Which screenshot to cut from: the number its caption showed. "
+                "Omit for the most recent one."),
+        js::str("The region to cut out: a box {x,y,w,h} or a circle "
+                "{cx,cy,r}."))]] std::string
+        save_template(std::string bundle, std::string name,
+                      std::optional<int> shot, shape region) {
+    return save_template_region(std::move(bundle), std::move(name), shot,
+                                to_region(region));
 }
 CPP_REFLECT_TOOL(save_template)
 
@@ -1085,9 +1341,28 @@ CPP_REFLECT_TOOL(ccat_help)
         if (!out.empty()) {
             out += "\n";
         }
+        // Anchors and edges are not skills to run on their own: the tag says
+        // so, and it is where the model learns a graph exists at all.
+        const ccat_lang::bundle_tag tag =
+            ccat_lang::bundle_tags(g_ctx.script_dir, name);
+        std::string suffix;
+        if (tag.anchors > 0) {
+            suffix = " [graph " + tag.anchor_of + ", " +
+                     std::to_string(tag.anchors) + " anchors, " +
+                     std::to_string(tag.edges) + " edges]";
+        } else if (!tag.anchor_of.empty()) {
+            const char *kind = tag.kind == ccat_lang::anchor_kind::popup ? "popup"
+                               : tag.kind == ccat_lang::anchor_kind::transient
+                                   ? "transient"
+                                   : "page";
+            suffix = " [anchor of " + tag.anchor_of + ", " + kind + "]";
+        } else if (!tag.edge_of.empty()) {
+            suffix = " [edge of " + tag.edge_of + "]";
+        }
         out += name + " -- " +
                (description.empty() ? std::string("(no description)")
-                                    : description);
+                                    : description) +
+               suffix;
     }
     return out;
 }
@@ -1130,33 +1405,220 @@ CPP_REFLECT_TOOL(list_scripts)
 }
 CPP_REFLECT_TOOL(read_script)
 
-/// A box to cut a template from, in the pixels of frame `shot`. Members are
-/// reflected, so these names are the JSON keys the model writes.
-struct box {
-    [[= js::doc{.text = js::str("Which screenshot to cut from: the number its "
-                                "caption showed.")}]] int shot = 0;
-    [[= js::doc{.text = js::str(
-                    "Left edge X, in that screenshot's pixels.")}]] int x = 0;
-    [[= js::doc{.text = js::str(
-                    "Top edge Y, in that screenshot's pixels.")}]] int y = 0;
-    [[= js::doc{.text = js::str("Width of the crop in pixels.")}]] int w = 0;
-    [[= js::doc{.text = js::str("Height of the crop in pixels.")}]] int h = 0;
-};
+/// The bundle `_name` must be, in the words a wrong name always gets.
+void require_bundle(const std::string &_name) {
+    if (!ccat_lang::safe_leaf_name(_name)) {
+        throw js::bind_error("name \"" + _name +
+                             "\" is not a plain file name");
+    }
+    std::error_code ec;
+    if (!std::filesystem::is_regular_file(
+            ccat_lang::bundle_main(g_ctx.script_dir, _name), ec)) {
+        throw js::bind_error("unknown script bundle \"" + _name +
+                             "\"; save_script creates one (existing: " +
+                             existing_bundles() + ")");
+    }
+}
 
-/// One entry of the template set an update declares: a name, and either a box
-/// to cut that name from or nothing to keep the PNG already in the bundle. The
-/// optional is what makes "keep" expressible -- a single update cannot re-cut
-/// every template, since their screens are not all on one screenshot.
+/// One entry of the template set an update declares: a name, either a shape to
+/// cut that name from or nothing to keep the PNG already in the bundle, and
+/// which screenshot to cut from. "Keep" needs the optional because one update
+/// cannot re-cut every template -- their screens are not all on one frame.
 struct template_cut {
-    [[= js::doc{.text = js::str("Template name, a leaf name; \".png\" is "
+    [[= js::desc{.text = js::str("Template name, a leaf name; \".png\" is "
                                 "appended when missing.")}]] std::string name;
-    [[= js::doc{
+    [[= js::desc{
         .text = js::str(
             "Omit to keep the template already in the bundle; give it to "
             "re-cut "
-            "that template from the named screenshot.")}]] std::optional<box>
-        cut;
+            "that template.")}]] std::optional<shape> cut;
+    [[= js::desc{
+        .text = js::str("Which screenshot to cut from: the number its caption "
+                        "showed. Omit for the most recent one; ignored when "
+                        "there is no cut.")}]] std::optional<int> shot;
 };
+
+/// What a declared template set does to a bundle. Everything in it has been
+/// checked and cut, so a human is only ever asked about a set that can be
+/// written.
+struct template_plan {
+    std::vector<pending_cut> cuts;
+    std::vector<std::string> kept;
+    std::vector<std::string> to_delete;
+};
+
+/// Checks `_templates` as the whole template set `_bundle` will have once it
+/// runs `_prog`, and takes the crops. `_anchor` counts `has(...)` operands as
+/// required too; `_new_bundle` lets cuts go to a bundle not on disk yet.
+template_plan plan_templates(const std::string &_bundle,
+                             const ccat_lang::Program &_prog,
+                             const std::vector<template_cut> &_templates,
+                             bool _anchor, bool _new_bundle) {
+    require_local_templates(_prog);
+    // The declared names, checked before anything is resolved against the disk,
+    // so a duplicate is reported as a duplicate and not as whatever the first
+    // entry happened to be missing.
+    std::vector<std::string> declared;
+    for (const template_cut &entry : _templates) {
+        const std::string file = with_png_ext(entry.name);
+        if (!ccat_lang::safe_leaf_name(file)) {
+            throw js::bind_error("template name \"" + entry.name +
+                                 "\" is not a plain file name");
+        }
+        if (std::find(declared.begin(), declared.end(), file) !=
+            declared.end()) {
+            throw js::bind_error(
+                "template \"" + file +
+                "\" is declared twice; one entry per template");
+        }
+        declared.push_back(file);
+    }
+
+    // A template operand that fails the script has to be declared, or the
+    // update would write a script the bundle cannot run. A condition's action
+    // is an operand for the same reason (`if (tap("x.png"))` really runs).
+    // Neither is an absolute path, which is not a file in the bundle.
+    std::vector<std::string> operands;
+    for (const auto &stmt : _prog.stmts) {
+        collect_required_templates(*stmt, &operands, _anchor);
+    }
+    std::vector<std::string> missing;
+    for (const std::string &operand : operands) {
+        const std::string file = with_png_ext(operand);
+        if (operand.empty() || std::filesystem::path(operand).is_absolute() ||
+            std::find(declared.begin(), declared.end(), file) !=
+                declared.end() ||
+            std::find(missing.begin(), missing.end(), file) != missing.end()) {
+            continue;
+        }
+        missing.push_back(file);
+    }
+    if (!missing.empty()) {
+        throw js::bind_error(
+            "the new source needs template(s) this update does not "
+            "declare: " +
+            joined(missing, "") +
+            "; add them to templates (with a cut to cut them, or to "
+            "keep the PNG already in the bundle)");
+    }
+
+    // Now the disk work: cut what is to be cut, and confirm what is to be kept
+    // is there. Every region is checked here, so a bad one costs nobody a look
+    // at the bubble.
+    template_plan plan;
+    std::error_code ec;
+    for (const template_cut &entry : _templates) {
+        const std::string file = with_png_ext(entry.name);
+        if (!entry.cut.has_value()) {
+            if (!std::filesystem::is_regular_file(
+                    g_ctx.script_dir / _bundle / file, ec)) {
+                throw js::bind_error(
+                    "template \"" + file +
+                    "\" has no cut and is not in the bundle, so there is "
+                    "nothing to keep");
+            }
+            plan.kept.push_back(file);
+            continue;
+        }
+        const llm::region region = to_region(*entry.cut);
+        pending_cut cut;
+        std::string checked;
+        const cv::Mat frame =
+            check_template_target(_bundle, entry.name, region, entry.shot,
+                                  &checked, &cut.frame_png, !_new_bundle);
+        cut.file = checked;
+        cut.shot = entry.shot.value_or(g_next_shot);
+        cut.region = region;
+        cut.crop = crop_region(frame, region);
+        require_textured(cut.crop,
+                         "template \"" + _bundle + "/" + cut.file + "\"");
+        plan.cuts.push_back(std::move(cut));
+    }
+
+    // Everything left in the bundle that is not declared goes, which is what
+    // makes the declared set the bundle's template set.
+    for (const std::string &file :
+         ccat_lang::bundle_templates(g_ctx.script_dir, _bundle)) {
+        if (std::find(declared.begin(), declared.end(), file) ==
+            declared.end()) {
+            plan.to_delete.push_back(file);
+        }
+    }
+    return plan;
+}
+
+/// The template lines of an approval summary, and its picture.
+void describe_templates(const template_plan &_plan,
+                        llm::approval_request *_req) {
+    for (const pending_cut &cut : _plan.cuts) {
+        _req->summary += "cut \"" + cut.file + "\" from " +
+                         shot_phrase(cut.shot) + " at " +
+                         region_phrase(cut.region) + "\n";
+    }
+    _req->summary += "keep: " + joined(_plan.kept, "none") + "\n";
+    _req->summary += "delete: " + joined(_plan.to_delete, "none") + "\n\n";
+    // One picture fits in the bubble, so it is the frame the first cut comes
+    // from, with only the regions taken from that same frame drawn on it. Any
+    // cuts from other frames are named in the summary.
+    if (!_plan.cuts.empty()) {
+        _req->screen_png = _plan.cuts.front().frame_png;
+        for (const pending_cut &cut : _plan.cuts) {
+            if (cut.shot == _plan.cuts.front().shot) {
+                _req->highlight.push_back(cut.region);
+            }
+        }
+    }
+}
+
+void write_text(const std::string &_bundle, const std::string &_file,
+                const std::string &_text) {
+    std::ofstream out(g_ctx.script_dir / _bundle / _file,
+                      std::ios::binary | std::ios::trunc);
+    out.write(_text.data(), static_cast<std::streamsize>(_text.size()));
+    out.close();
+    if (!out) {
+        throw js::bind_error("could not write " + _bundle + "/" + _file);
+    }
+}
+
+/// Writes `_source` as `_bundle`'s main.ccat, then the templates it names,
+/// then deletes the leftovers.
+void write_bundle(const std::string &_bundle, const std::string &_source,
+                  const template_plan &_plan) {
+    std::error_code ec;
+    std::filesystem::create_directories(g_ctx.script_dir / _bundle, ec);
+    write_text(_bundle, "main.ccat", _source);
+    for (const pending_cut &cut : _plan.cuts) {
+        const std::filesystem::path path = g_ctx.script_dir / _bundle / cut.file;
+        try {
+            if (!cv::imwrite(path.string(), cut.crop)) {
+                throw js::bind_error("could not write " + _bundle + "/" +
+                                     cut.file);
+            }
+        } catch (const cv::Exception &e) {
+            throw js::bind_error("could not write " + _bundle + "/" +
+                                 cut.file + ": " + e.what());
+        }
+    }
+    for (const std::string &file : _plan.to_delete) {
+        std::filesystem::remove(g_ctx.script_dir / _bundle / file, ec);
+        if (ec) {
+            throw js::bind_error("could not delete " + _bundle + "/" + file +
+                                 ": " + ec.message());
+        }
+    }
+}
+
+void require_anchor_script(const ccat_lang::Program &_prog) {
+    const std::vector<std::string> problems =
+        ccat_lang::anchor_script_problems(_prog);
+    if (!problems.empty()) {
+        throw js::bind_error("not an anchor script: " + joined(problems, "") +
+                             "; an anchor only judges whether its screen is "
+                             "showing and returns true or false");
+    }
+}
+
 
 [[= js::doc{
     .text = js::str(
@@ -1166,7 +1628,8 @@ struct template_cut {
         "that "
         "screenshot, an entry with just a name keeps the PNG already there, "
         "and "
-        "PNGs you do not declare are deleted. Prefer this over saving a new "
+        "PNGs you do not declare are deleted. Prefer this "
+        "over saving a new "
         "name when changing a skill you already have; save_script is for a new "
         "one, and save_template for adjusting a single template while you work "
         "out its box.")}]]
@@ -1190,96 +1653,19 @@ struct template_cut {
     // Parsed first: a syntax error answers the model directly, rather than
     // asking a human to read a script that cannot run.
     const std::unique_ptr<ccat_lang::Program> prog = parse_or_throw(source);
-
-    // The declared names, checked before anything is resolved against the disk,
-    // so a duplicate is reported as a duplicate and not as whatever the first
-    // entry happened to be missing.
-    std::vector<std::string> declared;
-    for (const template_cut &entry : templates) {
-        const std::string file = with_png_ext(entry.name);
-        if (!ccat_lang::safe_leaf_name(file)) {
-            throw js::bind_error("template name \"" + entry.name +
-                                 "\" is not a plain file name");
-        }
-        if (std::find(declared.begin(), declared.end(), file) !=
-            declared.end()) {
-            throw js::bind_error(
-                "template \"" + file +
-                "\" is declared twice; one entry per template");
-        }
-        declared.push_back(file);
+    if (const std::string block =
+            ccat_lang::script_graph_block(g_ctx.script_dir, name, *prog);
+        !block.empty()) {
+        throw js::bind_error(block);
     }
-
-    // A template operand that fails the script has to be declared, or the
-    // update would write a script the bundle cannot run. A condition's action
-    // is an operand for the same reason (`if (tap("x.png"))` really runs), but
-    // `has(...)` is not: its template missing is the `false` it exists to
-    // report. Neither is an absolute path, which is not a file in the bundle.
-    std::vector<std::string> operands;
-    for (const auto &stmt : prog->stmts) {
-        collect_required_templates(*stmt, &operands);
+    const ccat_lang::bundle_tag tag =
+        ccat_lang::bundle_tags(g_ctx.script_dir, name);
+    const bool anchor = !tag.anchor_of.empty();
+    if (anchor) {
+        require_anchor_script(*prog);
     }
-    std::vector<std::string> missing;
-    for (const std::string &operand : operands) {
-        const std::string file = with_png_ext(operand);
-        if (operand.empty() || std::filesystem::path(operand).is_absolute() ||
-            std::find(declared.begin(), declared.end(), file) !=
-                declared.end() ||
-            std::find(missing.begin(), missing.end(), file) != missing.end()) {
-            continue;
-        }
-        missing.push_back(file);
-    }
-    if (!missing.empty()) {
-        throw js::bind_error(
-            "the new source needs template(s) this update does not "
-            "declare: " +
-            joined(missing, "") +
-            "; add them to templates (with a cut to cut them, or to "
-            "keep the PNG already in the bundle)");
-    }
-
-    // Now the disk work: cut what is to be cut, and confirm what is to be kept
-    // is there. Every box is checked here, so a bad one costs nobody a look at
-    // the bubble.
-    std::vector<pending_cut> cuts;
-    std::vector<std::string> kept;
-    for (const template_cut &entry : templates) {
-        const std::string file = with_png_ext(entry.name);
-        if (!entry.cut.has_value()) {
-            if (!std::filesystem::is_regular_file(
-                    g_ctx.script_dir / name / file, ec)) {
-                throw js::bind_error(
-                    "template \"" + file +
-                    "\" has no cut and is not in the bundle, so there is "
-                    "nothing to keep");
-            }
-            kept.push_back(file);
-            continue;
-        }
-        const box &b = *entry.cut;
-        pending_cut cut;
-        std::string checked;
-        const rect box_in{b.x, b.y, b.w, b.h};
-        const cv::Mat frame = check_template_target(
-            name, entry.name, box_in, b.shot, &checked, &cut.frame_png);
-        cut.file = checked;
-        cut.shot = b.shot;
-        cut.box = box_in;
-        cut.crop = frame(cv::Rect(b.x, b.y, b.w, b.h));
-        cuts.push_back(std::move(cut));
-    }
-
-    // Everything left in the bundle that is not declared goes, which is what
-    // makes the declared set the bundle's template set.
-    std::vector<std::string> to_delete;
-    for (const std::string &file :
-         ccat_lang::bundle_templates(g_ctx.script_dir, name)) {
-        if (std::find(declared.begin(), declared.end(), file) ==
-            declared.end()) {
-            to_delete.push_back(file);
-        }
-    }
+    const template_plan plan =
+        plan_templates(name, *prog, templates, anchor, false);
 
     if (needs_approval("update_script")) {
         if (!g_ctx.request_approval) {
@@ -1291,28 +1677,8 @@ struct template_cut {
         req.summary = "Update script \"" + name +
                       "\" (replace main.ccat and its "
                       "templates)\n\n";
-        for (const pending_cut &cut : cuts) {
-            req.summary += "cut \"" + cut.file + "\" from screenshot #" +
-                           std::to_string(cut.shot) + " at (" +
-                           std::to_string(cut.box.x) + "," +
-                           std::to_string(cut.box.y) + ") " +
-                           std::to_string(cut.box.w) + "x" +
-                           std::to_string(cut.box.h) + "\n";
-        }
-        req.summary += "keep: " + joined(kept, "none") + "\n";
-        req.summary += "delete: " + joined(to_delete, "none") + "\n\n";
+        describe_templates(plan, &req);
         req.summary += source;
-        // One picture fits in the bubble, so it is the frame the first cut
-        // comes from, with only the boxes taken from that same frame drawn on
-        // it. Any cuts from other frames are named in the summary above.
-        if (!cuts.empty()) {
-            req.screen_png = cuts.front().frame_png;
-            for (const pending_cut &cut : cuts) {
-                if (cut.shot == cuts.front().shot) {
-                    req.highlight.push_back(cut.box);
-                }
-            }
-        }
         const llm::approval_decision decision = g_ctx.request_approval(req);
         if (!decision.approved) {
             throw js::bind_error(decision.guidance.empty()
@@ -1322,47 +1688,147 @@ struct template_cut {
         }
     }
 
-    // Approved: the script first, then the templates it names, then the
-    // leftovers. Nothing above this point touched the disk, so a refusal leaves
+    // Approved. Nothing above this point touched the disk, so a refusal leaves
     // it byte-for-byte what it was.
-    const std::filesystem::path main_path =
-        ccat_lang::bundle_main(g_ctx.script_dir, name);
-    {
-        std::ofstream out(main_path, std::ios::binary | std::ios::trunc);
-        out.write(source.data(), static_cast<std::streamsize>(source.size()));
-        out.close();
-        if (!out) {
-            throw js::bind_error("could not write " + name + "/main.ccat");
-        }
+    write_bundle(name, source, plan);
+    std::string reply =
+        "updated \"" + name + "/main.ccat\" (" +
+        std::to_string(prog->stmts.size()) + " statements, " +
+        std::to_string(source.size()) +
+        " chars); templates: " + std::to_string(plan.cuts.size()) + " cut, " +
+        std::to_string(plan.kept.size()) + " kept, " +
+        std::to_string(plan.to_delete.size()) + " deleted; run it with run(\"" +
+        name + "/main.ccat\")";
+    if (!tag.edge_of.empty()) {
+        reply += "\n" + graph_check(tag.edge_of);
     }
-    for (const pending_cut &cut : cuts) {
-        const std::filesystem::path path = g_ctx.script_dir / name / cut.file;
-        try {
-            if (!cv::imwrite(path.string(), cut.crop)) {
-                throw js::bind_error("could not write " + name + "/" +
-                                     cut.file);
-            }
-        } catch (const cv::Exception &e) {
-            throw js::bind_error("could not write " + name + "/" + cut.file +
-                                 ": " + e.what());
-        }
-    }
-    for (const std::string &file : to_delete) {
-        std::filesystem::remove(g_ctx.script_dir / name / file, ec);
-        if (ec) {
-            throw js::bind_error("could not delete " + name + "/" + file +
-                                 ": " + ec.message());
-        }
-    }
-    return "updated \"" + name + "/main.ccat\" (" +
-           std::to_string(prog->stmts.size()) + " statements, " +
-           std::to_string(source.size()) +
-           " chars); templates: " + std::to_string(cuts.size()) + " cut, " +
-           std::to_string(kept.size()) + " kept, " +
-           std::to_string(to_delete.size()) + " deleted; run it with run(\"" +
-           name + "/main.ccat\")";
+    return reply;
 }
 CPP_REFLECT_TOOL(update_script)
+
+[[= js::quiet{.text = js::str("Save anchor {graph}.{anchor}")}]][[= js::doc{
+    .text = js::str(
+        "Saves one screen of a game's graph as anchor bundle <graph>.<anchor>: "
+        "golden.md (what the screen is), main.ccat (whether it is showing) and "
+        "the templates that script names, under one approval. The script may "
+        "only judge -- has, if/elif/else, log, return true/false -- because "
+        "every anchor runs on every locate. A new anchor is first checked "
+        "against the latest screenshot: when an existing anchor already "
+        "recognises it, nothing is saved and you are told which one, so reuse "
+        "it. Saving an existing anchor replaces all three, like "
+        "update_script. The first anchor of a graph must be \"entry\", the "
+        "screen every navigation can start from. Join two anchors with an "
+        "edge by save_script(\"<graph>.<from>-<to>\", ...).")}]]
+    [[= js::param_docs(
+        js::str("Graph name, [a-z0-9_]+, e.g. the game: \"shuaitu\"."),
+        js::str("Anchor name, [a-z0-9_]+: the screen, e.g. \"main_city\"."),
+        js::str("golden.md: front matter between --- lines (kind: page | "
+                "transient | popup, default page; a popup needs close: <bundle "
+                "that closes it>), then one natural-language description of "
+                "the screen."),
+        js::str("main.ccat: judges the screen and returns true or false."),
+        js::str("Every template the anchor should have afterwards, as in "
+                "update_script."))]] std::string
+        save_anchor(std::string graph, std::string anchor, std::string golden,
+                    std::string source, std::vector<template_cut> templates) {
+    if (!ccat_lang::graph_part_name(graph) ||
+        !ccat_lang::graph_part_name(anchor)) {
+        throw js::bind_error("graph \"" + graph + "\" and anchor \"" + anchor +
+                             "\" must both be [a-z0-9_]+");
+    }
+    const std::string bundle = graph + "." + anchor;
+    std::string error;
+    if (!ccat_lang::parse_golden_md(golden, &error)) {
+        throw js::bind_error("golden.md: " + error);
+    }
+    const std::unique_ptr<ccat_lang::Program> prog = parse_or_throw(source);
+    require_anchor_script(*prog);
+    std::error_code ec;
+    const bool is_new = !std::filesystem::is_regular_file(
+        g_ctx.script_dir / bundle / "golden.md", ec);
+    const template_plan plan =
+        plan_templates(bundle, *prog, templates, true, is_new);
+
+    // One screen, one anchor: a second anchor for it would make locate
+    // ambiguous there. Only a new one is checked -- an existing anchor
+    // recognising its own screen is the point.
+    if (is_new && ccat_lang::scan_graph(g_ctx.script_dir, graph).exists) {
+        if (g_ctx.cfg == nullptr) {
+            throw js::bind_error(
+                "no app config to run the existing anchors with");
+        }
+        cv::Mat frame;
+        if (!frame_mat(std::nullopt, &frame, &error)) {
+            throw js::bind_error("cannot check for a duplicate anchor: " +
+                                 error);
+        }
+        const ccat_lang::locate_hit hit =
+            locate_on_frame(&require_adb(), g_ctx.cfg, graph, frame, &error);
+        using ccat_lang::locate_kind;
+        if (hit.kind == locate_kind::page ||
+            hit.kind == locate_kind::transient ||
+            hit.kind == locate_kind::interrupt) {
+            throw js::bind_error("this screen is already anchor " + hit.id +
+                                 " of graph " + graph +
+                                 "; reuse it instead of saving " + anchor);
+        }
+        if (hit.kind != locate_kind::unknown) {
+            throw js::bind_error(
+                "cannot check for a duplicate anchor: " +
+                (hit.detail.empty() ? error : hit.detail));
+        }
+    }
+
+    if (needs_approval("save_anchor")) {
+        if (!g_ctx.request_approval) {
+            throw js::bind_error(
+                "no human available to approve saving the anchor");
+        }
+        llm::approval_request req;
+        req.tool = "save_anchor";
+        req.summary = std::string(is_new ? "Save new" : "Replace") +
+                      " anchor \"" + bundle + "\"\n\n";
+        describe_templates(plan, &req);
+        req.summary += "golden.md:\n" + golden + "\n\nmain.ccat:\n" + source;
+        const llm::approval_decision decision = g_ctx.request_approval(req);
+        if (!decision.approved) {
+            throw js::bind_error(decision.guidance.empty()
+                                     ? "user rejected saving the anchor"
+                                     : "user rejected saving the anchor: " +
+                                           decision.guidance);
+        }
+    }
+
+    write_bundle(bundle, source, plan);
+    write_text(bundle, "golden.md", golden);
+    return "saved anchor \"" + bundle + "\" (golden.md, main.ccat, " +
+           std::to_string(plan.cuts.size() + plan.kept.size()) +
+           " templates)\n" + graph_check(graph);
+}
+CPP_REFLECT_TOOL(save_anchor)
+
+[[= js::quiet{.text = js::str("Read graph {name}")}]][[= js::doc{
+    .text = js::str(
+        "Returns a screen graph as its bundles describe it: every anchor "
+        "(bundle <graph>.<anchor> with a golden.md) with its kind and the first "
+        "line of its description, every edge (bundle <graph>.<a>-<b>), and "
+        "every problem that would stop goto from using it. Read an anchor's or "
+        "an edge's script with read_script.")}]]
+    [[= js::param_docs(
+        js::str("Graph name, the part before the dot (list_scripts marks its "
+                "<graph>.entry bundle [graph ...])."))]] std::string
+        read_graph(std::string name) {
+    const ccat_lang::scanned_graph scanned =
+        ccat_lang::scan_graph(g_ctx.script_dir, name);
+    if (!scanned.exists) {
+        throw js::bind_error("no graph \"" + name + "\": it has no " + name +
+                             ".entry anchor; save_anchor creates one "
+                             "(existing graphs: " +
+                             existing_graphs() + ")");
+    }
+    return ccat_lang::graph_summary(scanned);
+}
+CPP_REFLECT_TOOL(read_graph)
 
 [[= js::doc{.text = js::str("Deletes a saved script bundle: its main.ccat and "
                             "every template in the "
@@ -1519,7 +1985,7 @@ bool approval_gate_required(const approval_config &_gates,
     if (_tool == "run_script") {
         return _gates.gates.run_script;
     }
-    if (_tool == "save_script") {
+    if (_tool == "save_script" || _tool == "save_anchor") {
         return _gates.gates.save_script;
     }
     if (_tool == "save_template") {
@@ -1561,7 +2027,7 @@ void request_emulator_stop() { g_emulator_stop.store(true); }
 void forget_frames() {
     g_frames.clear();
     g_next_shot = 0;
-    g_human_box.reset();
+    g_human_region.reset();
 }
 
 /// Fills a quiet note's `{param}` names from the call's arguments. Which names

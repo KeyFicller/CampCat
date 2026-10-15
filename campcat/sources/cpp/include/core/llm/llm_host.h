@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <deque>
@@ -12,6 +13,8 @@
 #include <utility>
 #include <vector>
 
+#include "core/llm/llm_fuse.h"
+#include "core/llm/llm_memory.h"
 #include "core/llm/llm_protocol.h"
 #include "core/llm/llm_tools.h"
 #include "core/process.h"
@@ -23,9 +26,10 @@ namespace campcat {
  */
 struct llm_result {
     bool ok = false;
-    std::string text;  ///< model output when `ok`
-    std::string error; ///< human-readable failure detail
-    int turns = -1;    ///< turns the sidecar retains; 0 after a reset
+    bool interrupted = false; ///< user sent a new message; the text stays
+    std::string text;         ///< model output when `ok`
+    std::string error;        ///< human-readable failure detail
+    int turns = -1;           ///< turns the sidecar retains; 0 after a reset
 };
 
 /// @brief One step of the turn in flight, in the order it happened.
@@ -57,11 +61,11 @@ struct llm_approval {
     long id = 0; ///< Bumped per request; the UI caches its texture against it
     std::string tool;
     std::string summary;
-    std::vector<llm::rect> highlight;
-    bool box_editable = false; ///< Whether the human may redraw this box
-    /// The box the model gave, when the snap moved it: a second, thinner frame
-    /// so the human can compare the two. Empty when they are the same box.
-    std::optional<llm::rect> given_box;
+    std::vector<llm::region> highlight;
+    bool editable = false; ///< Whether the human may redraw this region
+    /// The region the model gave, when the snap moved it: a second, thinner
+    /// frame so the human can compare the two. Empty when they are the same.
+    std::optional<llm::region> given_region;
 };
 
 /// How long an idle consolidation may take. One model call and a file write, so
@@ -99,10 +103,18 @@ public:
      * @param[in] _provider Which model provider the sidecar should build, from
      * the settings. Taken from a snapshot, so a change mid-turn waits its turn.
      * @param[in] _prompt The user's instruction. Blank is rejected.
+     * @param[in] _max_tool_calls Per-turn tool cap from the settings snapshot.
+     * Values below 1 use the default. A change mid-turn waits for the next one.
+     * @param[in] _max_tool_rounds Per-turn round cap, sent to the sidecar.
+     * Values below 1 use the default.
      */
     llm_result run_turn(const std::filesystem::path &_config_home,
                         const std::string &_provider,
-                        const std::string &_prompt);
+                        const std::string &_prompt, int _max_tool_calls,
+                        int _max_tool_rounds);
+
+    /// The latest usage the sidecar reported. Safe to call from the UI thread.
+    llm_protocol::usage_stats usage() const;
 
     /**
      * @brief Fold this session into the long-term notes on disk.
@@ -118,7 +130,7 @@ public:
      * be slow, but the shutdown call must not be.
      */
     llm_result memorize(const std::filesystem::path &_config_home,
-                        const std::string &_provider,
+                        const std::string &_provider, llm::memory_kind _kind,
                         int _timeout_ms);
 
     /**
@@ -160,6 +172,18 @@ public:
      */
     std::string event_image_png(long _image_id) const;
 
+    /**
+     * @brief A copy of the turn's timeline, images included.
+     *
+     * The worker takes this as it finishes a turn, then clears the live
+     * stream for the next one. The UI fills the bubble from the copy.
+     */
+    struct timeline {
+        std::vector<llm_event> events;
+        std::deque<std::pair<long, std::string>> images;
+    };
+    timeline copy_timeline() const;
+
     /// True once the sidecar reported the model is reasoning.
     bool is_thinking() const;
 
@@ -174,6 +198,31 @@ public:
 
     /// Terminate the child if running. Safe to call repeatedly.
     void stop();
+
+    /**
+     * @brief Ask the turn in flight to stop at its next tool.
+     *
+     * The tool already running finishes. The next `tool_result` is replaced
+     * with `interrupt`. A model call already on the wire is not cancelled.
+     * Cleared when the queued message is taken, so the next turn is not born
+     * stopped.
+     */
+    void request_interrupt();
+
+    /// Drop a pending interrupt. The worker calls this as it takes the queued
+    /// message.
+    void clear_interrupt();
+
+    /// True from `request_interrupt` until `clear_interrupt`.
+    bool interrupt_pending() const;
+
+    /**
+     * @brief Reject the question the worker is blocked on, once.
+     *
+     * Unlike `cancel_approval`, this does not refuse later questions: the
+     * session is continuing, and the next turn may ask again.
+     */
+    void release_approval();
 
     /**
      * @brief The question the worker is blocked on, if any.
@@ -192,7 +241,7 @@ public:
     /// `_guidance` and `_box` are corrections for the model and are kept only
     /// on a rejection.
     void answer_approval(bool _approved, std::string _guidance = {},
-                         std::optional<llm::rect> _box = std::nullopt);
+                         std::optional<llm::region> _redrawn = std::nullopt);
 
     /**
      * @brief Resolve the hanging question as rejected, and refuse later ones,
@@ -267,6 +316,10 @@ private:
 
     /// Tool activity for the turn in flight, read by the UI thread.
     int m_tool_calls = 0;
+    /// Cap for `m_tool_calls`, taken from the settings when the turn starts.
+    int m_turn_max_calls = llm::k_default_max_tool_calls;
+    /// Session counters the status bar polls. Guarded by `m_mu`.
+    llm_protocol::usage_stats m_usage;
     /// Steps of the turn in flight, in order, guarded by `m_mu`.
     std::vector<llm_event> m_events;
     /// PNG bytes of the newest image events, oldest first. Bounded: a turn can
@@ -276,6 +329,10 @@ private:
     long m_tool_image_id = 0;
 
     bool m_thinking = false;
+
+    /// Set by the UI when the user sends a message during a turn. The worker
+    /// reads it in `exchange` and clears it when that message is taken.
+    std::atomic<bool> m_interrupt{false};
 
     // Human approval. A separate mutex/cv from `m_mu`/`m_cv`: that pair is the
     // sidecar reader's predicate, and sharing it would have both sides waking
@@ -288,8 +345,8 @@ private:
     bool m_approval_cancelled = false;
     /// Correction typed by the human; only read when the question is rejected.
     std::string m_approval_guidance;
-    /// Box the human redrew; same lifetime and same rule as the guidance.
-    std::optional<llm::rect> m_approval_box;
+    /// Region the human redrew; same lifetime and same rule as the guidance.
+    std::optional<llm::region> m_approval_region;
     /// Set once the host is going away; no question is answered after that.
     bool m_approval_abort = false;
     long m_next_approval_id = 0;

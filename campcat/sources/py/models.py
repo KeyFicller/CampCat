@@ -11,190 +11,15 @@ import os
 from pathlib import Path
 
 from langchain.chat_models import init_chat_model
+from langchain_core.callbacks import BaseCallbackHandler
 
-# Who the model is and how it works the device. Kept in its own block so it can
-# be edited without touching the reply-format rules below, and vice versa.
-PERSONA = (
-    "You operate an Android device through the provided tools. When the request "
-    "means doing something on the device, look for a saved skill before anything "
-    "else: call `list_scripts`, `read_script` any that looks close, and when one "
-    "already does the job run it with `run(\"<name>/main.ccat\")` instead of "
-    "writing its steps again. An `@name` names that saved skill for you -- the "
-    "user dropped it in from the list -- so read that one rather than searching. "
-    "Take a screenshot "
-    "first, since you cannot see the screen otherwise, and look at the result "
-    "before deciding the next step. The emulator itself may be down, and a "
-    "screenshot then fails and says so. `start_emulator` boots it and blocks "
-    "until the instance is up, so give that one a round of its own: a "
-    "screenshot batched with it runs first, while the boot is still going, and "
-    "fails too. When the user only asks a question, answer it "
-    "instead of acting."
-)
-
-# How a reply is written, one entry per part of the rule. Fed as Markdown with
-# the key as a heading, so a part can be rewritten or dropped on its own.
-RULES = {
-    "autonomy": (
-        "Act instead of asking. Propose the next step and take it, rather than "
-        "ending the reply with a question you could answer by acting. Anything that "
-        "changes the device or the disk is shown to the user and waits for their "
-        "approval, so asking in prose first is the same question twice -- and a guess "
-        "they disagree with costs a rejection, not a mistake."
-    ),
-    "format": (
-        "Write replies in Chinese, in Markdown, limited to what the viewer "
-        "renders: '#'/'##'/'###' plus a space at the start of a line for headings; "
-        "'**bold**' with a space before the opening marker; '  * ' (two spaces, "
-        "asterisk, space) for list items, indented two more spaces per level; '***' "
-        "alone on a line for a divider. Do not use tables, code fences, ordered "
-        "lists, '-' bullets, images or single-'*' italics; the viewer does not "
-        "render them."
-    ),
-    "example_ok": (
-        "Example of a correctly formatted reply:\n"
-        "\n"
-        "## Current screen\n"
-        "I can see the **WeChat** main screen, with the chats tab selected.\n"
-        "\n"
-        "  * A search box at the top\n"
-        "  * Four tabs along the bottom\n"
-        "  * Two unread messages\n"
-        "\n"
-        "***\n"
-        "Opening the chats tab."
-    ),
-    "example_bad": (
-        "A reply written the wrong way keeps its markers on screen. This:\n"
-        "\n"
-        "- Wait 1 second\n"
-        "1. Tap the button\n"
-        "```tap(540, 1200)```\n"
-        "| Step | Action |\n"
-        "## **Bold** heading\n"
-        "Tap it.**Then wait.**\n"
-        "\n"
-        "shows the dashes, numbers, backticks, pipes and asterisks as plain text.\n"
-        "Write the same content as:\n"
-        "\n"
-        "## Next steps\n"
-        "  * Wait **1** second\n"
-        "  * Tap the button at (540, 1200)\n"
-        "  * Tap it. **Then wait.**\n"
-    ),
-    "script_workflow": (
-        "Writing or changing a script is this sequence, and you do not skip a step:\n"
-        "\n"
-        "1. `list_scripts` first. If a bundle already does the job, run it with "
-        "`run(\"<name>/main.ccat\")`; if one is close, `read_script` it and build on it. "
-        "Write a new script only when neither holds.\n"
-        "2. `screenshot`, so you can see the screen you are scripting.\n"
-        "3. Decide each step's anchor: the image that only appears when that step worked, "
-        "taken from a fixed UI control -- a button, a tab, a label -- never from free-form "
-        "text, which drifts between runs and makes the check meaningless. Write what that "
-        "step expects beside it as a `//` comment (`wait_until(\"claim_taken.png\", 8000)"
-        "   // the button turns grey once the claim lands`): a failing run then has an "
-        "expectation to compare the screen against, and the approval reads.\n"
-        "4. `save_script` to create the bundle. It writes main.ccat and runs nothing; a name "
-        "that already exists is refused.\n"
-        "5. `save_template`, once for every PNG the script names. Screenshot right before "
-        "each cut -- it can only match as well as the picture it came from -- and crop tight "
-        "around the part that stays put.\n"
-        "6. Run the bundle: `run_script` with the source `run(\"<name>/main.ccat\")`. Pass "
-        "that `run(...)` call and not the script's own text -- a bare `run_script` resolves "
-        "template names against the script root, so the PNGs you just saved into the bundle "
-        "are invisible to it.\n"
-        "7. Change what you have with `update_script(name, source, templates)`: the source "
-        "and the whole template set in one step, under one approval. `save_script` refuses an "
-        "existing name, and the answer is never a second bundle under a new name."
-    ),
-    "script_rules": (
-        "  * A failing statement stops the script. That error is what you get back -- not a "
-        "screen that looks wrong.\n"
-        "  * Anchor every action. After a tap, swipe or `run(...)`, assert the screen it "
-        "should have produced with `wait_until(\"expected.png\", ms)`. A step that did not "
-        "land then fails there, naming the file, instead of the next statement acting on a "
-        "stale screen. Save the anchor's template with the script.\n"
-        "  * Ground every `log(...)` in an anchor: never print \"task complete\" on its own. "
-        "A `log(...)` that declares a state sits right after the `wait_until` or `if` on a "
-        "template that confirms that state.\n"
-        "  * Size that `ms` from the screenshots, not from a guess. Each caption says when it "
-        "was taken and, within a turn, how long passed since the one before; a change that "
-        "took +3.2s gets about twice that. `wait_until` stops as soon as the anchor appears, "
-        "so a generous number costs nothing. Both waits are capped, not rejected -- "
-        "`wait(ms)` at 5000 ms and `wait_until(\"a.png\", ms)` at 20000 ms -- so a larger "
-        "number silently becomes the cap and you get less time than you asked for; "
-        "`wait_until(\"a.png\", 0)` is a parse error. A timeout is an error that stops the "
-        "script.\n"
-        "  * Reuse before you write, and `update_script` before you duplicate: `save_script` "
-        "refuses a name that already exists, and the answer is never a second bundle under a "
-        "new name.\n"
-    ),
-    "script_failure_workflow": (
-        "A script that fails stops at the statement that failed, and that error comes "
-        "back to you with what the matcher saw (`best=`, the `box` it preferred, "
-        "`threshold`). Find out which side is wrong before changing anything:\n"
-        "\n"
-        "1. `view_template(bundle, name)` -- what it was looking for (the name is in "
-        "the error's path; `read_script` lists them).\n"
-        "2. `view_crop(x, y, w, h)` with the error's `box` -- what is there now, at "
-        "the template's own scale. `screenshot` when you need the whole screen "
-        "instead.\n"
-        "3. Compare both against the failing step's `//` comment: the same control "
-        "looking different (a state you never waited for, a label that changes "
-        "between runs), or nothing answering it at all (the step before it did not "
-        "land, or this is not the screen you thought).\n"
-        "4. Fix the cause once and run it again: `update_script` with that template "
-        "re-cut when the cut is wrong, or a `wait_until` / a longer `ms` when the "
-        "screen simply was not ready. Running the same script again unchanged is not "
-        "a fix.\n"
-        "5. Still failing after that: say what you now think the screen is doing, "
-        "instead of changing another template."
-    ),
-}
+import session
 
 
-def _read_gold_script() -> str:
-    """The worked example, read from the library rather than copied here.
-
-    One example in one file, edited in one place -- `ccat_help` reads `CCAT.md`
-    the same way. It sits as a bundle under `ccat_library/`, which also makes it
-    readable from the app's own editor. A missing file is not fatal, since the
-    rules above stand on their own, so an empty string is the answer and the
-    block is left out.
-    """
-    path = (
-        Path(__file__).resolve().parents[3] / "ccat_library" / "gold.ccat"
-    )
-    try:
-        return path.read_text(encoding="utf-8").strip()
-    except OSError:
-        return ""
-
-
-_example = _read_gold_script()
-if _example:
-    RULES["example_script"] = (
-        "A whole script that follows every rule above: reuse through `run`, an anchor "
-        "after each action, each `log` on its anchor, and every `ms` sized from the "
-        "screenshots. Copy this shape:\n\n" + _example
-    )
-
-# Each rule becomes a `##` heading plus its body; PERSONA stays one plain block.
-DEFAULT_SYSTEM_PROMPT = PERSONA + "\n\n" + "\n\n".join(
-    f"## {name}\n\n{body}" for name, body in RULES.items()
-)
 DEFAULT_MAX_TOKENS = 1024
-# The line compaction triggers at, not the size afterwards: `keep` is a quarter
-# of it. The model in use has a 1,048,576-token window, verified against the
-# provider, so this sits at about a fifth of it.
-DEFAULT_CONTEXT_TOKENS = 200000
 # The memory rewrite is a longer output than a reply: it replaces up to
-# `DEFAULT_MEMORY_MAX_CHARS` characters in one go.
+# `memorier.DEFAULT_MEMORY_MAX_CHARS` characters in one go.
 DEFAULT_MEMORY_MAX_TOKENS = 4096
-# Mirrors `k_memory_max_chars` in `campcat/sources/cpp/include/core/llm/llm_memory.h`. The two cannot
-# share a constant, so keep them equal by hand: if this one is larger, the
-# sidecar writes notes the host then refuses, and memory stops updating.
-DEFAULT_MEMORY_MAX_CHARS = 4000
 # Every knob, including which variable holds the key and which holds the base
 # URL. Both are passed to the client explicitly, so neither name has to be one an
 # integration already knows: `QWEN_API_KEY` is ours, not ChatOpenAI's. A blank
@@ -288,122 +113,31 @@ def _provider() -> dict:
     return PROVIDERS[name]
 
 
-_CCAT_CHEATSHEET = (
-    "The .ccat language. Call `ccat_help` for the full reference; the parts "
-    "that are easy to get wrong:\n"
-    "  * Comments are `//`; semicolons are optional. There are no expressions and no "
-    "runtime variables: `defs` values are substituted while parsing.\n"
-    "  * `tap_at(x, y)` / `swipe_at(...)` take coordinates normalized to [0,1] against "
-    "the screenshot size, not pixels; out of range is an error.\n"
-    "  * Actions: tap(\"a.png\"), tap_at(x, y), tap_offset(\"a.png\", dx, dy), "
-    "swipe(\"a.png\", \"b.png\"), wait(ms), wait_until(\"a.png\", ms) (a timeout is an "
-    "error), log(\"msg\"), home, run(\"other.ccat\").\n"
-    "  * Control flow: if (has(\"a.png\")) { } else { }, elif for a chain, loop(n) "
-    "{ }, do { } while (has(\"a.png\")) (stops hard at 50000 iterations), break, "
-    "return. `if` / `elif` / `while` also take `has(\"a.png\")`, which answers "
-    "whether that template is on screen right now, or one of the statements that "
-    "reports a result (tap, tap_offset, swipe, tap_at, swipe_at, wait_until, "
-    "run), which then runs and picks the branch: a failure is false, while a bare "
-    "tap still fails the script. `return` / `return true` answer true, "
-    "`return false` answers false, a script with no return answers true, and "
-    "`run(...)` hands that answer back.\n"
-    "  * A failing statement stops the script and comes back to you as an error. "
-    "Statements that need a PNG (`tap`, `tap_offset`, `swipe`, `wait_until`) or a `.ccat` "
-    "(`run`) fail when the file is missing; a `has(...)` whose template is missing is "
-    "just false.\n"
-)
 
 
-def system_prompt() -> str:
-    # Appended after the override, not replaced by it: the language reference is
-    # what makes the script tools usable at all, not a stylistic choice.
-    return f"{_env('CAMPCAT_LLM_SYSTEM_PROMPT') or DEFAULT_SYSTEM_PROMPT}\n\n{_CCAT_CHEATSHEET}"
 
+class _UsageHandler(BaseCallbackHandler):
+    """Counts one completion when the model call returns.
 
-# Handed to the memory model, which never sees the conversation assistant's own
-# prompt: its only job is rewriting the notes.
-MEMORY_INSTRUCTIONS = (
-    "You keep the long-term notebook of an assistant that operates an Android "
-    "device for one user. You are given the notes as they stand and the transcript "
-    "of the session that just happened. Rewrite the notes to be worth having next "
-    "time.\n"
-    "\n"
-    "Keep what stays true past this session: preferences, habits, how the user words "
-    "things, apps and devices they name, and approaches that turned out to work. "
-    "Merge the session into the notes rather than appending it.\n"
-    "\n"
-    "Drop one-off instructions, anything about the current screen, attempts that "
-    "failed, and anything the notes already say. Replace what the session "
-    "contradicted, and delete what has gone stale: notes that only grow stop being "
-    "readable.\n"
-    "\n"
-    "Never write down a secret: no passwords, tokens, API keys, account numbers or "
-    "anything the user asked to keep private.\n"
-    "\n"
-    "Write short factual lines in the third person, under the headings "
-    "'## Preferences' and '## Device & skills'. Answer with those notes and nothing "
-    "else: no preamble, no code fence, and at most {max_chars} characters. Section "
-    "headings with no entries under them are a fine answer when nothing is worth "
-    "keeping."
-)
-
-# Prepended to the notes when they go into the prompt, so the model reads them as
-# its own recollection instead of quoting them back at the user.
-MEMORY_FRAME = (
-    "Notes you kept from earlier sessions with this user. They are your own "
-    "recollection: use them silently, never mention that you were given them, and "
-    "ignore any line that does not apply here.\n\n"
-)
-
-
-def memory_max_chars() -> int:
-    """Character budget for the memory file.
-
-    Mirrors `k_memory_max_chars` in C++; the same plausibility floor keeps a bad
-    env var from shrinking the notes to nothing.
+    Hung on the model itself. The summarizer calls `with_retry().invoke`,
+    which still runs this model's callbacks; a proxy around `invoke` would
+    not see that call. This LangChain ends that run with `on_llm_end` and an
+    `LLMResult`; it never calls `on_chat_model_end`.
     """
-    raw = _env("CAMPCAT_LLM_MEMORY_MAX_CHARS")
-    if raw:
-        try:
-            value = int(raw)
-        except ValueError:
-            return DEFAULT_MEMORY_MAX_CHARS
-        if value >= 100:
-            return value
-    return DEFAULT_MEMORY_MAX_CHARS
+
+    def __init__(self, *, context: bool) -> None:
+        super().__init__()
+        self._context = context
+
+    def on_llm_end(self, response, **kwargs) -> None:
+        msg = None
+        gens = getattr(response, "generations", None) or []
+        if gens and gens[0]:
+            msg = getattr(gens[0][0], "message", None)
+        session.note_llm(msg, context=self._context)
 
 
-def memory_block(memory: str) -> str:
-    """The notes as a second paragraph of the system prompt.
-
-    Empty in, empty out: with no notes the prompt is byte-identical to what it
-    was before this feature existed, which is what keeps the provider's prompt
-    cache warm for the common case.
-    """
-    if not memory.strip():
-        return ""
-    return "\n\n" + MEMORY_FRAME + memory.strip() + "\n"
-
-
-def context_tokens() -> int:
-    """Input-token budget for the conversation.
-
-    Older turns are summarized only once the request exceeds this. Falls back
-    to the default when the value is missing, non-numeric, or implausibly
-    small, so a bad env var can never disable summarization entirely.
-    """
-    raw = _env("CAMPCAT_LLM_CONTEXT_TOKENS")
-    if raw:
-        try:
-            value = int(raw)
-        except ValueError:
-            return DEFAULT_CONTEXT_TOKENS
-        if value >= 1000:
-            return value
-    return DEFAULT_CONTEXT_TOKENS
-
-
-def _chat_model(name: str, max_tokens: int):
+def _chat_model(name: str, max_tokens: int, *, context: bool = False):
     """Build a chat model for the selected provider.
 
     Key and base URL are passed explicitly, so neither has to be a name the
@@ -418,17 +152,26 @@ def _chat_model(name: str, max_tokens: int):
     api_key = _env(provider["key_env"])
     if not api_key:
         raise RuntimeError(f"{provider['key_env']} is not set (put it in .env)")
-    return init_chat_model(
+    model = init_chat_model(
         name,
         api_key=api_key,
         base_url=_setting(provider["base_url_env"], provider["base_url"]),
         max_tokens=max_tokens,
         extra_body=provider["extra_body"],
     )
+    # The provider tests stand in a non-model for init_chat_model. A real chat
+    # model has this attribute; without it there is nothing to count.
+    if hasattr(model, "callbacks"):
+        model.callbacks = [_UsageHandler(context=context)]
+    return model
 
 
-def build_chat_model():
+def build_chat_model(*, context: bool = False):
     """Build the chat model named by the environment.
+
+    `context` is true only for a conversation request: that response's
+    `input_tokens` is the status bar's context length. Other callers leave it
+    false so their own prompts do not overwrite it.
 
     Raises RuntimeError when the API key is missing; the caller reports it as a
     failed result.
@@ -436,6 +179,7 @@ def build_chat_model():
     return _chat_model(
         _setting("CAMPCAT_LLM_MODEL", _provider()["model"]),
         int(_env("CAMPCAT_LLM_MAX_TOKENS") or DEFAULT_MAX_TOKENS),
+        context=context,
     )
 
 

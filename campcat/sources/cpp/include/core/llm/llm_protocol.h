@@ -15,7 +15,10 @@ namespace campcat::llm_protocol {
 ///    `memorize` asks the sidecar to fold the session into them.
 /// 7: `turn` and `memorize` carry `provider`, the model provider the host's
 ///    settings selected.
-constexpr int k_protocol_version = 7;
+/// 8: the host may send `interrupt` in place of a `tool_result` to stop the
+///    turn, and `result` may carry `interrupted`.
+/// 9: `turn` carries `scripter_memory`, and `memorize` carries `agent`.
+constexpr int k_protocol_version = 9;
 
 /**
  * @brief One decoded line from the sidecar's stdout.
@@ -31,6 +34,7 @@ struct message {
 
     // result
     bool ok = false;
+    bool interrupted = false; ///< the user sent a new message; default false
     std::string text;
     std::string error;
 
@@ -51,7 +55,40 @@ struct message {
 
     /// Turns the sidecar retains after this result; 0 after a reset.
     int turns = 0;
+
+    /// Present only when the sidecar put the field on this line. Absent means
+    /// "leave the display alone", not zero.
+    bool has_llm_calls = false;
+    int llm_calls = 0;
+    bool has_tool_calls = false;
+    int tool_calls = 0;
+    bool has_context = false;
+    int context_tokens = 0;
 };
+
+/// Counters the status bar shows. `context_tokens` of -1 means the provider
+/// has not reported one since the last reset.
+struct usage_stats {
+    int llm_calls = 0;
+    int tool_calls = 0;
+    int context_tokens = -1;
+};
+
+/// Copy the usage fields this message actually carries. Missing fields stay.
+inline void apply_usage(usage_stats *_dst, const message &_msg) {
+    if (_dst == nullptr) {
+        return;
+    }
+    if (_msg.has_llm_calls) {
+        _dst->llm_calls = _msg.llm_calls;
+    }
+    if (_msg.has_tool_calls) {
+        _dst->tool_calls = _msg.tool_calls;
+    }
+    if (_msg.has_context) {
+        _dst->context_tokens = _msg.context_tokens;
+    }
+}
 
 /**
  * @brief Standard base64 (RFC 4648, no line breaks).
@@ -73,13 +110,16 @@ std::string base64_encode(const unsigned char *_data, std::size_t _len);
  * @param[in] _tools_json OpenAI tools array; empty to offer no tools.
  * @param[in] _memory Long-term notes about this user, read off disk by the
  * host. Sent even when empty, so the field's shape never moves.
+ * @param[in] _scripter_memory The scripter's own notes. Sent even when empty.
  * @param[in] _provider Which model provider the sidecar should build, from the
  * host's settings. Sent even when empty, for the same reason as `_memory`.
  */
 std::string build_turn_request(long _id, std::string_view _text,
                                std::string_view _tools_json,
                                std::string_view _memory,
-                               std::string_view _provider);
+                               std::string_view _scripter_memory,
+                               std::string_view _provider,
+                               int _max_tool_rounds);
 
 /**
  * @brief Build one `tool_result` line answering a `tool_call`.
@@ -102,6 +142,14 @@ std::string build_tool_result(std::string_view _call_id, bool _ok,
 std::string build_reset_request(long _id);
 
 /**
+ * @brief Build one `interrupt` line for the turn `_id` (no trailing newline).
+ *
+ * Sent in place of the `tool_result` the sidecar is waiting on. The sidecar
+ * stops that turn and answers with a `result` whose `interrupted` is true.
+ */
+std::string build_interrupt_request(long _id);
+
+/**
  * @brief Build one `memorize` request line: fold this session into the memory.
  *
  * The sidecar already holds the conversation, so nothing but the current notes
@@ -111,9 +159,11 @@ std::string build_reset_request(long _id);
  * @param[in] _memory The notes as they stand now; empty when there are none.
  * @param[in] _provider Which model provider the sidecar should build, so the
  * consolidation runs on the model the settings selected.
+ * @param[in] _agent `operator` or `scripter`: which notebook this pass rewrites.
  */
 std::string build_memorize_request(long _id, std::string_view _memory,
-                                   std::string_view _provider);
+                                   std::string_view _provider,
+                                   std::string_view _agent);
 
 /**
  * @brief Parse one sidecar line. Never throws.

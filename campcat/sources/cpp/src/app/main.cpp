@@ -20,6 +20,7 @@
 #include "app/ui/activity_status.h"
 #include "app/ui/console_panel.h"
 #include "app/ui/fonts.h"
+#include "app/ui/graph_panel.h"
 #include "app/ui/llm_panel.h"
 #include "app/ui/log_panel.h"
 #include "app/ui/macos_ime.h"
@@ -279,7 +280,7 @@ int main(int argc, char **argv) {
         const bool busy_now = st.cycle_running.load();
         const bool lock_manual_single = busy_now || st.sched.running();
 
-        enum class shell_page : int { Script = 0, Llm, Console, Settings };
+        enum class shell_page : int { Script = 0, Llm, Console, Graph, Settings };
         static shell_page page = shell_page::Script;
 
         // What the title row reports. Per page, because the badge sits next to
@@ -306,10 +307,13 @@ int main(int argc, char **argv) {
                 page_status = {campcat::activity_level::busy, "Running"};
             }
             break;
+        case shell_page::Graph:
+            break; // no activity of its own; the device chip below still shows
         case shell_page::Settings:
             break; // no activity of its own; the device chip below still shows
         }
-        const bool show_page_chip = page != shell_page::Settings;
+        const bool show_page_chip =
+            page != shell_page::Settings && page != shell_page::Graph;
 
         campcat::activity_status device_status{};
         if (st.device_online.load()) {
@@ -383,6 +387,7 @@ int main(int argc, char **argv) {
             nav_item("Script", shell_page::Script);
             nav_item("LLM", shell_page::Llm);
             nav_item("Console", shell_page::Console);
+            nav_item("Graph", shell_page::Graph);
             ImGui::Spacing();
             ImGui::Separator();
             ImGui::Spacing();
@@ -404,6 +409,9 @@ int main(int argc, char **argv) {
                     break;
                 case shell_page::Console:
                     page_title = "Console";
+                    break;
+                case shell_page::Graph:
+                    page_title = "Graph";
                     break;
                 case shell_page::Settings:
                     page_title = "Settings";
@@ -437,6 +445,8 @@ int main(int argc, char **argv) {
                 llm_panel_draw_panel(st, cfg_view, lock_manual_single);
             } else if (page == shell_page::Console) {
                 console_panel_draw(st, cfg_view, ccat_ui, busy_now);
+            } else if (page == shell_page::Graph) {
+                graph_panel_draw(cfg_view);
             } else if (page == shell_page::Settings) {
                 settings_panel_draw(st, cfg_view);
             }

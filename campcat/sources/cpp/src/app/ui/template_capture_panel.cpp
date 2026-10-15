@@ -40,10 +40,19 @@ int g_anchor_iy = 0;
 int g_cur_ix = 0;
 int g_cur_iy = 0;
 bool g_has_sel = false;
+
+/// Which shape the drag selects. A box is two corners; a circle is the centre
+/// (where the press landed) and the radius the drag then sets.
+enum class capture_shape { box, circle };
+capture_shape g_shape = capture_shape::box;
+
 int g_sel_x0 = 0;
 int g_sel_y0 = 0;
 int g_sel_x1 = 0;
 int g_sel_y1 = 0;
+int g_sel_cx = 0; ///< committed circle centre, when `g_shape` is circle
+int g_sel_cy = 0;
+int g_sel_r = 0;
 
 std::string g_filename = "template.png";
 
@@ -100,6 +109,43 @@ cv::Rect inclusive_rect_to_roi(int _x0, int _y0, int _x1, int _y1, int _w,
     const int rw = std::max(1, xb - xa + 1);
     const int rh = std::max(1, yb - ya + 1);
     return {xa, ya, rw, rh};
+}
+
+/// The radius the current drag sets: away from the centre, or the longest
+/// distance that keeps every covered pixel in the frame, whichever is smaller.
+/// A disc that hangs over an edge would otherwise write a template whose shape
+/// its own pixels do not agree with.
+int drag_radius(int _cx, int _cy, int _ix, int _iy) {
+    const double want = std::hypot(static_cast<double>(_ix - _cx),
+                                  static_cast<double>(_iy - _cy));
+    const int room = std::min({_cx, _cy, g_bgr.cols - 1 - _cx,
+                               g_bgr.rows - 1 - _cy});
+    return std::max(0, std::min(static_cast<int>(std::lround(want)), room));
+}
+
+/// The circular selection as a 4-channel crop: alpha 255 inside the disc and 0
+/// outside. The same form `save_template` writes for a circle, so a template cut
+/// here matches under the same rule -- the alpha is the shape.
+cv::Mat circle_crop(int _cx, int _cy, int _r) {
+    cv::Mat out(2 * _r + 1, 2 * _r + 1, CV_8UC4, cv::Scalar(0, 0, 0, 0));
+    for (int y = 0; y < out.rows; ++y) {
+        auto *row = out.ptr<cv::Vec4b>(y);
+        for (int x = 0; x < out.cols; ++x) {
+            const int dx = x - _r;
+            const int dy = y - _r;
+            if (dx * dx + dy * dy > _r * _r) {
+                continue;
+            }
+            const int ix = _cx + dx;
+            const int iy = _cy + dy;
+            if (ix < 0 || iy < 0 || ix >= g_bgr.cols || iy >= g_bgr.rows) {
+                continue;
+            }
+            const cv::Vec3b &src = g_bgr.at<cv::Vec3b>(iy, ix);
+            row[x] = cv::Vec4b(src[0], src[1], src[2], 255);
+        }
+    }
+    return out;
 }
 
 void img_px_from_screen(const ImVec2 &_screen, const ImVec2 &_img_min,
@@ -180,9 +226,11 @@ void help_marker(const char *_text) {
 /// What the panel used to print above and below the image, merged: both are
 /// reference rather than instruction, so neither needs the line it cost.
 constexpr char k_help_text[] =
-    "Drag on image after Capture to select ROI. Preview is 1:1 device pixels; "
-    "scroll when larger than viewport. PNG files are saved next to the .ccat "
-    "script.";
+    "Drag on image after Capture to select ROI. Box selects two corners, "
+    "Circle takes the press as the centre and the drag as the radius; a circle "
+    "is saved with a transparent outside, so matching ignores it. Preview is "
+    "1:1 device pixels; scroll when larger than viewport. PNG files are saved "
+    "next to the .ccat script.";
 
 } // namespace
 
@@ -239,6 +287,22 @@ void template_capture_panel_draw(campcat::app_config &_cfg,
     ImGui::SameLine();
     help_marker("Template File Name");
 
+    // Switching shape drops the selection: what was drawn as one shape must not
+    // be saved as the other.
+    if (ImGui::RadioButton("Box##adb_tpl_shape",
+                           g_shape == capture_shape::box)) {
+        g_shape = capture_shape::box;
+        g_has_sel = false;
+    }
+    ImGui::SameLine();
+    if (ImGui::RadioButton("Circle##adb_tpl_shape",
+                           g_shape == capture_shape::circle)) {
+        g_shape = capture_shape::circle;
+        g_has_sel = false;
+    }
+    ImGui::SameLine();
+    help_marker("Shape to save the crop as.");
+
     if (g_tex == 0 || g_bgr.empty()) {
         ImGui::TextDisabled("(no screenshot)");
         return;
@@ -277,26 +341,56 @@ void template_capture_panel_draw(campcat::app_config &_cfg,
         img_px_from_screen(io.MousePos, img_min, img_max, &g_cur_ix, &g_cur_iy);
         if (!ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
             g_dragging = false;
-            g_sel_x0 = g_anchor_ix;
-            g_sel_y0 = g_anchor_iy;
-            g_sel_x1 = g_cur_ix;
-            g_sel_y1 = g_cur_iy;
-            g_has_sel = true;
+            if (g_shape == capture_shape::circle) {
+                const int r =
+                    drag_radius(g_anchor_ix, g_anchor_iy, g_cur_ix, g_cur_iy);
+                if (r > 0) {
+                    g_sel_cx = g_anchor_ix;
+                    g_sel_cy = g_anchor_iy;
+                    g_sel_r = r;
+                    g_has_sel = true;
+                }
+            } else {
+                g_sel_x0 = g_anchor_ix;
+                g_sel_y0 = g_anchor_iy;
+                g_sel_x1 = g_cur_ix;
+                g_sel_y1 = g_cur_iy;
+                g_has_sel = true;
+            }
         }
     }
 
     ImDrawList *dl = ImGui::GetWindowDrawList();
     if (g_dragging || g_has_sel) {
-        const int x0 = g_dragging ? g_anchor_ix : g_sel_x0;
-        const int y0 = g_dragging ? g_anchor_iy : g_sel_y0;
-        const int x1 = g_dragging ? g_cur_ix : g_sel_x1;
-        const int y1 = g_dragging ? g_cur_iy : g_sel_y1;
-        const ImVec2 s0 = screen_from_img_px(std::min(x0, x1), std::min(y0, y1),
-                                             img_min, img_max);
-        const ImVec2 s1 = screen_from_img_px(std::max(x0, x1), std::max(y0, y1),
-                                             img_min, img_max);
-        dl->AddRectFilled(s0, s1, IM_COL32(80, 200, 255, 55));
-        dl->AddRect(s0, s1, IM_COL32(255, 220, 80, 255), 0.0f, 0, 2.0f);
+        constexpr ImU32 k_fill = IM_COL32(80, 200, 255, 55);
+        constexpr ImU32 k_stroke = IM_COL32(255, 220, 80, 255);
+        // One screen pixel per image pixel, so the radius converts by the same
+        // factor the position does.
+        const float scale =
+            (img_max.x - img_min.x) / static_cast<float>(std::max(1, g_tex_w));
+        if (g_shape == capture_shape::circle) {
+            const int cx = g_dragging ? g_anchor_ix : g_sel_cx;
+            const int cy = g_dragging ? g_anchor_iy : g_sel_cy;
+            const int r = g_dragging
+                              ? drag_radius(cx, cy, g_cur_ix, g_cur_iy)
+                              : g_sel_r;
+            const ImVec2 centre = screen_from_img_px(cx, cy, img_min, img_max);
+            dl->AddCircleFilled(centre, r * scale, k_fill);
+            dl->AddCircle(centre, r * scale, k_stroke, 0, 2.0f);
+        } else {
+            const int x0 = g_dragging ? g_anchor_ix : g_sel_x0;
+            const int y0 = g_dragging ? g_anchor_iy : g_sel_y0;
+            const int x1 = g_dragging ? g_cur_ix : g_sel_x1;
+            const int y1 = g_dragging ? g_cur_iy : g_sel_y1;
+            const ImVec2 s0 = screen_from_img_px(std::min(x0, x1),
+                                                 std::min(y0, y1), img_min,
+                                                 img_max);
+            const ImVec2 s1 = screen_from_img_px(std::max(x0, x1),
+                                                 std::max(y0, y1), img_min,
+                                                 img_max);
+            dl->AddRectFilled(s0, s1, k_fill);
+            dl->AddRect(s0, s1, k_stroke, 0.0f, 0, 2.0f);
+        }
     }
 
     ImGui::EndChild();
@@ -316,8 +410,6 @@ void template_capture_panel_draw(campcat::app_config &_cfg,
             campcat::automation_log::emit(
                 "[capture] CampCat images dir unresolved (config_home)");
         } else {
-            const cv::Rect roi = inclusive_rect_to_roi(
-                g_sel_x0, g_sel_y0, g_sel_x1, g_sel_y1, g_bgr.cols, g_bgr.rows);
             const std::filesystem::path dir =
                 _ccat_ui->images_base(_cfg.config_home);
             if (dir.empty()) {
@@ -332,7 +424,13 @@ void template_capture_panel_draw(campcat::app_config &_cfg,
                         ec.message() + ")");
                 } else {
                     const std::filesystem::path out = dir / g_filename;
-                    cv::Mat patch = g_bgr(roi).clone();
+                    const cv::Mat patch =
+                        g_shape == capture_shape::circle
+                            ? circle_crop(g_sel_cx, g_sel_cy, g_sel_r)
+                            : g_bgr(inclusive_rect_to_roi(
+                                        g_sel_x0, g_sel_y0, g_sel_x1, g_sel_y1,
+                                        g_bgr.cols, g_bgr.rows))
+                                  .clone();
                     if (!cv::imwrite(out.string(), patch)) {
                         campcat::automation_log::emit(
                             "[capture] imwrite failed: " + out.string());

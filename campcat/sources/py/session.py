@@ -8,29 +8,18 @@ from __future__ import annotations
 
 import base64
 import io
+import json
 import re
 import struct
-import sys
 import time
+from uuid import uuid4
 
-from langchain.agents.middleware import SummarizationMiddleware
-from langchain.agents.middleware.summarization import count_tokens_approximately
-from langchain_core.messages import (
-    AIMessage,
-    HumanMessage,
-    RemoveMessage,
-    SystemMessage,
-    ToolMessage,
-)
-from langgraph.runtime import Runtime
+from langchain_core.messages import HumanMessage
 
 try:                       # optional: without it the older frames are dropped
     from PIL import Image  # instead of scaled, which is what this did before
 except ImportError:
     Image = None
-
-import models
-import observability
 
 # Tools hand back PNG only, so the mime type is fixed here. Add a protocol field
 # if a tool ever returns another format.
@@ -42,6 +31,15 @@ MIME = "image/png"
 # what bounds a request's size. Beyond the newest, a picture is kept only as
 # context, so it is worth `_THUMB_PX` instead of the full frame.
 _KEEP_PICTURES = 3
+
+# Small pictures (a crop, a template) kept at full size. Cleared in a batch,
+# not one at a time: rewriting an earlier message invalidates the provider's
+# prefix cache from there on, so a new crop must not touch the ones before it
+# until a whole batch is due.
+_KEEP_CROPS = 4
+_CROP_HIGH = 8
+
+CROP_TOOLS = frozenset({"view_crop", "view_template"})
 
 # The longest side any context frame is worth, whatever the screen it came from.
 # A request carries every picture still in the list and the provider answers 413
@@ -97,11 +95,6 @@ _LATEST_TIME = 0.0
 # two frames separated by device time instead of by the user thinking.
 _TURN_PREV_SHOT = None
 
-# Built lazily: both the budget and the model come from the environment, which
-# main.py loads from .env before the first request. A summary lands in
-# _MESSAGES as the first HumanMessage, never as a SystemMessage: the summarizer
-# drops those, so build_messages prepends the prompt instead.
-_MW = None
 
 # The opening message of each turn carries this id prefix, so `size()` can count
 # turns without guessing from the rounds in between, and a compaction that folds
@@ -110,19 +103,100 @@ _MW = None
 _TURN_MARK = "turn"
 _TURN_SEQ = 0
 
+# Status-bar counters for this conversation. Reset with it. `_CONTEXT` stays
+# None until a conversation response reports input_tokens; a missing report
+# must not look like zero.
+_LLM_CALLS = 0
+_TOOL_CALLS = 0
+_CONTEXT: int | None = None
+
+# The scripter's own conversation. Kept out of `_MESSAGES` so a handoff's
+# dozens of tool rounds never enter the operator's prompt or its cache prefix.
+_SCRIPTER_MESSAGES: list = []
+_SCRIPTER_TURN_MARK = "scripter-turn"
+# How many of _SCRIPTER_MESSAGES are already folded into the scripter notes.
+_SCRIPTER_MEMORIZED_UPTO = 0
+# Pitfalls the host sent with this turn. Empty until a turn sets them.
+_SCRIPTER_MEMORY = ""
+
+
+def set_scripter_memory(text: str) -> None:
+    """Remember the scripter notes the host sent with this turn."""
+    global _SCRIPTER_MEMORY
+    _SCRIPTER_MEMORY = text
+
+
+def scripter_memory() -> str:
+    """The scripter notes for the turn now being served."""
+    return _SCRIPTER_MEMORY
+
+
+def _review_turn() -> None:
+    import agent.region_review as region_review
+    region_review.begin_turn()
+
 
 def reset() -> None:
     """Drop every turn. The next request starts a fresh conversation."""
-    global _MW, _LATEST_NUM, _LATEST_B64, _LATEST_TIME, _MEMORIZED_UPTO, _TURN_PREV_SHOT
-    global _TURN_SEQ
+    global _LATEST_NUM, _LATEST_B64, _LATEST_TIME, _MEMORIZED_UPTO, _TURN_PREV_SHOT
+    global _SCRIPTER_MEMORIZED_UPTO, _SCRIPTER_MEMORY
+    global _TURN_SEQ, _LLM_CALLS, _TOOL_CALLS, _CONTEXT
+    import agent.memorier as memorier
+    _review_turn()
     _MESSAGES.clear()
+    _SCRIPTER_MESSAGES.clear()
     _LATEST_NUM = 0
     _LATEST_B64 = ""
     _LATEST_TIME = 0.0
     _TURN_PREV_SHOT = None
-    _MW = None
+    memorier._MW = None
+    memorier._SCRIPTER_MW = None
     _MEMORIZED_UPTO = 0
+    _SCRIPTER_MEMORIZED_UPTO = 0
+    _SCRIPTER_MEMORY = ""
     _TURN_SEQ = 0
+    _LLM_CALLS = 0
+    _TOOL_CALLS = 0
+    _CONTEXT = None
+
+
+def note_llm(response: object | None, *, context: bool) -> None:
+    """Count one chat completion. `context` updates the bar's token length.
+
+    A missing response is not a call. `input_tokens` is the provider's count;
+    `total_tokens` includes the completion and is not a stand-in. `bool` is an
+    `int` in Python, and `True` is not a token count.
+    """
+    global _LLM_CALLS, _CONTEXT
+    if response is None:
+        return
+    _LLM_CALLS += 1
+    if not context:
+        return
+    meta = getattr(response, "usage_metadata", None)
+    if not isinstance(meta, dict):
+        return
+    n = meta.get("input_tokens")
+    if isinstance(n, int) and not isinstance(n, bool):
+        _CONTEXT = n
+
+
+def note_tool() -> None:
+    """Count one tool the sidecar asked the host to run."""
+    global _TOOL_CALLS
+    _TOOL_CALLS += 1
+
+
+def usage_fields() -> dict:
+    """The counters a `result` or `tool_call` should carry.
+
+    `context` is omitted until a provider has reported it, so a host that
+    treats a missing field as "leave the display alone" does not zero it.
+    """
+    fields = {"llm_calls": _LLM_CALLS, "tool_calls": _TOOL_CALLS}
+    if _CONTEXT is not None:
+        fields["context"] = _CONTEXT
+    return fields
 
 
 def size() -> int:
@@ -144,6 +218,7 @@ def start_turn() -> None:
     """Begin a turn, whose first screenshot has no previous one to measure from."""
     global _TURN_PREV_SHOT
     _TURN_PREV_SHOT = None
+    _review_turn()
 
 
 def append_turn(text: str, raw: list) -> None:
@@ -161,116 +236,24 @@ def append_turn(text: str, raw: list) -> None:
     _MESSAGES.extend(_detach_picture(m) if _is_picture(m) else m for m in raw)
 
 
-def memorize(memory: str) -> str | None:
-    """Fold the turns since the last call into `memory`, returning the new notes.
+def scripter_history() -> list:
+    """The scripter's conversation. A copy, for the same reason as `history`."""
+    return list(_SCRIPTER_MESSAGES)
 
-    Called between turns rather than during one, so the user is never waiting on
-    it. Returns `memory` unchanged when there is nothing new -- no model call --
-    and None when the call fails, which leaves the caller's file alone.
+
+def append_scripter_turn(brief: str, raw: list) -> None:
+    """One handoff, kept where the operator's history cannot see it.
+
+    Same rule as `append_turn`: pictures lose their bytes and keep the caption
+    that names the frame. The id prefix is not `turn`, so `size()` ignores it.
     """
-    global _MEMORIZED_UPTO
-    if _MEMORIZED_UPTO >= len(_MESSAGES):
-        return memory
-    try:
-        model = models.build_memory_model()
-        instructions = models.MEMORY_INSTRUCTIONS.format(
-            max_chars=models.memory_max_chars()
-        )
-        with observability.turn("rewrite-memory") as callbacks:
-            reply = model.invoke([
-                SystemMessage(content=instructions),
-                HumanMessage(content=(
-                    "## Notes so far\n" + (memory.strip() or "(none)") +
-                    "\n\n## Session transcript\n" +
-                    _transcript(_MESSAGES[_MEMORIZED_UPTO:])
-                )),
-            ], config={"callbacks": callbacks})
-    except Exception as exc:  # noqa: BLE001 - a missed update, never fatal
-        print(f"[sidecar] memory not updated: {exc}", file=sys.stderr)
-        return None
-    text = strip_tool_markup(
-        content_text(getattr(reply, "content", reply))
-    ).strip()
-    if not text:
-        return None
-    _MEMORIZED_UPTO = len(_MESSAGES)
-    return text
+    global _TURN_SEQ
+    _TURN_SEQ += 1
+    _SCRIPTER_MESSAGES.append(
+        HumanMessage(content=brief, id=f"{_SCRIPTER_TURN_MARK}:{_TURN_SEQ}"))
+    _SCRIPTER_MESSAGES.extend(
+        _detach_picture(m) if _is_picture(m) else m for m in raw)
 
-
-def _transcript(messages: list) -> str:
-    """The conversation as plain text, for the memory model to read."""
-    lines: list[str] = []
-    for m in messages:
-        if isinstance(m, HumanMessage):
-            lines.append("User: " + content_text(m.content))
-        elif isinstance(m, ToolMessage):
-            lines.append("Tool result: " + content_text(m.content))
-        elif isinstance(m, AIMessage):
-            for call in m.tool_calls or []:
-                lines.append(f"Tool call {call.get('name')} {call.get('args')}")
-            text = content_text(m.content)
-            if text:
-                lines.append("Assistant: " + text)
-    return "\n\n".join(lines)
-
-
-def _tokens(messages: list) -> int:
-    """Provider-reported size of the last request, plus what came after it.
-
-    `usage_metadata['total_tokens']` is what the provider really charged for
-    that request, and the next prompt is that plus the reply it produced, so
-    anchoring there beats approximating the whole list. Only the messages after
-    it are unknown, and at compaction time there usually are none.
-    """
-    for i in range(len(messages) - 1, -1, -1):
-        meta = getattr(messages[i], "usage_metadata", None)
-        if meta and meta.get("total_tokens"):
-            return int(meta["total_tokens"]) + count_tokens_approximately(
-                messages[i + 1:], tokens_per_image=models.TOKENS_PER_IMAGE
-            )
-    return count_tokens_approximately(
-        messages, tokens_per_image=models.TOKENS_PER_IMAGE
-    )
-
-
-def _middleware():
-    """Summarizes older turns once the request approaches the budget.
-
-    `keep` is a quarter of the budget. The history is text only -- screenshots
-    live outside it and only the latest one is re-sent, by `build_messages` --
-    so a quarter already covers many turns.
-    """
-    global _MW
-    if _MW is None:
-        budget = models.context_tokens()
-        _MW = SummarizationMiddleware(
-            model=models.build_chat_model(),
-            trigger=("tokens", budget),
-            keep=("tokens", budget // 4),
-            token_counter=_tokens,
-        )
-    return _MW
-
-
-def compact() -> None:
-    """Fold the oldest turns into a rolling summary once past the budget.
-
-    Summarizing rewrites the request prefix, which invalidates the provider's
-    prompt cache from that point on, so the summarizer's own hysteresis is what
-    keeps this rare. A failure here is skipped, never fatal: the request is
-    still far below the model's real limit, so it goes out unsummarized.
-    """
-    if not _MESSAGES:
-        return
-    try:
-        out = _middleware().before_model({"messages": list(_MESSAGES)}, Runtime())
-    except Exception as exc:  # noqa: BLE001 - summarizing must not lose history
-        print(f"[sidecar] summarization skipped: {exc}", file=sys.stderr)
-        return
-    if not out or "messages" not in out:
-        return
-    # Drop the RemoveMessage sentinel: it signals a reducer this list has none of.
-    _MESSAGES[:] = [m for m in out["messages"] if not isinstance(m, RemoveMessage)]
 
 
 def latest_frame() -> HumanMessage | None:
@@ -320,13 +303,26 @@ def recall_frame(shot: object, image: str) -> HumanMessage:
         f"screen, not the current one.", image))
 
 
-def picture_of(name: str, image: str) -> HumanMessage:
+def picture_of(name: str, image: str, args: dict | None = None) -> HumanMessage:
     """A marked-up copy some other tool returned, for the user to look at.
 
     Not stored as a frame: its box and label would be baked into any template
-    cut from it.
+    cut from it. `args` is the call that produced it, so a picture later dropped
+    can be asked for again by repeating that call. A small crop or template is
+    marked, which is how `demote_pictures` counts it apart from screenshots.
     """
-    return HumanMessage(content=_shot_content(f"Image after {name}.", image))
+    if args is None:
+        caption = f"Image after {name}."
+    else:
+        caption = (
+            f"Image after {name}"
+            f"({json.dumps(args, ensure_ascii=False, separators=(',', ':'))})."
+        )
+    message = HumanMessage(content=_shot_content(caption, image))
+    size = png_size(image)
+    if name in CROP_TOOLS and size is not None and max(size) <= _THUMB_PX:
+        message.id = f"crop:{uuid4().hex}"
+    return message
 
 
 def png_size(png_b64: str) -> tuple[int, int] | None:
@@ -350,7 +346,7 @@ def _shot_caption(shot: int, lead: str, image: str, captured: float = 0.0,
                   since_previous: float | None = None) -> str:
     """`lead` plus the number, size and time, which is what names this frame later.
 
-    `save_template`'s `shot` is this number and its box is in these pixels, so
+    `save_template`'s `shot` is this number and its region is in these pixels, so
     both have to be on screen next to the picture. The time is what lets a wait
     be reasoned about instead of guessed: `since_previous` is how long passed
     between this frame and the one before it in the same turn.
@@ -399,8 +395,13 @@ def _detach_picture(m: HumanMessage) -> HumanMessage:
     """
     caption = " ".join(p["text"] for p in m.content if p.get("type") == "text")
     found = _SHOT_NUM.search(caption)
-    note = ("[image not attached; call view_shot(" + found[1] + ") to look again]"
-            if found else "[image not attached]")
+    if found:
+        note = ("[image not attached; call view_shot(" + found[1]
+                + ") to look again]")
+    elif caption.startswith("Image after "):
+        note = "[image not attached; make the same call again to look at it]"
+    else:
+        note = "[image not attached]"
     return HumanMessage(
         content=[p for p in m.content if p.get("type") != "image_url"]
         + [{"type": "text", "text": note}]
@@ -463,24 +464,79 @@ def _shrink_picture(m: HumanMessage) -> HumanMessage:
     ])
 
 
-def demote_pictures(messages: list, keep: int | None = None) -> list:
+def _is_crop(m: object) -> bool:
+    """A small crop or template, counted apart from screenshots."""
+    return _is_picture(m) and isinstance(getattr(m, "id", None), str) \
+        and m.id.startswith("crop:")
+
+
+def thumbnail_png(b64: str) -> str | None:
+    """`b64` scaled the way a context frame is, or None when that cannot be done.
+
+    A picture already within `_THUMB_PX` comes back unchanged, and that needs no
+    Pillow. Anything larger does, so a missing Pillow or a file it cannot read
+    is None rather than the original: the caller asked for a thumbnail.
+    """
+    size = png_size(b64)
+    if size is None:
+        return None
+    if max(size) <= _THUMB_PX:
+        return b64
+    small = _downscale(f"data:{MIME};base64,{b64}", size)
+    if small is None:
+        return None
+    return small[0].partition(",")[2]
+
+
+def crop_png(b64: str, box: tuple[int, int, int, int]) -> str | None:
+    """The rectangle `(x, y, w, h)` of a base64 PNG, or None when it cannot be cut."""
+    if Image is None:
+        return None
+    x, y, w, h = box
+    try:
+        im = Image.open(io.BytesIO(base64.b64decode(b64)))
+        im.load()
+        cut = im.crop((x, y, x + w, y + h))
+        buf = io.BytesIO()
+        cut.save(buf, "PNG")
+    except Exception:  # a frame the host sent and Pillow still cannot read
+        return None
+    return base64.b64encode(buf.getvalue()).decode()
+
+
+def demote_pictures(messages: list, keep: int | None = None,
+                    keep_crops: int | None = None) -> list:
     """Price each picture by what the model does with it.
 
-    The newest stays full size: a tap's box is measured on it and validated at
-    that resolution. The next few become thumbnails. The rest lose their image
-    and keep their caption, which already names the number `view_shot` wants
-    back.
+    Screenshots and small crops are counted apart, so looking at a crop does
+    not shrink the screenshot it was cut from. The newest screenshot stays full
+    size: a tap's box is measured on it and validated at that resolution. The
+    next few become thumbnails. The rest lose their image and keep their
+    caption, which already names the number `view_shot` wants back.
 
-    `keep` defaults to the window this module holds, resolved at the call rather
-    than bound as a default argument, so `_KEEP_PICTURES` stays the one knob.
+    Crops stay whole until more than `_CROP_HIGH` of them still carry their
+    picture, and then only the newest `keep_crops` do. Clearing them one at a
+    time would rewrite an earlier message on every call and drop the provider's
+    prefix cache from there on.
+
+    `keep` and `keep_crops` default to the windows this module holds, resolved
+    at the call rather than bound as a default argument, so the constants stay
+    the knobs.
     """
     keep = _KEEP_PICTURES if keep is None else keep
-    pics = [i for i, m in enumerate(messages) if _is_picture(m)]
-    for n, i in enumerate(reversed(pics)):
+    keep_crops = _KEEP_CROPS if keep_crops is None else keep_crops
+    frames = [i for i, m in enumerate(messages)
+              if _is_picture(m) and not _is_crop(m)]
+    crops = [i for i, m in enumerate(messages) if _is_crop(m)]
+    for n, i in enumerate(reversed(frames)):
         if n >= keep:
             messages[i] = _detach_picture(messages[i])
         elif n >= 1:
             messages[i] = _shrink_picture(messages[i])
+    if len(crops) > _CROP_HIGH:
+        for n, i in enumerate(reversed(crops)):
+            if n >= keep_crops:
+                messages[i] = _detach_picture(messages[i])
     return messages
 
 

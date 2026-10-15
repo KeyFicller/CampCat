@@ -15,12 +15,14 @@ Every statement that names a PNG takes its own fresh screenshot. `//` comments t
 device.
 
 A PNG path or a message may be a quoted string, a string `def`, or a bare word (letters, digits, `_`, `.`, `-`), so
-`tap(ok.png)` is legal but spaces need quotes. Absolute paths are used as is; relative ones resolve against the
-directory of the `.ccat` file being run. Strings are `"..."` with `\n`, `\t`, `\\`, `\"`; any other `\x` is `x`.
+`tap(ok.png)` is legal but spaces need quotes. A relative path resolves against the directory of the
+`.ccat` file being run. Strings are `"..."` with `\n`, `\t`, `\\`, `\"`; any other `\x` is `x`.
 Scripts you save live in a bundle, `ccat_library/<name>/main.ccat` with their templates beside it; run one with
 `run("<name>/main.ccat")`. A `run` path resolves like any other relative one -- against the calling script's own
 directory -- so a script that is itself saved in a bundle reaches another one as `run("../<name>/main.ccat")`:
 without the `../`, `<name>/main.ccat` means a directory inside its own bundle.
+A PNG path is a file name in that same bundle (`tap("a.png")`). One with `/` or `..` is
+refused when the script is saved; cut the picture into this bundle instead.
 
 **`<name>` is a skill.** The first line of `main.ccat` is its one-line description when it starts with `//`:
 `// taps the login button and waits for the feed`. `list_scripts` shows every bundle with its description; read one
@@ -52,6 +54,8 @@ if (has(claim)) { tap(claim) } else { log("no claim") }
 | `log("msg")` | one log line | nothing |
 | `home` | HOME + force-stop recents | adb failure |
 | `run("other.ccat")` | another script, relative to this file | unreadable; cyclic; deeper than 16; callee error |
+| `goto("g:a")` | walk graph `g` to anchor `a` | graph invalid; `a` is not a page; an anchor script fails or two match; three failed hops; adb failure |
+| `at("g:a")` | condition only: one screenshot, true when the screen locates as `a` | not a statement; an invalid graph, a failing anchor script or two matching anchors is an error, not `false` |
 
 **A named file that is missing fails the statement**, which is why `tap`, `tap_offset`, `swipe`, `wait_until` and
 `run` need their files to exist first. `has(...)` is the exception (below): a template that is not there is exactly
@@ -63,7 +67,8 @@ a failure is `false` instead of stopping the script. See **Conditions that ask t
 `update_script` checks exactly this list: every template a `tap`, `tap_offset`, `swipe` or `wait_until` names must be
 in the declared template set, and it refuses the update naming the ones that are not. A condition counts the same way
 -- `if (tap("x.png"))` really taps, so its template has to be declared -- but `has(...)` does not, because a template
-that is not there is the `false` it reports. `run()` targets are not checked; absolute paths are not bundle files, so
+that is not there is the `false` it reports. An anchor's (see **Graphs**) does count: a `has` it can never match
+means it never recognises its screen. `run()` targets are not checked; absolute paths are not bundle files, so
 they are not either.
 
 After a tap or swipe the script waits `max(tap_delay_ms, action_gap_ms)` (config, 1000 ms), so you rarely need `wait`
@@ -131,14 +136,15 @@ wherever it happens.
 Two kinds of statement may stand as an `if` / `elif` / `while` condition.
 
 `has("a.png")` answers whether that template is on screen **right now** -- one screenshot, `true` or `false`, never
-an error:
+an error. `at("g:a")` is the same kind of condition for a graph anchor (see **Graphs**); an invalid graph is an
+error, not `false`:
 
 ```ccat
 if (has("a.png")) { log("here") } else { log("not here") }
 ```
 
 Any statement in the table above that can report a result also works: `tap`, `tap_offset`, `swipe`, `tap_at`,
-`swipe_at`, `wait_until`, `run`. It runs, and its result picks the branch: a failure is `false`, so it does not stop
+`swipe_at`, `wait_until`, `run`, `goto`. It runs, and its result picks the branch: a failure is `false`, so it does not stop
 the script.
 
 ```ccat
@@ -196,6 +202,111 @@ Normalized `[0,1]` against the current screenshot, never pixels: `tap_at(0.5, 0.
 `lround(n x (dim - 1))`, and a value outside `[0,1]` is an error rather than a clamp. `tap_offset` scales `dx` / `dy`
 by the full screen and errors if the result is off screen, so keep offsets small and signed. The match threshold and
 the swipe duration come from config; a script cannot change them.
+
+## Graphs
+
+A graph `G` is the screens of one game, kept as ordinary bundles. Names are `[a-z0-9_]+`.
+
+| Bundle | Is | Recognised by |
+|---|---|---|
+| `G.entry` | the start anchor | named `entry`, holds `golden.md` |
+| `G.<anchor>` | an anchor: one screen | holds `golden.md` |
+| `G.<a>-<b>` | the edge from `a` to `b` | both `a` and `b` are anchors of `G` |
+| `G.<other>` | a plain task or skill | none of the above |
+
+`G` is a graph when `G.entry/golden.md` exists. A bundle named `G.<a>-<b>` whose ends are both
+anchors is always an edge, so do not give a task that name. A bundle named just `G` is not
+needed; when there is one it is a plain bundle, for example the game's default task.
+
+### Anchors
+
+`golden.md` is front matter, then a description of the screen:
+
+```text
+---
+kind: page
+---
+Main city map: avatar and the task book top left, a row of resources along the top,
+five buttons along the bottom. Buildings, resource numbers and chat change.
+```
+
+- `kind` is `page` (the default, a screen you can stay on), `transient` (a loading or
+  transition screen: `goto` waits it out, it is never a destination) or `popup` (it can
+  cover any screen: `goto` closes it first).
+- A `popup` also needs `close: <bundle>`, the bundle that closes it.
+- The description says what is fixed on the screen and what changes. It is stored for
+  locating by meaning later; nothing reads it yet.
+
+The anchor's `main.ccat` only judges whether its screen is showing:
+
+```ccat
+if (has("neizheng.png")) { return true }
+return false
+```
+
+It may use `defs`, `has`, `if` / `elif` / `else`, `return`, `log` and comments, and needs at least
+one `return` -- with none it would answer true on every screen. Every anchor runs on every
+locate, so actions, waits, `run`, `loop`, `do`, `goto` and `at` are refused. Its templates
+live in its own bundle.
+
+### Edges
+
+An edge's `main.ccat` performs the move from `a` to `b`. It may branch -- a cold start and a
+warm start take different paths -- but it never checks its own ends, because the engine
+does, and it must not call `goto` (`goto inside a graph script`). A move slower than 20 s
+waits for itself: `wait_until` on a template of `b`, or `loop` + `wait_until` for a long load.
+
+### Locating
+
+A locate takes one screenshot and runs every anchor script against that one frame:
+
+1. `popup` anchors first, in name order; the first that answers true is the result.
+2. Then every `page` and `transient` anchor. None true is unknown, one is the result, two
+   or more is an error naming them (`ambiguous: a; b`).
+3. An anchor script that fails is an error naming that anchor.
+
+### `goto`, `at` and `run` of an edge
+
+`goto("G:a")` locates, then:
+
+- a popup runs its `close` bundle and locates again (at most 10 popups);
+- loading or unknown waits, looking every 200 ms for up to 20 s;
+- the target is success.
+
+Otherwise it runs the first hop of the shortest path (fewest hops; ties go to the edge
+name), then looks every 200 ms for 20000 ms: the far end finishes the hop, a popup is
+closed, another page replans without counting a failure, and still on the start or
+unknown at the timeout is a failure. A failing edge script, a timeout and no path each
+count one failure; the third is the error, listing every hop. `if (goto("G:a"))` is false
+when it cannot get there; a dead device is still an error.
+
+`at("G:a")` is one locate, as a condition: true when the result is `a`. An invalid graph
+or an ambiguous locate is an error, not `false`.
+
+`run("G.a-b/main.ccat")` is one checked hop: it locates (closing popups), fails with
+`run G.a-b: not at a (at <x>)` without running anything when the screen is not `a`, runs the
+edge, then waits 20000 ms for `b`. A timeout or another page is a failure that names the
+last screen seen. It does not replan or retry. Inside `goto` the edge body runs without
+this second check.
+
+### Checks
+
+Every `goto` / `at` loads the graph and refuses an invalid one, naming every problem:
+`G.entry` exists and is a `page`; every `golden.md` parses, and a popup's `close` bundle
+parses; every anchor script parses and only judges; every `has` template is in its bundle;
+every edge joins two `page` anchors, parses and has no `goto`; every `page` anchor is
+reachable from `entry`. Saving an anchor or an edge reports the same list.
+
+### Rules for a graph that stays reliable
+
+1. One screen, one anchor. Tell two screens apart by a template of a control only one of
+   them shows. Every PNG in the bundle is drawn on that anchor in the graph editor, so do
+   not save a picture of the other screen just to `return false`. Never a lower threshold.
+2. An edge must be safe to run again. Spending or claiming goes in the task, after `goto`.
+3. Do not `tap_at` when a `tap` missed. Let it fail.
+4. In a task, do not `loop` + `has` + `wait` for a screen: `goto` it. Only an edge waits
+   for itself.
+5. A task is `goto` to the start, the action, then a result anchor (`wait_until` or `at`).
 
 ## `$Debug`
 
