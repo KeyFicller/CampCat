@@ -1056,7 +1056,7 @@ CPP_REFLECT_TOOL(start_emulator)
 }
 CPP_REFLECT_TOOL(go_home)
 
-[[= js::doc{
+[[= js::quiet{.text = js::str("Ran script")}]][[= js::doc{
     .text = js::str(
         "Runs a .ccat script on the device and returns what happened. "
         "While human approval is on, the script is shown to the user "
@@ -1142,7 +1142,7 @@ std::string graph_check(const std::string &_graph) {
     return text;
 }
 
-[[= js::doc{
+[[= js::quiet{.text = js::str("Saved script {name}")}]][[= js::doc{
     .text = js::str(
         "Saves a .ccat script as a reusable bundle under the LLM script root: "
         "writes "
@@ -1646,7 +1646,7 @@ void require_anchor_script(const ccat_lang::Program &_prog) {
 }
 
 
-[[= js::doc{
+[[= js::quiet{.text = js::str("Updated script {name}")}]][[= js::doc{
     .text = js::str(
         "Replaces an existing bundle's main.ccat and its whole template set in "
         "one step, under one approval. Declare every template the updated "
