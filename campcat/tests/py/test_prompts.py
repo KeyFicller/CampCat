@@ -31,6 +31,12 @@ def test_scripter_prompt_keeps_the_cheatsheet():
     assert text.index("## graph_workflow") < text.index("## script_workflow")
 
 
+def test_scripter_prompt_crops_an_element_once():
+    text = scripter.scripter_prompt()
+    assert "view_crop` once" in text
+    assert "tighten the same box" in text
+
+
 def test_scripter_prompt_uses_an_action_for_same_screen_work():
     text = scripter.scripter_prompt()
     assert "{graph}.{anchor}.{action}" in text

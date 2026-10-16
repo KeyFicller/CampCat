@@ -843,7 +843,9 @@ CPP_REFLECT_TOOL(view_template)
         "them. Use it with the region a failed statement reported, to see what "
         "is there now at the same scale as the template: the whole-screen view "
         "is scaled down, so this is the only way to compare the two pixel for "
-        "pixel. It does not change the current screen.")}]]
+        "pixel. It does not change the current screen. One look per element "
+        "on a screenshot, then save_template or a different element. Do not "
+        "call it again only to tighten the same box.")}]]
     [[= js::param_docs(
         js::str("The region to cut out: a box {x,y,w,h} or a circle {cx,cy,r}."),
         js::str("Which screenshot to look at: the number its caption showed. "
