@@ -23,7 +23,7 @@
 | region review | 按一块区域动手之前 | 对照裁出来的图改到合适。看不清就用原来的。            |
 
 
-
+![exploring](campcat/sources/cpp/assets/images/exploring.png)
 
 ## 图的三件套
 
@@ -36,4 +36,4 @@
 | 边           | 从这一页走到那一页。            |
 | 动作          | 从这一页开始把事情做完，结束时还是这一页。 |
 
-
+![graph_built](campcat/sources/cpp/assets/images/graph_built.png)
