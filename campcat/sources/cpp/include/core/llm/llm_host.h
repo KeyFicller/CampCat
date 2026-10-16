@@ -316,6 +316,9 @@ private:
 
     /// Tool activity for the turn in flight, read by the UI thread.
     int m_tool_calls = 0;
+    /// How many `view_crop` calls landed in a row. Worker thread only, same
+    /// lifetime as `m_tool_calls`.
+    int m_view_crop_streak = 0;
     /// Cap for `m_tool_calls`, taken from the settings when the turn starts.
     int m_turn_max_dispatches = llm::k_default_max_dispatches;
     /// Session counters the status bar polls. Guarded by `m_mu`.

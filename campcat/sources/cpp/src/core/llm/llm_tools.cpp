@@ -1118,8 +1118,25 @@ CPP_REFLECT_TOOL(start_emulator)
         "Returns to the Android launcher and force-stops every recent app, "
         "so the device is on the home screen with nothing else running. Call "
         "it before a flow that has to start from that screen: each run then "
-        "begins in the same place. It blocks until the apps are stopped.")}]]
+        "begins in the same place. It blocks until the apps are stopped. "
+        "While human approval is on, this is shown to the user and nothing "
+        "runs unless they approve it.")}]]
     std::string go_home() {
+    if (needs_approval("go_home")) {
+        if (!g_ctx.request_approval) {
+            throw js::bind_error("no human available to approve going home");
+        }
+        llm::approval_request req;
+        req.tool = "go_home";
+        req.summary = "return to the launcher and force-stop every recent app";
+        const llm::approval_decision decision = g_ctx.request_approval(req);
+        if (!decision.approved) {
+            throw js::bind_error(decision.guidance.empty()
+                                     ? "user rejected going home"
+                                     : "user rejected going home: " +
+                                           decision.guidance);
+        }
+    }
     adb_api &adb = require_adb();
     int gap_ms = 0;
     if (g_ctx.cfg != nullptr && g_ctx.cfg->input.tap_delay_ms > 0) {
@@ -2106,6 +2123,9 @@ bool approval_gate_required(const approval_config &_gates,
     }
     if (_tool == "rename_script") {
         return _gates.gates.rename_script;
+    }
+    if (_tool == "go_home") {
+        return _gates.gates.go_home;
     }
     // A gated tool this table has not heard of asks rather than skips: an
     // unguarded surprise is the one failure worth avoiding here.

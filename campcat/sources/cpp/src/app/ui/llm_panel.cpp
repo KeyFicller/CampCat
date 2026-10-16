@@ -1176,6 +1176,7 @@ void draw_approval_settings(campcat::app_config &_c) {
         ImGui::BeginDisabled();
     }
     ImGui::Checkbox("Device tap", &_c.approval.gates.tap);
+    ImGui::Checkbox("Go home", &_c.approval.gates.go_home);
     ImGui::Checkbox("Run script", &_c.approval.gates.run_script);
     ImGui::Checkbox("Save script", &_c.approval.gates.save_script);
     ImGui::Checkbox("Save template", &_c.approval.gates.save_template);

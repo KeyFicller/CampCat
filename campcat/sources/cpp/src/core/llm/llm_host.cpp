@@ -351,6 +351,7 @@ long llm_host::next_request_id() {
     m_thinking = false;
     m_has_tool = false;
     m_tool_calls = 0;
+    m_view_crop_streak = 0;
     m_events.clear();
     m_event_images.clear();
     return id;
@@ -383,16 +384,34 @@ std::string llm_host::run_tool(const llm_protocol::message &_call) {
         return llm_protocol::build_tool_result(_call.call_id, false, "", error,
                                                "");
     }
+    if (_call.tool_name == "view_crop") {
+        ++m_view_crop_streak;
+    } else {
+        m_view_crop_streak = 0;
+    }
+    const std::string alarm = llm::dispatch_alarm(
+        call_index, m_turn_max_dispatches, m_view_crop_streak);
 
     const llm::tool_reply reply =
         llm::dispatch(_call.tool_name, _call.tool_args_json);
+    std::string text = reply.text;
+    std::string error = reply.error;
+    if (!alarm.empty()) {
+        std::string &dest = reply.ok ? text : error;
+        if (!dest.empty()) {
+            dest += "\n";
+        }
+        dest += alarm;
+    }
     if (reply.ok) {
-        const std::string shown = reply.quiet_note.empty()
-                                      ? reply.text
-                                      : std::string(reply.quiet_note);
+        std::string shown = reply.quiet_note.empty() ? text
+                                                     : std::string(reply.quiet_note);
+        if (!alarm.empty() && !reply.quiet_note.empty()) {
+            shown += "\n" + alarm;
+        }
         record_note(tool_note(_call.tool_name, "ok", shown));
     } else {
-        record_note(tool_note(_call.tool_name, "error", reply.error));
+        record_note(tool_note(_call.tool_name, "error", error));
     }
     if (!reply.image_png.empty()) {
         std::lock_guard<std::mutex> lk(m_mu);
@@ -416,8 +435,8 @@ std::string llm_host::run_tool(const llm_protocol::message &_call) {
                                       reinterpret_cast<const unsigned char *>(
                                           reply.image_png.data()),
                                       reply.image_png.size());
-    return llm_protocol::build_tool_result(_call.call_id, reply.ok, reply.text,
-                                           reply.error, image_b64, reply.shot);
+    return llm_protocol::build_tool_result(_call.call_id, reply.ok, text, error,
+                                           image_b64, reply.shot);
 }
 
 llm_result llm_host::exchange(const std::string &_request_line,

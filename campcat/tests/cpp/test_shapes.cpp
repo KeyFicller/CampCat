@@ -139,6 +139,86 @@ TEST(GoHome, ClosesRecentsAndReportsTheLauncher) {
     EXPECT_EQ(adb.home_gap_ms, 150);
 }
 
+/// `_have_callback` false is the gate with nobody to ask. The decision is
+/// ignored in that case.
+campcat::llm::tool_reply ask_go_home(SilentAdb *_adb,
+                                     campcat::llm::approval_decision _decision,
+                                     bool _have_callback,
+                                     campcat::llm::approval_request *_seen) {
+    campcat::llm::tool_context ctx;
+    ctx.adb = _adb;
+    ctx.needs_approval = [](std::string_view _tool) {
+        return _tool == "go_home";
+    };
+    if (_have_callback) {
+        ctx.request_approval = [_decision, _seen](
+                                   const campcat::llm::approval_request &_req) {
+            if (_seen != nullptr) {
+                *_seen = _req;
+            }
+            return _decision;
+        };
+    }
+    campcat::llm::set_context(ctx);
+    const campcat::llm::tool_reply reply =
+        campcat::llm::dispatch("go_home", "{}");
+    campcat::llm::set_context({});
+    return reply;
+}
+
+TEST(GoHome, RejectionDoesNotTouchTheDevice) {
+    SilentAdb adb;
+    adb.home_ok = true;
+    campcat::llm::approval_request seen;
+    campcat::llm::approval_decision decision;
+    decision.guidance = "stop";
+    const campcat::llm::tool_reply reply =
+        ask_go_home(&adb, decision, true, &seen);
+    EXPECT_FALSE(reply.ok);
+    EXPECT_EQ(reply.error, "user rejected going home: stop");
+    EXPECT_EQ(adb.home_calls, 0);
+    EXPECT_EQ(seen.tool, "go_home");
+    EXPECT_EQ(seen.summary,
+              "return to the launcher and force-stop every recent app");
+    EXPECT_FALSE(seen.editable);
+    EXPECT_TRUE(seen.screen_png.empty());
+    EXPECT_TRUE(seen.highlight.empty());
+}
+
+TEST(GoHome, ApprovalThenRuns) {
+    SilentAdb adb;
+    adb.home_ok = true;
+    campcat::llm::approval_decision decision;
+    decision.approved = true;
+    const campcat::llm::tool_reply reply =
+        ask_go_home(&adb, decision, true, nullptr);
+    EXPECT_TRUE(reply.ok) << reply.error;
+    EXPECT_EQ(reply.text, "on the launcher; recent apps were closed");
+    EXPECT_EQ(adb.home_calls, 1);
+}
+
+TEST(GoHome, AsksWithNobodyThere) {
+    SilentAdb adb;
+    adb.home_ok = true;
+    const campcat::llm::tool_reply reply =
+        ask_go_home(&adb, {}, false, nullptr);
+    EXPECT_FALSE(reply.ok);
+    EXPECT_EQ(reply.error, "no human available to approve going home");
+    EXPECT_EQ(adb.home_calls, 0);
+}
+
+TEST(GoHome, ApprovalThenAdbFailure) {
+    SilentAdb adb;
+    campcat::llm::approval_decision decision;
+    decision.approved = true;
+    const campcat::llm::tool_reply reply =
+        ask_go_home(&adb, decision, true, nullptr);
+    EXPECT_FALSE(reply.ok);
+    EXPECT_NE(reply.error.find("returning home failed"), std::string::npos)
+        << reply.error;
+    EXPECT_EQ(adb.home_calls, 1);
+}
+
 const campcat::llm::js::tool_entry *tool_named(const std::string &_name) {
     for (const auto &entry : campcat::llm::js::tool_registry()) {
         if (entry.name == _name) {

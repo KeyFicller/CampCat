@@ -72,14 +72,15 @@ struct approval_gates {
     bool update_script = true;
     bool delete_script = true;
     bool rename_script = true;
+    bool go_home = true;
 };
 
 /// Whether the model's mutating tools ask first, and which ones.
 struct approval_config {
     /// When true, the tools that change the device or write files (`tap`,
-    /// `run_script`, `save_script`, `save_template`) show the user what they
-    /// are about to do and wait for approval. Off by default: they then act
-    /// without asking. See llm_tools.h / llm_host.h.
+    /// `run_script`, `go_home`, `save_script`, `save_template`) show the user
+    /// what they are about to do and wait for approval. Off by default: they
+    /// then act without asking. See llm_tools.h / llm_host.h.
     bool require = false;
     /// Which tools ask while the master is on.
     approval_gates gates{};

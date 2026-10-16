@@ -144,6 +144,30 @@ TEST(LlmFuse, PairRequiresRoundsWithinCalls) {
     EXPECT_FALSE(campcat::llm::fuse_pair_ok(0, 1));
 }
 
+TEST(LlmFuse, AlarmFiresOnAViewCropStreakOrHalfTheCap) {
+    using campcat::llm::dispatch_alarm;
+    EXPECT_TRUE(dispatch_alarm(1, 10, 2).empty());
+    const std::string crops = dispatch_alarm(1, 10, 3);
+    EXPECT_NE(crops.find("view_crop"), std::string::npos);
+    EXPECT_EQ(crops.find("half the limit"), std::string::npos);
+
+    const std::string half = dispatch_alarm(5, 10, 0);
+    EXPECT_NE(half.find("5/10"), std::string::npos);
+    EXPECT_EQ(half.find("view_crop"), std::string::npos);
+    EXPECT_TRUE(dispatch_alarm(4, 10, 0).empty());
+    EXPECT_TRUE(dispatch_alarm(6, 10, 0).empty());
+
+    const std::string both = dispatch_alarm(5, 10, 3);
+    EXPECT_NE(both.find("view_crop"), std::string::npos);
+    EXPECT_NE(both.find("5/10"), std::string::npos);
+
+    // An unlimited cap never reaches a half, and a cap of 1 has no half above 0.
+    EXPECT_TRUE(dispatch_alarm(50000, campcat::llm::k_fuse_unlimited, 0).empty());
+    EXPECT_TRUE(dispatch_alarm(1, 1, 0).empty());
+    EXPECT_NE(dispatch_alarm(1, campcat::llm::k_fuse_unlimited, 3).find("view_crop"),
+              std::string::npos);
+}
+
 TEST(LlmProtocol, MissingUsageFieldsDoNotZero) {
     campcat::llm_protocol::message msg;
     ASSERT_TRUE(parse_line(
@@ -284,6 +308,19 @@ TEST(AppConfig, MissingFuseFieldsKeepTheDefaults) {
     EXPECT_EQ(cfg.llm.max_dispatches, campcat::llm::k_default_max_dispatches);
     EXPECT_EQ(cfg.llm.max_model_rounds,
               campcat::llm::k_default_max_model_rounds);
+}
+
+TEST(AppConfig, MissingGoHomeGateStaysOn) {
+    const std::filesystem::path path =
+        std::filesystem::temp_directory_path() / "campcat_gohome_cfg_test.json";
+    {
+        std::ofstream out(path);
+        out << R"({"approval":{"require":true}})";
+    }
+    const campcat::app_config cfg = campcat::app_config::load_from_file(path);
+    std::filesystem::remove(path);
+    EXPECT_TRUE(cfg.approval.require);
+    EXPECT_TRUE(cfg.approval.gates.go_home);
 }
 
 TEST(LlmHost, ResetClearsUsage) {

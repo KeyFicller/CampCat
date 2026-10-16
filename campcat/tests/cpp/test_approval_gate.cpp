@@ -28,6 +28,7 @@ const gate_case k_cases[] = {
     {"update_script", &approval_gates::update_script},
     {"delete_script", &approval_gates::delete_script},
     {"rename_script", &approval_gates::rename_script},
+    {"go_home", &approval_gates::go_home},
 };
 
 approval_config all_on() {
