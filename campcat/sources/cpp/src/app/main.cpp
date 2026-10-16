@@ -444,7 +444,7 @@ int main(int argc, char **argv) {
             } else if (page == shell_page::Llm) {
                 llm_panel_draw_panel(st, cfg_view, lock_manual_single);
             } else if (page == shell_page::Console) {
-                console_panel_draw(st, cfg_view, ccat_ui, busy_now);
+                console_panel_draw(st, cfg_view, busy_now);
             } else if (page == shell_page::Graph) {
                 graph_panel_draw(cfg_view);
             } else if (page == shell_page::Settings) {

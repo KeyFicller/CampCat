@@ -242,9 +242,6 @@ bool adb_client::keyevent(int _keycode) {
     return run(args, nullptr, nullptr, 8000);
 }
 
-namespace {
-
-/** Packages from `dumpsys activity recents` Task headers (skip type=home). */
 std::vector<std::string> packages_from_recents_dump(const std::string &_dump) {
     std::vector<std::string> pkgs;
     std::unordered_set<std::string> seen;
@@ -262,9 +259,9 @@ std::vector<std::string> packages_from_recents_dump(const std::string &_dump) {
         if (apos == std::string::npos) {
             continue;
         }
-        // Header form is `A=com.example.app` or `A=com.example.app/.Activity`;
-        // the token ends at whitespace or the enclosing `}`, and the optional
-        // `/` suffix names the activity.
+        // Token ends at whitespace or `}`. Forms seen on device:
+        // `A=com.example.app`, `A=com.example.app/.Activity`, and Android 12+
+        // `A=<uid>:com.example.app`. force-stop needs the package alone.
         size_t i = apos + 2;
         size_t j = i;
         while (j < line.size()) {
@@ -282,6 +279,10 @@ std::vector<std::string> packages_from_recents_dump(const std::string &_dump) {
         if (slash != std::string::npos) {
             pkg.resize(slash);
         }
+        const auto colon = pkg.rfind(':');
+        if (colon != std::string::npos) {
+            pkg.erase(0, colon + 1);
+        }
         if (pkg.empty()) {
             continue;
         }
@@ -291,8 +292,6 @@ std::vector<std::string> packages_from_recents_dump(const std::string &_dump) {
     }
     return pkgs;
 }
-
-} // namespace
 
 bool adb_client::home_and_kill_all(int _gap_ms) {
     // KEYCODE_HOME == 3

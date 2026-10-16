@@ -44,8 +44,15 @@ public:
     bool tap(int, int) override { return true; }
     bool swipe(int, int, int, int, int) override { return false; }
     bool keyevent(int) override { return false; }
-    bool home_and_kill_all(int) override { return false; }
+    bool home_and_kill_all(int _gap_ms) override {
+        home_gap_ms = _gap_ms;
+        ++home_calls;
+        return home_ok;
+    }
     bool screencap_bgr(cv::Mat *, int, std::string *) override { return false; }
+    int home_gap_ms = -1;
+    int home_calls = 0;
+    bool home_ok = false;
     bool delay_after_action(std::chrono::milliseconds) const override {
         return true;
     }
@@ -113,6 +120,24 @@ protected:
 private:
     SilentAdb m_adb;
 };
+
+TEST(GoHome, ClosesRecentsAndReportsTheLauncher) {
+    SilentAdb adb;
+    adb.home_ok = true;
+    campcat::app_config cfg;
+    cfg.input.tap_delay_ms = 150;
+    campcat::llm::tool_context ctx;
+    ctx.adb = &adb;
+    ctx.cfg = &cfg;
+    campcat::llm::set_context(ctx);
+    const campcat::llm::tool_reply reply =
+        campcat::llm::dispatch("go_home", "{}");
+    campcat::llm::set_context({});
+    EXPECT_TRUE(reply.ok) << reply.error;
+    EXPECT_EQ(reply.text, "on the launcher; recent apps were closed");
+    EXPECT_EQ(adb.home_calls, 1);
+    EXPECT_EQ(adb.home_gap_ms, 150);
+}
 
 const campcat::llm::js::tool_entry *tool_named(const std::string &_name) {
     for (const auto &entry : campcat::llm::js::tool_registry()) {

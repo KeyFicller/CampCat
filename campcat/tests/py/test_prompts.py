@@ -7,6 +7,7 @@ import agent.scripter as scripter
 def test_operator_prompt_drops_the_script_language():
     text = operator.operator_prompt()
     assert "author_script" in text
+    assert "go_home" in text
     assert "verbatim" in text
     assert "goto(" in text
     assert "wait_until" not in text

@@ -1038,6 +1038,26 @@ CPP_REFLECT_TOOL(start_emulator)
 
 [[= js::doc{
     .text = js::str(
+        "Returns to the Android launcher and force-stops every recent app, "
+        "so the device is on the home screen with nothing else running. Call "
+        "it before a flow that has to start from that screen: each run then "
+        "begins in the same place. It blocks until the apps are stopped.")}]]
+    std::string go_home() {
+    adb_api &adb = require_adb();
+    int gap_ms = 0;
+    if (g_ctx.cfg != nullptr && g_ctx.cfg->input.tap_delay_ms > 0) {
+        gap_ms = g_ctx.cfg->input.tap_delay_ms;
+    }
+    if (!adb.home_and_kill_all(gap_ms)) {
+        throw js::bind_error(std::string("returning home failed") +
+                             std::string(k_device_hint));
+    }
+    return "on the launcher; recent apps were closed";
+}
+CPP_REFLECT_TOOL(go_home)
+
+[[= js::doc{
+    .text = js::str(
         "Runs a .ccat script on the device and returns what happened. "
         "While human approval is on, the script is shown to the user "
         "and nothing runs unless they approve it. Call ccat_help "

@@ -195,4 +195,13 @@ private:
 bool device_online(const std::vector<std::string> &_devices,
                    const std::string &_serial);
 
+/**
+ * @brief Package names from a `dumpsys activity recents` dump.
+ *
+ * Skips `type=home`. Android 12+ writes `A=<uid>:com.example.app`; the uid
+ * prefix is not a package, and `am force-stop` of it leaves the task alive.
+ * An activity suffix (`com.example.app/.Main`) is stripped too.
+ */
+std::vector<std::string> packages_from_recents_dump(const std::string &_dump);
+
 } // namespace campcat

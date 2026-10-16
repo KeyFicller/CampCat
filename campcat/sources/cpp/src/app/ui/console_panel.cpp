@@ -4,18 +4,18 @@
 #include "app/ui/activity_status.h"
 #include "app/ui/fonts.h"
 #include "app/ui/prompt_input.h"
+#include "ccat_driver/ccat_script_profile.h"
 #include "core/script/ccat_parser.h"
 #include "core/script/ccat_repl.h"
 
 #include <imgui.h>
 
 #include <algorithm>
+#include <cctype>
 #include <string>
 
 void console_panel_draw(campcat::shell_state &_st,
-                        campcat::app_config &_cfg_view,
-                        const campcat::ccat_script_profile &_ccat_ui,
-                        bool _busy_now) {
+                        campcat::app_config &_cfg_view, bool _busy_now) {
     // Only this page uses them, so they live here rather than in shell_state.
     static campcat::ccat_lang::CcatRepl console_repl;
     static std::string console_input;
@@ -87,8 +87,8 @@ void console_panel_draw(campcat::shell_state &_st,
     // The whole width now: the Clear button that used to sit here is the
     // context menu on the output above.
     ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
-    const bool submit =
-        prompt_input_text("##console_in", nullptr, &console_input);
+    const bool submit = prompt_input_text(
+        "##console_in", "cwd → print the console directory", &console_input);
     // Must run immediately after InputText; later widgets would steal -1.
     if (submit && !_busy_now) {
         ImGui::SetKeyboardFocusHere(-1);
@@ -108,10 +108,23 @@ void console_panel_draw(campcat::shell_state &_st,
         const auto fr = console_repl.feed_line(console_input);
         console_input.clear();
         if (fr == campcat::ccat_lang::repl_feed_result::ready) {
-            if (!_ccat_ui.has_script_source()) {
-                console_repl.history.push_back(
-                    "need a bundle for images_base");
-                _st.append_log("[console] need a bundle for images_base");
+            const std::string &pending = console_repl.pending;
+            const auto begin = std::find_if_not(
+                pending.begin(), pending.end(), [](unsigned char c) {
+                    return std::isspace(c);
+                });
+            const auto end = std::find_if_not(
+                pending.rbegin(), pending.rend(), [](unsigned char c) {
+                    return std::isspace(c);
+                }).base();
+            if (begin < end && std::string(begin, end) == "cwd") {
+                const campcat::ccat_script_profile profile =
+                    campcat::ccat_script_profile::load(_cfg_view.config_home,
+                                                       _cfg_view.script_bundle);
+                const std::string root =
+                    profile.console_root(_cfg_view.config_home).string();
+                console_repl.history.push_back(root);
+                _st.append_log(std::string("[console] ") + root);
                 console_repl.clear();
             } else {
                 try {

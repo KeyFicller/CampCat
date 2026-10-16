@@ -357,12 +357,15 @@ void shell_state::run_console_source_job(std::string _source) {
                 std::string co, ce;
                 adb.connect_remote(addr, 15000, &co, &ce);
                 auto prog = campcat::ccat_lang::parse_program(source);
-                const auto images = ccat_bundle.images_base(shell.config_home);
+                const std::filesystem::path home(shell.config_home);
+                const std::filesystem::path images =
+                    ccat_bundle.console_root(home);
                 std::filesystem::path script_abs =
                     ccat_bundle.script_path_absolute;
-                if (script_abs.empty()) {
-                    script_abs = std::filesystem::path(shell.config_home) /
-                                 ccat_bundle.source_rel;
+                if (!ccat_bundle.has_script_source()) {
+                    script_abs = home;
+                } else if (script_abs.empty()) {
+                    script_abs = home / ccat_bundle.source_rel;
                 }
                 const auto should_stop = [this]() {
                     return stop_requested.load();

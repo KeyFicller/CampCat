@@ -9,14 +9,15 @@ import agent.scripter as scripter
 
 HOST_NAMES = (
     "screenshot view_shot view_template view_crop mark tap start_emulator "
-    "run_script save_script save_template ccat_help list_scripts read_script "
+    "go_home run_script save_script save_template ccat_help list_scripts "
+    "read_script "
     "update_script read_graph save_anchor delete_script rename_script"
 ).split()
 
 # Host order, not the grouped order in the spec table: `run_script` is
 # registered before `list_scripts`. `mark` is registered and offered to neither.
 OPERATOR_NAMES = (
-    "screenshot view_shot tap start_emulator run_script list_scripts "
+    "screenshot view_shot tap start_emulator go_home run_script list_scripts "
     "author_script"
 ).split()
 

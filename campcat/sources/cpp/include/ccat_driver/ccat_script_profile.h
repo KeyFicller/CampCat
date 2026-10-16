@@ -38,6 +38,16 @@ struct ccat_script_profile {
     images_base(const std::filesystem::path &_config_home) const;
 
     /**
+     * @brief Directory a console snippet resolves relative paths against.
+     *
+     * The bundle directory when one is selected. With nothing selected this is
+     * `_config_home` (the library root); `images_base` stays empty then, so the
+     * Script page can still tell that no bundle is chosen.
+     */
+    std::filesystem::path
+    console_root(const std::filesystem::path &_config_home) const;
+
+    /**
      * @brief True when a bundle is selected.
      */
     bool has_script_source() const;

@@ -41,6 +41,15 @@ std::filesystem::path ccat_script_profile::images_base(
     return resolved.parent_path();
 }
 
+std::filesystem::path ccat_script_profile::console_root(
+    const std::filesystem::path &_config_home) const {
+    if (!has_script_source()) {
+        return _config_home;
+    }
+    const std::filesystem::path images = images_base(_config_home);
+    return images.empty() ? _config_home : images;
+}
+
 ccat_script_profile
 ccat_script_profile::load(const std::filesystem::path &_config_home,
                           std::string_view _bundle) {

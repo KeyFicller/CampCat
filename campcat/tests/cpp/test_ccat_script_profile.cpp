@@ -27,6 +27,12 @@ TEST(CcatScriptProfile, NoBundleIsNothingSelected) {
     EXPECT_FALSE(p.has_script_source());
     EXPECT_TRUE(p.script_path_absolute.empty());
     EXPECT_TRUE(p.images_base("/cfg").empty());
+    EXPECT_EQ(p.console_root("/cfg").string(), "/cfg");
+}
+
+TEST(CcatScriptProfile, ABundleRootsTheConsoleAtItsDirectory) {
+    const ccat_script_profile p = ccat_script_profile::load("/cfg", "demo");
+    EXPECT_EQ(p.console_root("/cfg").string(), "/cfg/demo");
 }
 
 TEST(CcatScriptProfile, ANameThatIsNotOnDiskIsNotAnError) {
