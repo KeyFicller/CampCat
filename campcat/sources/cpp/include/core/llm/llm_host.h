@@ -103,15 +103,15 @@ public:
      * @param[in] _provider Which model provider the sidecar should build, from
      * the settings. Taken from a snapshot, so a change mid-turn waits its turn.
      * @param[in] _prompt The user's instruction. Blank is rejected.
-     * @param[in] _max_tool_calls Per-turn tool cap from the settings snapshot.
+     * @param[in] _max_dispatches How many tools the host may run this turn.
      * Values below 1 use the default. A change mid-turn waits for the next one.
-     * @param[in] _max_tool_rounds Per-turn round cap, sent to the sidecar.
-     * Values below 1 use the default.
+     * @param[in] _max_model_rounds How many model rounds this turn may take,
+     * sent to the sidecar. Values below 1 use the default.
      */
     llm_result run_turn(const std::filesystem::path &_config_home,
                         const std::string &_provider,
-                        const std::string &_prompt, int _max_tool_calls,
-                        int _max_tool_rounds);
+                        const std::string &_prompt, int _max_dispatches,
+                        int _max_model_rounds);
 
     /// The latest usage the sidecar reported. Safe to call from the UI thread.
     llm_protocol::usage_stats usage() const;
@@ -317,7 +317,7 @@ private:
     /// Tool activity for the turn in flight, read by the UI thread.
     int m_tool_calls = 0;
     /// Cap for `m_tool_calls`, taken from the settings when the turn starts.
-    int m_turn_max_calls = llm::k_default_max_tool_calls;
+    int m_turn_max_dispatches = llm::k_default_max_dispatches;
     /// Session counters the status bar polls. Guarded by `m_mu`.
     llm_protocol::usage_stats m_usage;
     /// Steps of the turn in flight, in order, guarded by `m_mu`.

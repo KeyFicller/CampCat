@@ -88,12 +88,13 @@ struct approval_config {
 /// Which model provider the sidecar talks to. Sent with every request, so a
 /// change takes effect on the next turn rather than the next restart.
 struct llm_config {
-    std::string provider = "deepseek"; ///< "deepseek" or "qwen"
-    /// Per-turn tool-call cap. At or above `k_fuse_unlimited` the bar draws ∞.
-    int max_tool_calls = llm::k_default_max_tool_calls;
-    /// Per-turn model-round cap, sent on the turn request. Must not exceed
-    /// `max_tool_calls`: one round can issue several calls.
-    int max_tool_rounds = llm::k_default_max_tool_rounds;
+    std::string provider = "qwen"; ///< "deepseek" or "qwen"
+    /// How many tools the host may run this turn. At or above
+    /// `k_fuse_unlimited` the bar draws ∞.
+    int max_dispatches = llm::k_default_max_dispatches;
+    /// How many model rounds this turn may take, sent on the turn request.
+    /// Must not exceed `max_dispatches`: one round can dispatch several tools.
+    int max_model_rounds = llm::k_default_max_model_rounds;
 };
 
 /// Pulling the boxes the model gives onto the element's boundary, on the way to

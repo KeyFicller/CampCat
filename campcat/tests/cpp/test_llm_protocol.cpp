@@ -23,7 +23,7 @@ using campcat::llm_protocol::parse_line;
 nlohmann::json turn_with(const std::string &_provider) {
     return nlohmann::json::parse(build_turn_request(
         1, "hi", "", "notes", "", _provider,
-        campcat::llm::k_default_max_tool_rounds));
+        campcat::llm::k_default_max_model_rounds));
 }
 
 TEST(LlmProtocol, TurnCarriesTheSelectedProvider) {
@@ -178,7 +178,7 @@ TEST(LlmProtocol, ToolCallCarriesUsage) {
 TEST(LlmProtocol, TurnCarriesTheRoundCap) {
     const nlohmann::json j =
         nlohmann::json::parse(build_turn_request(1, "hi", "", "notes", "", "qwen", 20));
-    EXPECT_EQ(j["max_tool_rounds"], 20);
+    EXPECT_EQ(j["max_model_rounds"], 20);
 }
 
 TEST(LlmProtocol, TurnCarriesScripterMemoryEvenWhenEmpty) {
@@ -187,7 +187,7 @@ TEST(LlmProtocol, TurnCarriesScripterMemoryEvenWhenEmpty) {
     EXPECT_EQ(j["memory"], "notes");
     ASSERT_TRUE(j.contains("scripter_memory"));
     EXPECT_EQ(j["scripter_memory"], "");
-    EXPECT_EQ(j["max_tool_rounds"], 20);
+    EXPECT_EQ(j["max_model_rounds"], 20);
 }
 
 TEST(LlmProtocol, MemorizeNamesTheAgent) {
@@ -281,8 +281,9 @@ TEST(AppConfig, MissingFuseFieldsKeepTheDefaults) {
     const campcat::app_config cfg = campcat::app_config::load_from_file(path);
     std::filesystem::remove(path);
     EXPECT_EQ(cfg.llm.provider, "qwen");
-    EXPECT_EQ(cfg.llm.max_tool_calls, 1000000);
-    EXPECT_EQ(cfg.llm.max_tool_rounds, 100000);
+    EXPECT_EQ(cfg.llm.max_dispatches, campcat::llm::k_default_max_dispatches);
+    EXPECT_EQ(cfg.llm.max_model_rounds,
+              campcat::llm::k_default_max_model_rounds);
 }
 
 TEST(LlmHost, ResetClearsUsage) {

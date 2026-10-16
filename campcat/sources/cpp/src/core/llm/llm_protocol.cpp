@@ -54,7 +54,7 @@ std::string build_turn_request(long _id, std::string_view _text,
                                std::string_view _memory,
                                std::string_view _scripter_memory,
                                std::string_view _provider,
-                               int _max_tool_rounds) {
+                               int _max_model_rounds) {
     nlohmann::json j;
     j["type"] = "turn";
     j["id"] = _id;
@@ -67,7 +67,7 @@ std::string build_turn_request(long _id, std::string_view _text,
     j["memory"] = std::string(_memory);
     j["scripter_memory"] = std::string(_scripter_memory);
     j["provider"] = std::string(_provider);
-    j["max_tool_rounds"] = _max_tool_rounds;
+    j["max_model_rounds"] = _max_model_rounds;
     return j.dump();
 }
 

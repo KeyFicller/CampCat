@@ -406,7 +406,7 @@ def _no_summary(messages: list) -> str:
 
 
 def run_scripter(args: dict, host_tools: list,
-                 max_tool_rounds: int | None = None) -> str:
+                 max_model_rounds: int | None = None) -> str:
     """Run the scripter to the end and return the text the operator should see.
 
     A failure here is a tool result, not a failed operator turn.
@@ -432,13 +432,13 @@ def run_scripter(args: dict, host_tools: list,
                     return note("error: " + str(listed.get("error", "")))
                 token = arm_freeze(frozenset(
                     bundle_names_of(str(listed.get("text") or ""))))
-            if max_tool_rounds is None:
-                max_tool_rounds = graph.MAX_TOOL_ROUNDS
+            if max_model_rounds is None:
+                max_model_rounds = graph.MAX_MODEL_ROUNDS
             state = {
                 "text": brief,
                 "tools": scripter_tools(host_tools),
                 "tool_rounds": 0,
-                "max_tool_rounds": max_tool_rounds,
+                "max_model_rounds": max_model_rounds,
             }
             # This span's callbacks, not the parent's whole config: joining the
             # two Pregel runs makes a picture coming back stall the parent's

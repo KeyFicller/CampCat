@@ -24,7 +24,7 @@ constexpr char k_venv_python_rel[] = ".venv/bin/python3";
 /// Generous enough to cover a cold Python + LangChain import.
 constexpr int k_startup_timeout_ms = 60000;
 /// The whole exchange, tool calls included, so this has to cover every round
-/// the sidecar allows (`MAX_TOOL_ROUNDS` in llm/graph.py). Too short and a long
+/// the sidecar allows (`MAX_MODEL_ROUNDS` in graph.py). Too short and a long
 /// but healthy turn dies as "sidecar timed out" rather than finishing.
 constexpr int k_request_timeout_ms = 86400000;
 
@@ -376,9 +376,9 @@ std::string llm_host::run_tool(const llm_protocol::message &_call) {
         std::lock_guard<std::mutex> lk(m_mu);
         call_index = ++m_tool_calls;
     }
-    if (call_index > m_turn_max_calls) {
-        const std::string error = "tool call limit reached (" +
-                                  std::to_string(m_turn_max_calls) + ")";
+    if (call_index > m_turn_max_dispatches) {
+        const std::string error = "dispatch limit reached (" +
+                                  std::to_string(m_turn_max_dispatches) + ")";
         record_note(tool_note(_call.tool_name, "error", error));
         return llm_protocol::build_tool_result(_call.call_id, false, "", error,
                                                "");
@@ -497,13 +497,14 @@ llm_protocol::usage_stats llm_host::usage() const {
 
 llm_result llm_host::run_turn(const std::filesystem::path &_config_home,
                               const std::string &_provider,
-                              const std::string &_prompt, int _max_tool_calls,
-                              int _max_tool_rounds) {
+                              const std::string &_prompt, int _max_dispatches,
+                              int _max_model_rounds) {
     llm_result r;
-    m_turn_max_calls = _max_tool_calls >= 1 ? _max_tool_calls
-                                            : llm::k_default_max_tool_calls;
-    if (_max_tool_rounds < 1) {
-        _max_tool_rounds = llm::k_default_max_tool_rounds;
+    m_turn_max_dispatches = _max_dispatches >= 1
+                                ? _max_dispatches
+                                : llm::k_default_max_dispatches;
+    if (_max_model_rounds < 1) {
+        _max_model_rounds = llm::k_default_max_model_rounds;
     }
     if (_prompt.empty()) {
         r.error = "empty request";
@@ -548,7 +549,7 @@ llm_result llm_host::run_turn(const std::filesystem::path &_config_home,
     const long id = next_request_id();
     std::string request = llm_protocol::build_turn_request(
         id, _prompt, llm::tools_json(), memory, scripter_memory, _provider,
-        _max_tool_rounds);
+        _max_model_rounds);
     request.push_back('\n');
     const llm_result turn = exchange(request, k_request_timeout_ms);
     // This turn may have replaced the screenshot; take it back for the next one

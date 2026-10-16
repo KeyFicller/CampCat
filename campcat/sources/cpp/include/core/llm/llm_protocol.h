@@ -119,7 +119,7 @@ std::string build_turn_request(long _id, std::string_view _text,
                                std::string_view _memory,
                                std::string_view _scripter_memory,
                                std::string_view _provider,
-                               int _max_tool_rounds);
+                               int _max_model_rounds);
 
 /**
  * @brief Build one `tool_result` line answering a `tool_call`.

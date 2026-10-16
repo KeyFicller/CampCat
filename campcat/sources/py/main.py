@@ -78,7 +78,7 @@ def handle_request(req: dict) -> Iterator[dict]:
                 "tools": req.get("tools") or [],
                 # Long-term notes, read off disk by the host this turn.
                 "memory": req.get("memory") or "",
-                "max_tool_rounds": graph.rounds_of(req.get("max_tool_rounds")),
+                "max_model_rounds": graph.rounds_of(req.get("max_model_rounds")),
             },
             out,
         ):

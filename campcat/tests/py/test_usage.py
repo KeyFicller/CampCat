@@ -50,9 +50,9 @@ def test_reset_drops_context():
 
 
 def test_rounds_of_ignores_a_bool_and_uses_the_default():
-    assert graph.rounds_of(True) == graph.MAX_TOOL_ROUNDS
+    assert graph.rounds_of(True) == graph.MAX_MODEL_ROUNDS
     assert graph.rounds_of(20) == 20
-    assert graph.rounds_of(None) == graph.MAX_TOOL_ROUNDS
+    assert graph.rounds_of(None) == graph.MAX_MODEL_ROUNDS
 
 
 def test_a_model_return_counts_and_records_input_tokens():

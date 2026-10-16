@@ -671,7 +671,7 @@ void run_prompt_loop(campcat::shell_state *_st, const campcat::app_config &_cfg,
         _promote = true;
         campcat::llm_result res = g_host.run_turn(
             _cfg.config_home, _cfg.llm.provider, _prompt,
-            _cfg.llm.max_tool_calls, _cfg.llm.max_tool_rounds);
+            _cfg.llm.max_dispatches, _cfg.llm.max_model_rounds);
         post_turn(std::move(res));
         std::optional<std::string> next = take_queued();
         if (!next.has_value()) {
@@ -1105,24 +1105,24 @@ void draw_fuse_settings(campcat::app_config &_c) {
         return;
     }
     if (fresh) {
-        show_cap(calls_buf, sizeof calls_buf, _c.llm.max_tool_calls);
-        show_cap(rounds_buf, sizeof rounds_buf, _c.llm.max_tool_rounds);
+        show_cap(calls_buf, sizeof calls_buf, _c.llm.max_dispatches);
+        show_cap(rounds_buf, sizeof rounds_buf, _c.llm.max_model_rounds);
         fresh = false;
     }
-    ImGui::InputText("Tool calls per turn", calls_buf, sizeof calls_buf);
-    ImGui::InputText("Tool rounds per turn", rounds_buf, sizeof rounds_buf);
+    ImGui::InputText("Dispatches per turn", calls_buf, sizeof calls_buf);
+    ImGui::InputText("Model rounds per turn", rounds_buf, sizeof rounds_buf);
     int calls = 0;
     int rounds = 0;
     const bool calls_ok =
-        parse_cap(calls_buf, campcat::llm::k_default_max_tool_calls, &calls);
+        parse_cap(calls_buf, campcat::llm::k_default_max_dispatches, &calls);
     const bool rounds_ok =
-        parse_cap(rounds_buf, campcat::llm::k_default_max_tool_rounds, &rounds);
+        parse_cap(rounds_buf, campcat::llm::k_default_max_model_rounds, &rounds);
     if (calls_ok && rounds_ok && campcat::llm::fuse_pair_ok(calls, rounds)) {
-        _c.llm.max_tool_calls = calls;
-        _c.llm.max_tool_rounds = rounds;
+        _c.llm.max_dispatches = calls;
+        _c.llm.max_model_rounds = rounds;
     } else if (calls_ok && rounds_ok) {
         ImGui::TextDisabled(
-            "Tool rounds per turn cannot exceed tool calls per turn.");
+            "Model rounds per turn cannot exceed dispatches per turn.");
     }
     ImGui::EndPopup();
 }
@@ -2005,7 +2005,7 @@ void llm_panel_draw_panel(campcat::shell_state &_st, campcat::app_config &_cfg,
     ImGui::SameLine();
     draw_approval_settings(_cfg);
 
-    // Four counts. Tool calls is the only one with a fuse, and that fuse is
+    // Four counts. Dispatches is the only one with a fuse, and that fuse is
     // per turn while the number is the conversation total.
     refresh_memory_chars();
     const campcat::llm_protocol::usage_stats usage = g_host.usage();
@@ -2038,9 +2038,9 @@ void llm_panel_draw_panel(campcat::shell_state &_st, campcat::app_config &_cfg,
                               ImGuiTableFlags_SizingStretchSame)) {
             cell("Turns", std::to_string(g_sidecar_turns));
             cell("LLM calls", std::to_string(usage.llm_calls));
-            cell("Tool calls",
+            cell("Dispatches",
                  std::to_string(usage.tool_calls) + "/" +
-                     campcat::llm::format_fuse(_cfg.llm.max_tool_calls));
+                     campcat::llm::format_fuse(_cfg.llm.max_dispatches));
             cell("Context", usage.context_tokens < 0
                                ? std::string("\xE2\x80\x94")
                                : std::to_string(usage.context_tokens));
