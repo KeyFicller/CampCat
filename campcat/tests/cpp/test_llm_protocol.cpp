@@ -109,7 +109,7 @@ TEST(AppConfig, AConfigWithoutTheBlockStillLoads) {
     const campcat::app_config cfg = campcat::app_config::load_from_file(path);
     std::filesystem::remove(path);
 
-    EXPECT_EQ(cfg.llm.provider, "deepseek");
+    EXPECT_EQ(cfg.llm.provider, "qwen");
 }
 
 TEST(AppConfig, ConfigHomeIsTheLibraryBesideTheConfigFile) {

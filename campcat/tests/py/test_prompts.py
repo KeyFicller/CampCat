@@ -10,6 +10,7 @@ def test_operator_prompt_drops_the_script_language():
     assert "go_home" in text
     assert "verbatim" in text
     assert "goto(" in text
+    assert "read_graph" in text
     assert "wait_until" not in text
     assert "read_script" not in text
 

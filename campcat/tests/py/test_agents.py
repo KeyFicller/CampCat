@@ -18,7 +18,7 @@ HOST_NAMES = (
 # registered before `list_scripts`. `mark` is registered and offered to neither.
 OPERATOR_NAMES = (
     "screenshot view_shot tap start_emulator go_home run_script list_scripts "
-    "author_script"
+    "read_graph author_script"
 ).split()
 
 

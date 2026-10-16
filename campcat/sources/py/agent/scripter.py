@@ -25,15 +25,16 @@ SCRIPTER_ONLY = frozenset({
     "read_script", "ccat_help",
     "save_script", "update_script", "delete_script", "rename_script",
     "save_template", "view_template", "view_crop",
-    "read_graph", "save_anchor",
+    "save_anchor",
 })
 # Registered in C++ for the review pipeline, which calls them itself. A model
 # is not offered them: the approval bubble already shows a region.
 HIDDEN = frozenset({"mark"})
-# Offered to both: the operator runs saved skills and looks at the screen; the
-# scripter verifies what it wrote and cuts templates from fresh frames.
+# Offered to both: the operator runs saved skills, looks at the screen and
+# reads a graph before goto; the scripter verifies what it wrote and cuts
+# templates from fresh frames.
 SHARED = frozenset({
-    "list_scripts", "run_script", "screenshot", "view_shot",
+    "list_scripts", "run_script", "screenshot", "view_shot", "read_graph",
 })
 
 
