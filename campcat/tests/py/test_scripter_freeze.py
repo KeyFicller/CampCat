@@ -1,6 +1,9 @@
 """A handoff may not change bundles that already exist, unless it is a fix."""
 
+import contextlib
+
 import graph
+import observability
 import tools
 from langchain_core.messages import AIMessage, ToolMessage
 
@@ -74,6 +77,29 @@ def test_the_gate_stops_the_host(monkeypatch):
     finally:
         scripter.disarm_freeze(token)
     assert calls == ["update_script"]
+
+
+def test_a_handoff_opens_its_own_span(monkeypatch):
+    opened = []
+
+    @contextlib.contextmanager
+    def fake_span(name, input_text=""):
+        opened.append((name, input_text))
+        yield [], None
+
+    monkeypatch.setattr(observability, "span", fake_span)
+    monkeypatch.setattr(
+        tools, "call_cpp", lambda *a, **k: {"ok": True, "text": "none yet"})
+    seen = []
+
+    def run(*args, **kwargs):
+        seen.append(args)
+        return {"reply": "done"}
+
+    monkeypatch.setattr(graph, "run_subgraph", run)
+    assert scripter.run_scripter({"goal": "签到"}, []) == "done"
+    assert opened == [("author-script", "goal: 签到")]
+    assert seen[0][2] is None
 
 
 def test_a_failed_listing_does_not_start_the_scripter(monkeypatch):

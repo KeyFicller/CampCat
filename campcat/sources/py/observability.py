@@ -49,6 +49,27 @@ def new_session() -> str:
 
 
 @contextlib.contextmanager
+def span(name: str, input_text: str = "") -> Iterator[tuple[list, object]]:
+    """A span under the current trace, with a handler bound to it.
+
+    Yields `(callbacks, observation)`. The observation is None when tracing
+    is off, and `callbacks` is then empty. The handler is built inside this
+    span, so the runs it sees nest here rather than on the surrounding turn.
+    """
+    client = _client_or_none()
+    if client is None:
+        yield [], None
+        return
+    from langfuse import propagate_attributes
+    from langfuse.langchain import CallbackHandler
+    with client.start_as_current_observation(as_type="span", name=name) as obs:
+        if input_text:
+            obs.update(input={"instruction": input_text})
+        with propagate_attributes(session_id=_session_id):
+            yield [CallbackHandler()], obs
+
+
+@contextlib.contextmanager
 def turn(name: str, input_text: str = "") -> Iterator[list]:
     """One named trace, with a handler bound to it. Yields the callbacks.
 

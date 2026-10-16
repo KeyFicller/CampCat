@@ -14,6 +14,7 @@ from langgraph.graph import END, StateGraph
 
 import agent.diagnoser as diagnoser
 import agent.memorier as memorier
+import observability
 import session
 import tools
 
@@ -408,44 +409,55 @@ def run_scripter(args: dict, host_tools: list,
     goal = str(args.get("goal") or "").strip()
     if not goal:
         return "error: empty goal"
-    token = None
-    try:
-        import graph
-        if handoff_may_change(args):
-            token = arm_freeze(None)
-        else:
-            listed = tools.call_cpp("list_scripts", {})
-            if not listed.get("ok"):
-                return "error: " + str(listed.get("error", ""))
-            token = arm_freeze(frozenset(
-                bundle_names_of(str(listed.get("text") or ""))))
-        if max_tool_rounds is None:
-            max_tool_rounds = graph.MAX_TOOL_ROUNDS
-        state = {
-            "text": brief_of(args),
-            "tools": scripter_tools(host_tools),
-            "tool_rounds": 0,
-            "max_tool_rounds": max_tool_rounds,
-        }
-        # Callbacks only. The parent's whole config joins the two Pregel runs,
-        # and a picture coming back then stalls the parent's stream.
-        out = graph.run_subgraph(_scripter_graph(), state)
-    except tools.TurnInterrupted:
-        raise
-    except Exception as exc:  # noqa: BLE001 - the operator hears it as a tool error
-        return "error: " + str(exc)
-    finally:
-        if token is not None:
-            disarm_freeze(token)
-    if out.get("interrupted"):
-        raise tools.TurnInterrupted()
-    if out.get("error"):
-        return "error: " + str(out["error"])
-    reply = (out.get("reply") or "").strip()
-    if not reply:
-        own = (out.get("messages") or [])[out.get("input_len") or 0:]
-        return _no_summary(own)
-    return reply
+    brief = brief_of(args)
+    with observability.span("author-script", brief) as (callbacks, obs):
+        def note(text: str) -> str:
+            if obs is not None:
+                obs.update(output={"reply": text})
+            return text
+
+        token = None
+        try:
+            import graph
+            if handoff_may_change(args):
+                token = arm_freeze(None)
+            else:
+                listed = tools.call_cpp("list_scripts", {})
+                if not listed.get("ok"):
+                    return note("error: " + str(listed.get("error", "")))
+                token = arm_freeze(frozenset(
+                    bundle_names_of(str(listed.get("text") or ""))))
+            if max_tool_rounds is None:
+                max_tool_rounds = graph.MAX_TOOL_ROUNDS
+            state = {
+                "text": brief,
+                "tools": scripter_tools(host_tools),
+                "tool_rounds": 0,
+                "max_tool_rounds": max_tool_rounds,
+            }
+            # This span's callbacks, not the parent's whole config: joining the
+            # two Pregel runs makes a picture coming back stall the parent's
+            # stream.
+            out = graph.run_subgraph(
+                _scripter_graph(), state, callbacks or None)
+        except tools.TurnInterrupted:
+            note("interrupted")
+            raise
+        except Exception as exc:  # noqa: BLE001 - the operator hears it as a tool error
+            return note("error: " + str(exc))
+        finally:
+            if token is not None:
+                disarm_freeze(token)
+        if out.get("interrupted"):
+            note("interrupted")
+            raise tools.TurnInterrupted()
+        if out.get("error"):
+            return note("error: " + str(out["error"]))
+        reply = (out.get("reply") or "").strip()
+        if not reply:
+            own = (out.get("messages") or [])[out.get("input_len") or 0:]
+            return note(_no_summary(own))
+        return note(reply)
 
 
 def _scripter_build(state: dict) -> dict:

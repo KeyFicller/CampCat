@@ -151,17 +151,20 @@ def invoke(state: TurnState) -> dict:
     return _invoke(state, operator.operator_tools(state.get("tools") or []))
 
 
-def run_subgraph(compiled, state: dict) -> dict:
-    """Run `compiled` with the parent's callbacks and nothing else of its config.
+def run_subgraph(compiled, state: dict, callbacks=None) -> dict:
+    """Run `compiled` with callbacks and nothing else of its config.
 
-    The whole config joins the two runs, and a picture coming back then stalls
-    the parent's stream. Outside a graph there is no config, and that is fine.
+    `callbacks` wins when the caller has them: a handoff passes the ones bound
+    to its own span. Otherwise the parent's are copied. The whole config joins
+    the two runs, and a picture coming back then stalls the parent's stream.
+    Outside a graph there is no config, and that is fine.
     """
-    from langgraph.config import get_config
-    try:
-        callbacks = get_config().get("callbacks")
-    except Exception:  # noqa: BLE001 - outside a graph there is no config
-        callbacks = None
+    if callbacks is None:
+        from langgraph.config import get_config
+        try:
+            callbacks = get_config().get("callbacks")
+        except Exception:  # noqa: BLE001 - outside a graph there is no config
+            callbacks = None
     if callbacks:
         return compiled.invoke(state, {"callbacks": callbacks})
     return compiled.invoke(state)
