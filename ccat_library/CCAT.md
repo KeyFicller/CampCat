@@ -247,7 +247,9 @@ return false
 It may use `defs`, `has`, `if` / `elif` / `else`, `return`, `log` and comments, and needs at least
 one `return` -- with none it would answer true on every screen. Every anchor runs on every
 locate, so actions, waits, `run`, `loop`, `do`, `goto` and `at` are refused. Its templates
-live in its own bundle.
+live in its own bundle. A `has` whose only job is `return false` does not split one
+chrome into two anchors. Another mode of that screen stays the same anchor; the work
+that mode does is an action.
 
 ### Edges
 

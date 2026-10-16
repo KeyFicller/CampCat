@@ -36,7 +36,17 @@ def test_scripter_prompt_uses_an_action_for_same_screen_work():
     assert "{graph}.{anchor}.{action}" in text
     assert "[action of stzb on kucang]" in text
     assert "same screen" in text
+    assert "same chrome" in text
+    assert "does not split the anchor" in text
     assert text.index("{graph}.{anchor}.{action}") < text.index("## script_workflow")
+
+
+def test_prompts_freeze_existing_bundles():
+    assert "fix: true" in operator.operator_prompt()
+    text = scripter.scripter_prompt()
+    assert "fix: true" in text
+    assert "last_error" in text
+    assert "update_script` before you duplicate" not in text
 
 
 def test_prompt_override_covers_only_the_operator(monkeypatch):

@@ -56,7 +56,7 @@ def test_handoff_runs_scripter_tools_and_returns_text(monkeypatch, scripted):
         AIMessage(content="Done."),
     ])
 
-    assert calls == ["save_script", "run_script"]
+    assert calls == ["list_scripts", "save_script", "run_script"]
     assert "Done." in text
     assert "saved the bundle" not in text
     assert not out.get("error")
@@ -184,7 +184,7 @@ def test_scripter_author_script_goes_to_host(monkeypatch, scripted):
         AIMessage(content="Done."),
     ])
 
-    assert calls == ["author_script"]
+    assert calls == ["list_scripts", "author_script"]
 
 
 def test_scripter_final_text_drops_the_announcement(monkeypatch, scripted):

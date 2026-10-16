@@ -6,61 +6,44 @@ that two agents exist.
 
 from __future__ import annotations
 
+from typing import Annotated
+
+from langchain_core.tools import tool
+from pydantic import Field
+
 import agent.scripter as scripter
 import models
 
-AUTHOR_SCRIPT_NAME = "author_script"
-
 # Not in the C++ registry. `run_tools` intercepts this name and runs the
-# scripter instead of forwarding it to the host.
-AUTHOR_SCRIPT = {
-    "type": "function",
-    "function": {
-        "name": "author_script",
-        "description": (
-            "Hand the job of writing, fixing or managing a .ccat bundle to the "
-            "script agent, including adding screens and moves to a game's graph. "
-            "It reads and writes bundles, cuts templates, runs the script to "
-            "verify, and reports back. Put every constraint the user "
-            "stated into `goal` verbatim: the script agent sees nothing else of "
-            "this conversation."
-        ),
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "goal": {
-                    "type": "string",
-                    "description": (
-                        "What the script must do, in the user's words plus "
-                        "anything you learned from the screen."
-                    ),
-                },
-                "bundle": {
-                    "type": "string",
-                    "description": (
-                        "Bundle to create or change; omit to let the script "
-                        "agent pick."
-                    ),
-                },
-                "shots": {
-                    "type": "array",
-                    "items": {"type": "integer"},
-                    "description": (
-                        "Screenshot numbers that show the screens involved."
-                    ),
-                },
-                "last_error": {
-                    "type": "string",
-                    "description": (
-                        "Verbatim error from the last run_script, when fixing "
-                        "a failure."
-                    ),
-                },
-            },
-            "required": ["goal"],
-        },
-    },
-}
+# scripter; this body is not called. Defaults keep every argument but `goal`
+# out of the schema's `required`.
+@tool
+def author_script(
+    goal: Annotated[str, Field(description=(
+        "What the script must do, in the user's words plus "
+        "anything you learned from the screen."))],
+    bundle: Annotated[str, Field(description=(
+        "Bundle to create or change; omit to let the script agent pick."))] = "",
+    shots: Annotated[list[int], Field(description=(
+        "Screenshot numbers that show the screens involved."))] = [],
+    last_error: Annotated[str, Field(description=(
+        "Verbatim error from the last run_script, when fixing a failure."))] = "",
+    fix: Annotated[bool, Field(description=(
+        "True only when the user asked to change a bundle that already "
+        "exists. Omit it for a new script, a new screen, or a new edge."))] = False,
+) -> str:
+    """Hand the job of writing, fixing or managing a .ccat bundle to the
+    script agent, including adding screens and moves to a game's graph.
+    It reads and writes bundles, cuts templates, runs the script to
+    verify, and reports back. Put every constraint the user stated into
+    `goal` verbatim: the script agent sees nothing else of this
+    conversation. Without `fix: true` or `last_error`, it cannot change
+    a bundle that already exists.
+    """
+    raise RuntimeError("author_script is dispatched by run_tools")
+
+
+AUTHOR_SCRIPT_NAME = author_script.name
 
 # The operator drives the device and hands bundle work off. It does not see
 # `read_script` or the language reference; those belong to the scripter.
@@ -70,7 +53,10 @@ OPERATOR_PERSONA = (
     "job, run it with `run(\"<name>/main.ccat\")` instead of doing its steps. "
     "An `@name` is that skill -- run it, do not search. Writing, changing or "
     "fixing a bundle is `author_script`: put every constraint the user stated "
-    "into `goal` verbatim. A game tagged `[graph <graph>, ...]` has a map of "
+    "into `goal` verbatim. Pass `fix: true` only when the user asked to change "
+    "a bundle that already exists, and `last_error` when the last `run_script` "
+    "failed. Any other handoff must not change an existing bundle. "
+    "A game tagged `[graph <graph>, ...]` has a map of "
     "its screens: to reach one of its anchors, `run_script` with "
     "`goto(\"<graph>:<anchor>\")`; to reach a screen it does not have, "
     "`author_script` with a goal that says from which screen to which. "
@@ -129,7 +115,7 @@ def operator_tools(host_tools: list) -> list:
     """Host tools the operator may call, plus the handoff tool."""
     hidden = scripter.SCRIPTER_ONLY | scripter.HIDDEN
     kept = [tool for tool in host_tools if _name(tool) not in hidden]
-    return kept + [AUTHOR_SCRIPT]
+    return kept + [author_script]
 
 
 def operator_prompt() -> str:

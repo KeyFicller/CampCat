@@ -26,7 +26,13 @@ def _tool(name):
 
 
 def _names(tools):
-    return [t["function"]["name"] for t in tools if "function" in t]
+    names = []
+    for tool in tools:
+        if isinstance(tool, dict) and "function" in tool:
+            names.append(tool["function"]["name"])
+        elif getattr(tool, "name", None):
+            names.append(tool.name)
+    return names
 
 
 def test_operator_and_scripter_split_the_host_table():
@@ -65,6 +71,21 @@ def test_nameless_tool_stays_with_the_operator():
     assert _names(scripter.scripter_tools([nameless])) == ["diagnose_template"]
 
 
+def test_author_script_schema_comes_from_the_tool():
+    from langchain_core.utils.function_calling import convert_to_openai_tool
+
+    fn = convert_to_openai_tool(operator.author_script)["function"]
+    params = fn["parameters"]
+    assert fn["name"] == "author_script"
+    assert "fix: true" in fn["description"]
+    assert params["required"] == ["goal"]
+    assert list(params["properties"]) == [
+        "goal", "bundle", "shots", "last_error", "fix"]
+    assert params["properties"]["shots"]["items"]["type"] == "integer"
+    assert params["properties"]["fix"]["type"] == "boolean"
+    assert "omit" in params["properties"]["bundle"]["description"]
+
+
 def test_brief_keeps_only_the_fields_that_were_given():
     full = scripter.brief_of({
         "goal": "签到",
@@ -78,3 +99,6 @@ def test_brief_keeps_only_the_fields_that_were_given():
         "goal": "签到", "bundle": "", "shots": [], "last_error": "",
     }) == "goal: 签到"
     assert scripter.brief_of({"goal": "签到", "shots": "3"}) == "goal: 签到"
+    assert scripter.brief_of({"goal": "签到", "fix": True}) == "goal: 签到\nfix: true"
+    assert scripter.brief_of({"goal": "签到", "fix": "true"}) == "goal: 签到"
+    assert scripter.brief_of({"goal": "签到", "fix": False}) == "goal: 签到"

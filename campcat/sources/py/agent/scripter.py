@@ -6,6 +6,7 @@ the subgraph nodes do, once `graph` has finished loading.
 
 from __future__ import annotations
 
+import contextvars
 from pathlib import Path
 
 from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
@@ -59,10 +60,77 @@ def brief_of(args: dict) -> str:
     shots = args.get("shots")
     if isinstance(shots, list) and shots:
         lines.append("shots: " + " ".join(str(shot) for shot in shots))
+    if args.get("fix") is True:
+        lines.append("fix: true")
     last_error = args.get("last_error") or ""
     if last_error:
         lines.append(f"last_error: {last_error}")
     return "\n".join(lines)
+
+
+def handoff_may_change(args: dict) -> bool:
+    """True when this handoff may edit bundles that already exist."""
+    if str(args.get("last_error") or "").strip():
+        return True
+    return args.get("fix") is True
+
+
+def bundle_names_of(listing: str) -> set[str]:
+    """Bundle names from a `list_scripts` reply. `none yet` is an empty set."""
+    if listing.strip() == "none yet":
+        return set()
+    names = set()
+    for line in listing.splitlines():
+        name = line.split(" -- ", 1)[0].strip()
+        if name:
+            names.add(name)
+    return names
+
+
+# The field that names the bundle a write would change. `save_anchor` is
+# handled beside this: its name is `graph.anchor`.
+_FROZEN_FIELD = {
+    "update_script": "name",
+    "delete_script": "name",
+    "rename_script": "name",
+    "save_template": "bundle",
+}
+
+
+def refuse_existing(tool: str, args: dict, frozen: set[str]) -> str | None:
+    """The refusal the model sees, or None when the call may reach the host."""
+    if tool == "save_anchor":
+        graph_name = args.get("graph")
+        anchor = args.get("anchor")
+        if (not isinstance(graph_name, str) or not isinstance(anchor, str)
+                or not graph_name or not anchor):
+            return None
+        target = graph_name + "." + anchor
+    else:
+        field = _FROZEN_FIELD.get(tool)
+        if field is None:
+            return None
+        target = args.get(field)
+        if not isinstance(target, str) or not target:
+            return None
+    if target not in frozen:
+        return None
+    return f"error: {target} already exists; this handoff may not change it"
+
+
+# None means this handoff may change existing bundles. A set is the names
+# that existed when it started.
+_frozen: contextvars.ContextVar[frozenset[str] | None] = contextvars.ContextVar(
+    "scripter_frozen", default=None)
+
+
+def arm_freeze(names: frozenset[str] | None):
+    """Remember `names` until `disarm_freeze`. None leaves existing bundles writable."""
+    return _frozen.set(names)
+
+
+def disarm_freeze(token) -> None:
+    _frozen.reset(token)
 
 # How a reply is written, one entry per part of the rule. Fed as Markdown with
 # the key as a heading, so a part can be rewritten or dropped on its own.
@@ -71,8 +139,11 @@ RULES = {
         "Writing or changing a script is this sequence, and you do not skip a step:\n"
         "\n"
         "1. `list_scripts` first. If a bundle already does the job, run it with "
-        "`run(\"<name>/main.ccat\")`; if one is close, `read_script` it and build on it. "
-        "Write a new script only when neither holds. A task on a game that has a graph "
+        "`run(\"<name>/main.ccat\")`. Change an existing bundle only when the brief "
+        "has `fix: true` or `last_error`. Otherwise do not `update_script`, "
+        "`delete_script`, `rename_script`, or `save_template` it, and do not "
+        "`save_anchor` over an anchor that already exists; write a new bundle under "
+        "a new name. A task on a game that has a graph "
         "starts with `goto(\"<graph>:<anchor>\")` to the screen it works on; a screen "
         "the graph does not have yet is added first (graph_workflow).\n"
         "2. `screenshot`, so you can see the screen you are scripting.\n"
@@ -98,8 +169,9 @@ RULES = {
         "and the whole template set in one step, under one approval. Each entry is "
         "`{\"name\":...,\"cut\":{\"x\":...,\"y\":...,\"w\":...,\"h\":...},\"shot\":...}` "
         "for a box or the same with `{\"cx\":...,\"cy\":...,\"r\":...}` for a circle, and "
-        "`shot` omitted means the most recent screenshot. `save_script` refuses an "
-        "existing name, and the answer is never a second bundle under a new name."
+        "`shot` omitted means the most recent screenshot. `update_script` is for a "
+        "bundle this handoff created, or one the brief allows with `fix: true` or "
+        "`last_error`. `save_script` refuses an existing name."
     ),
     "script_rules": (
         "  * A failing statement stops the script. That error is what you get back -- not a "
@@ -122,9 +194,9 @@ RULES = {
         "number silently becomes the cap and you get less time than you asked for; "
         "`wait_until(\"a.png\", 0)` is a parse error. A timeout is an error that stops the "
         "script.\n"
-        "  * Reuse before you write, and `update_script` before you duplicate: `save_script` "
-        "refuses a name that already exists, and the answer is never a second bundle under a "
-        "new name.\n"
+        "  * A bundle that already exists is run, not edited, unless the brief has "
+        "`fix: true` or `last_error`. `save_script` still refuses a name that already "
+        "exists. A bundle created in this handoff may be updated.\n"
     ),
     "script_failure_workflow": (
         "A script that fails stops at the statement that failed, and that error comes "
@@ -203,7 +275,11 @@ RULES = {
         "  * An anchor's template is a fixed control on that screen and no other: a "
         "title, a tab, a button. Every PNG in the bundle is drawn on that anchor in "
         "the graph editor, so do not save a picture of another screen just to reject "
-        "it. Two anchors answering true on one screen is a graph that cannot "
+        "it. A `has` whose only job is `return false` — another mode of this same "
+        "chrome — does not split the anchor. That mode stays this anchor, and its "
+        "work is an action `{graph}.{anchor}.{action}`, which this handoff may "
+        "create even when it must not change the anchor. Two anchors answering "
+        "true on one screen is a graph that cannot "
         "navigate: tell them apart by cutting what only this screen shows, never a "
         "threshold.\n"
         "  * golden.md is front matter, then one description of the screen: which parts "
@@ -330,8 +406,17 @@ def run_scripter(args: dict, host_tools: list,
     goal = str(args.get("goal") or "").strip()
     if not goal:
         return "error: empty goal"
+    token = None
     try:
         import graph
+        if handoff_may_change(args):
+            token = arm_freeze(None)
+        else:
+            listed = tools.call_cpp("list_scripts", {})
+            if not listed.get("ok"):
+                return "error: " + str(listed.get("error", ""))
+            token = arm_freeze(frozenset(
+                bundle_names_of(str(listed.get("text") or ""))))
         if max_tool_rounds is None:
             max_tool_rounds = graph.MAX_TOOL_ROUNDS
         state = {
@@ -347,6 +432,9 @@ def run_scripter(args: dict, host_tools: list,
         raise
     except Exception as exc:  # noqa: BLE001 - the operator hears it as a tool error
         return "error: " + str(exc)
+    finally:
+        if token is not None:
+            disarm_freeze(token)
     if out.get("interrupted"):
         raise tools.TurnInterrupted()
     if out.get("error"):
@@ -406,6 +494,11 @@ def _apply_scripter_tools(state: dict) -> dict:
                 if frame is not None:
                     pics.append(frame)
             return content, pics
+        frozen = _frozen.get()
+        if frozen is not None:
+            refusal = refuse_existing(name, args, frozen)
+            if refusal:
+                return refusal, []
         return graph._host_result(name, args)
 
     results, pictures, interrupted = graph._run_calls(calls, run_one)

@@ -95,6 +95,10 @@ def test_scripter_interrupt_stops_the_operator(monkeypatch):
     session.reset()
 
     def fake_call_cpp(name, args):
+        # The handoff lists bundles before the scripter model runs. The
+        # interrupt under test is the scripter's own tool, not that listing.
+        if name == "list_scripts":
+            return {"ok": True, "text": "none yet"}
         raise tools.TurnInterrupted()
 
     monkeypatch.setattr(tools, "call_cpp", fake_call_cpp)
