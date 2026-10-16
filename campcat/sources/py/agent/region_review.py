@@ -44,7 +44,8 @@ REVIEW_PROMPT = (
     "scaled down, as the text says. Answer in exactly this form, nothing else:\n"
     "verdict: ok | adjust | reject\n"
     "box: {\"x\":..,\"y\":..,\"w\":..,\"h\":..}   (only with adjust; a circle "
-    "region writes circle: {\"cx\":..,\"cy\":..,\"r\":..})\n"
+    "region writes circle: {\"cx\":..,\"cy\":..,\"r\":..}; a diamond region "
+    "writes diamond: {\"cx\":..,\"cy\":..,\"rx\":..,\"ry\":..})\n"
     "reason: one sentence\n"
     "Use adjust for a small correction of the edges, in the frame's pixels. "
     "Use reject when the region is on the wrong element or the element is not "
@@ -66,11 +67,13 @@ _TEMPLATE_RULES = (
     "Apply these rules in order and stop at the first that decides. Color, "
     "readable text, and how much a crop looks like a button do not count.\n"
     "1. Shape. A round control (圆) keeps only a circle {cx,cy,r}. A "
+    "diamond control (菱形) keeps only a diamond {cx,cy,rx,ry}. A "
     "rectangular control keeps only a box {x,y,w,h}. While a right shape "
     "remains, drop the wrong one. A box around a round control is the wrong "
     "shape.\n"
     "2. Clipping. Drop a crop that cuts the control off while a complete one "
-    "remains. A circle is judged by its rim, not the corners outside the disc.\n"
+    "remains. A circle is judged by its rim, not the corners outside the disc. "
+    "A diamond is judged by its four vertices, not the corners of its box.\n"
     "3. Edges. A crop whose edge sits on the control beats one with background "
     "between the edge and the control (留白). While a flush crop remains, drop "
     "the ones with that gap.\n"
@@ -93,7 +96,7 @@ REVIEW_CRITERIA = {
         "The region becomes a template.\n" + _TEMPLATE_RULES + "\n"
         "On this one crop, answer ok only when its shape is right and its edge "
         "already sits on the control. Otherwise adjust to that boundary, and "
-        "switch circle and box when the shape is wrong. Reject only when the "
+        "switch circle, diamond and box when the shape is wrong. Reject only when the "
         "region is on the wrong element or the element is not in this frame."
     ),
 }
@@ -103,11 +106,11 @@ def _review_system(kind: str) -> str:
     if kind == "template":
         extra = (
             "For a template, an adjust may change the shape: write circle: for "
-            "a round control and box: for a rectangular one."
+            "a round control, diamond: for a diamond, and box: for a rectangular one."
         )
     else:
         extra = (
-            "The box or circle key must be the shape of the region you were given."
+            "The box, circle or diamond key must be the shape of the region you were given."
         )
     return REVIEW_PROMPT + "\n" + extra
 
@@ -221,7 +224,7 @@ def parse_review(text: str, shape: str, *, kind: str = "tap"
     for line in lines[1:]:
         if line.startswith("reason:"):
             reason = line.split(":", 1)[1].strip()
-        elif line.startswith("box:") or line.startswith("circle:"):
+        elif line.startswith(("box:", "circle:", "diamond:")):
             key, raw = line.split(":", 1)
             if kind != "template" and key != shape:
                 return "skip", None, text.strip(), shape
@@ -282,6 +285,8 @@ def _strip(args: dict) -> dict:
 
 def _shape_of(region: dict) -> str:
     """Which shape a `region` argument is, from the fields it carries."""
+    if "rx" in region:
+        return "diamond"
     return "circle" if "cx" in region else "box"
 
 
@@ -290,6 +295,9 @@ def _bounds(region: dict, shape: str) -> tuple[int, int, int, int]:
         # The disc plus the one-pixel rim, the same box the matcher crops.
         return (region["cx"] - region["r"], region["cy"] - region["r"],
                 2 * region["r"] + 1, 2 * region["r"] + 1)
+    if shape == "diamond":
+        return (region["cx"] - region["rx"], region["cy"] - region["ry"],
+                2 * region["rx"] + 1, 2 * region["ry"] + 1)
     return region["x"], region["y"], region["w"], region["h"]
 
 
@@ -302,6 +310,11 @@ def _inside(region: dict, shape: str, frame: tuple) -> bool:
             x, y, w, h = (region["x"], region["y"], region["w"], region["h"])
             return x >= 0 and y >= 0 and w > 0 and h > 0 \
                 and x + w <= width and y + h <= height
+        if shape == "diamond":
+            rx, ry = region["rx"], region["ry"]
+            cx, cy = region["cx"], region["cy"]
+            return rx > 0 and ry > 0 and cx - rx >= 0 and cy - ry >= 0 \
+                and cx + rx < width and cy + ry < height
         radius, cx, cy = region["r"], region["cx"], region["cy"]
         return radius > 0 and cx - radius >= 0 and cy - radius >= 0 \
             and cx + radius < width and cy + radius < height
@@ -316,6 +329,9 @@ def _moved(shape: str, before: dict, after: dict) -> str:
     shape = _shape_of(after)
     if shape == "box":
         where = (f"box {after['x']},{after['y']} {after['w']}x{after['h']}")
+    elif shape == "diamond":
+        where = (f"diamond rx={after['rx']} ry={after['ry']} "
+                 f"at {after['cx']},{after['cy']}")
     else:
         where = (f"circle r={after['r']} at {after['cx']},{after['cy']}")
     return f" (self-check already used {where}.{_STOP})"
@@ -535,7 +551,7 @@ def _review_update(args: dict) -> tuple[dict, str, str]:
                 if isinstance(entry, dict) else entry)
             continue
         cut = entry["cut"]
-        shape = "circle" if "cx" in cut else "box"
+        shape = _shape_of(cut)
         final, note, rejected = _one(
             "template", shape, cut, entry.get("shot"),
             str(entry.get("expect") or ""), str(entry.get("name") or ""))

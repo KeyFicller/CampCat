@@ -223,6 +223,46 @@ TEST_F(ShapeTools, ACropIsTheRegionsBoundingBox) {
         call("view_crop", R"({"region":{"cx":50,"cy":40,"r":12}})");
     ASSERT_TRUE(disc.ok) << disc.error;
     EXPECT_EQ(decode_png(disc.image_png).size(), cv::Size(25, 25));
+
+    const auto diamond =
+        call("view_crop", R"({"region":{"cx":50,"cy":40,"rx":10,"ry":6}})");
+    ASSERT_TRUE(diamond.ok) << diamond.error;
+    EXPECT_EQ(decode_png(diamond.image_png).size(), cv::Size(21, 13));
+}
+
+// The bounding-box corners sit outside the diamond; the centre and the axis
+// vertices sit inside. A full rectangle would make those corners opaque.
+TEST_F(ShapeTools, ADiamondCropIsTransparentOutsideTheVertices) {
+    const auto reply =
+        call("view_crop", R"({"region":{"cx":50,"cy":40,"rx":10,"ry":6}})");
+    ASSERT_TRUE(reply.ok) << reply.error;
+    const cv::Mat crop = decode_png(reply.image_png);
+    ASSERT_EQ(crop.type(), CV_8UC4);
+    const auto alpha = [&](int x, int y) {
+        return crop.at<cv::Vec4b>(y, x)[3];
+    };
+    EXPECT_EQ(alpha(10, 6), 255);  // centre
+    EXPECT_EQ(alpha(20, 6), 255);  // right vertex
+    EXPECT_EQ(alpha(10, 0), 255);  // top vertex
+    EXPECT_EQ(alpha(0, 0), 0);     // bounding-box corner
+}
+
+// Same strict edge as a disc: the rightmost vertex is cx+rx, so it may not sit
+// on the column past the last pixel. A zero half-diagonal is not a diamond.
+TEST_F(ShapeTools, ADiamondStopsAtTheLastPixelItCanCover) {
+    const auto inside =
+        call("view_crop", R"({"region":{"cx":89,"cy":40,"rx":10,"ry":5}})");
+    EXPECT_TRUE(inside.ok) << inside.error;
+
+    const auto past =
+        call("view_crop", R"({"region":{"cx":90,"cy":40,"rx":10,"ry":5}})");
+    EXPECT_FALSE(past.ok);
+    EXPECT_NE(past.error.find("out of range"), std::string::npos) << past.error;
+
+    const auto flat =
+        call("view_crop", R"({"region":{"cx":50,"cy":40,"rx":10,"ry":0}})");
+    EXPECT_FALSE(flat.ok);
+    EXPECT_NE(flat.error.find("out of range"), std::string::npos) << flat.error;
 }
 
 // The tap sentence names the point `region_center` picked: a box acts at its
@@ -236,6 +276,11 @@ TEST_F(ShapeTools, TapLandsOnTheRegionsCentre) {
     const auto disc = call("tap", R"({"region":{"cx":50,"cy":40,"r":12}})");
     ASSERT_TRUE(disc.ok) << disc.error;
     EXPECT_EQ(disc.text, "tapped 50,40");
+
+    const auto diamond =
+        call("tap", R"({"region":{"cx":50,"cy":40,"rx":10,"ry":6}})");
+    ASSERT_TRUE(diamond.ok) << diamond.error;
+    EXPECT_EQ(diamond.text, "tapped 50,40");
 }
 
 // --- either shape into one parameter ----------------------------------------
@@ -262,6 +307,15 @@ TEST_F(ShapeTools, UpdateScriptBindsEitherShapeIntoOneCut) {
     const auto with_box = call("update_script", box);
     EXPECT_NE(with_box.error.find("unknown script bundle"), std::string::npos)
         << with_box.error;
+
+    const std::string diamond = R"({
+        "name": "no_such_bundle",
+        "source": "log(\"hi\")\n",
+        "templates": [{"name": "a", "cut": {"cx": 5, "cy": 6, "rx": 4, "ry": 2}}]
+    })";
+    const auto with_diamond = call("update_script", diamond);
+    EXPECT_NE(with_diamond.error.find("unknown script bundle"), std::string::npos)
+        << with_diamond.error;
 }
 
 // An object with none of either shape's fields fits neither alternative. That
@@ -291,6 +345,7 @@ TEST(ShapeSchema, TheCutOffersBothShapesAsAlternatives) {
     EXPECT_NE(schema.find("\"anyOf\""), std::string_view::npos);
     EXPECT_NE(schema.find("\"cx\""), std::string_view::npos); // circle
     EXPECT_NE(schema.find("\"cy\""), std::string_view::npos);
+    EXPECT_NE(schema.find("\"rx\""), std::string_view::npos); // diamond
     EXPECT_NE(schema.find("\"w\""), std::string_view::npos); // box
 }
 
@@ -303,6 +358,7 @@ TEST(ShapeSchema, ARegionToolOffersBothShapes) {
         ASSERT_NE(entry, nullptr) << name;
         EXPECT_NE(entry->schema.find("\"anyOf\""), std::string_view::npos) << name;
         EXPECT_NE(entry->schema.find("\"cx\""), std::string_view::npos) << name;
+        EXPECT_NE(entry->schema.find("\"rx\""), std::string_view::npos) << name;
         EXPECT_NE(entry->schema.find("\"x\""), std::string_view::npos) << name;
     }
 }

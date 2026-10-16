@@ -42,17 +42,20 @@ int g_cur_iy = 0;
 bool g_has_sel = false;
 
 /// Which shape the drag selects. A box is two corners; a circle is the centre
-/// (where the press landed) and the radius the drag then sets.
-enum class capture_shape { box, circle };
+/// and the drag as the radius; a diamond is the centre and the drag's
+/// horizontal and vertical reach as the two half-diagonals.
+enum class capture_shape { box, circle, diamond };
 capture_shape g_shape = capture_shape::box;
 
 int g_sel_x0 = 0;
 int g_sel_y0 = 0;
 int g_sel_x1 = 0;
 int g_sel_y1 = 0;
-int g_sel_cx = 0; ///< committed circle centre, when `g_shape` is circle
+int g_sel_cx = 0; ///< committed centre, when the shape is a circle or diamond
 int g_sel_cy = 0;
 int g_sel_r = 0;
+int g_sel_rx = 0; ///< committed diamond half-diagonals
+int g_sel_ry = 0;
 
 std::string g_filename = "template.png";
 
@@ -148,6 +151,42 @@ cv::Mat circle_crop(int _cx, int _cy, int _r) {
     return out;
 }
 
+/// The diamond selection as a 4-channel crop: alpha 255 inside
+/// `|dx|/rx + |dy|/ry <= 1`, 0 outside. Same mask rule as a circle.
+cv::Mat diamond_crop(int _cx, int _cy, int _rx, int _ry) {
+    cv::Mat out(2 * _ry + 1, 2 * _rx + 1, CV_8UC4, cv::Scalar(0, 0, 0, 0));
+    for (int y = 0; y < out.rows; ++y) {
+        auto *row = out.ptr<cv::Vec4b>(y);
+        for (int x = 0; x < out.cols; ++x) {
+            const long long dx = x - _rx;
+            const long long dy = y - _ry;
+            const long long adx = dx < 0 ? -dx : dx;
+            const long long ady = dy < 0 ? -dy : dy;
+            if (adx * _ry + ady * _rx > static_cast<long long>(_rx) * _ry) {
+                continue;
+            }
+            const int ix = _cx + static_cast<int>(dx);
+            const int iy = _cy + static_cast<int>(dy);
+            if (ix < 0 || iy < 0 || ix >= g_bgr.cols || iy >= g_bgr.rows) {
+                continue;
+            }
+            const cv::Vec3b &src = g_bgr.at<cv::Vec3b>(iy, ix);
+            row[x] = cv::Vec4b(src[0], src[1], src[2], 255);
+        }
+    }
+    return out;
+}
+
+/// Half-diagonals the current drag sets, each clamped so that vertex stays in
+/// the frame. A diamond that hangs over an edge would write a template whose
+/// shape its own pixels do not agree with.
+void drag_diamond(int _cx, int _cy, int _ix, int _iy, int *_rx, int *_ry) {
+    const int room_x = std::min(_cx, g_bgr.cols - 1 - _cx);
+    const int room_y = std::min(_cy, g_bgr.rows - 1 - _cy);
+    *_rx = std::max(0, std::min(std::abs(_ix - _cx), room_x));
+    *_ry = std::max(0, std::min(std::abs(_iy - _cy), room_y));
+}
+
 void img_px_from_screen(const ImVec2 &_screen, const ImVec2 &_img_min,
                         const ImVec2 &_img_max, int *_ix, int *_iy) {
     const float denom_x = std::max(1e-6f, _img_max.x - _img_min.x);
@@ -226,9 +265,11 @@ void help_marker(const char *_text) {
 /// What the panel used to print above and below the image, merged: both are
 /// reference rather than instruction, so neither needs the line it cost.
 constexpr char k_help_text[] =
-    "Drag on image after Capture to select ROI. Box selects two corners, "
-    "Circle takes the press as the centre and the drag as the radius; a circle "
-    "is saved with a transparent outside, so matching ignores it. Preview is "
+    "Drag on image after Capture to select ROI. Box selects two corners. "
+    "Circle takes the press as the centre and the drag as the radius. Diamond "
+    "takes the press as the centre; horizontal reach is rx and vertical reach "
+    "is ry. A circle or a diamond is saved with a transparent outside, so "
+    "matching ignores it. Preview is "
     "1:1 device pixels; scroll when larger than viewport. PNG files are saved "
     "next to the .ccat script.";
 
@@ -301,6 +342,12 @@ void template_capture_panel_draw(campcat::app_config &_cfg,
         g_has_sel = false;
     }
     ImGui::SameLine();
+    if (ImGui::RadioButton("Diamond##adb_tpl_shape",
+                           g_shape == capture_shape::diamond)) {
+        g_shape = capture_shape::diamond;
+        g_has_sel = false;
+    }
+    ImGui::SameLine();
     help_marker("Shape to save the crop as.");
 
     if (g_tex == 0 || g_bgr.empty()) {
@@ -350,6 +397,18 @@ void template_capture_panel_draw(campcat::app_config &_cfg,
                     g_sel_r = r;
                     g_has_sel = true;
                 }
+            } else if (g_shape == capture_shape::diamond) {
+                int rx = 0;
+                int ry = 0;
+                drag_diamond(g_anchor_ix, g_anchor_iy, g_cur_ix, g_cur_iy, &rx,
+                             &ry);
+                if (rx > 0 && ry > 0) {
+                    g_sel_cx = g_anchor_ix;
+                    g_sel_cy = g_anchor_iy;
+                    g_sel_rx = rx;
+                    g_sel_ry = ry;
+                    g_has_sel = true;
+                }
             } else {
                 g_sel_x0 = g_anchor_ix;
                 g_sel_y0 = g_anchor_iy;
@@ -377,6 +436,23 @@ void template_capture_panel_draw(campcat::app_config &_cfg,
             const ImVec2 centre = screen_from_img_px(cx, cy, img_min, img_max);
             dl->AddCircleFilled(centre, r * scale, k_fill);
             dl->AddCircle(centre, r * scale, k_stroke, 0, 2.0f);
+        } else if (g_shape == capture_shape::diamond) {
+            const int cx = g_dragging ? g_anchor_ix : g_sel_cx;
+            const int cy = g_dragging ? g_anchor_iy : g_sel_cy;
+            int rx = g_sel_rx;
+            int ry = g_sel_ry;
+            if (g_dragging) {
+                drag_diamond(cx, cy, g_cur_ix, g_cur_iy, &rx, &ry);
+            }
+            const ImVec2 top = screen_from_img_px(cx, cy - ry, img_min, img_max);
+            const ImVec2 right =
+                screen_from_img_px(cx + rx, cy, img_min, img_max);
+            const ImVec2 bottom =
+                screen_from_img_px(cx, cy + ry, img_min, img_max);
+            const ImVec2 left =
+                screen_from_img_px(cx - rx, cy, img_min, img_max);
+            dl->AddQuadFilled(top, right, bottom, left, k_fill);
+            dl->AddQuad(top, right, bottom, left, k_stroke, 2.0f);
         } else {
             const int x0 = g_dragging ? g_anchor_ix : g_sel_x0;
             const int y0 = g_dragging ? g_anchor_iy : g_sel_y0;
@@ -427,6 +503,9 @@ void template_capture_panel_draw(campcat::app_config &_cfg,
                     const cv::Mat patch =
                         g_shape == capture_shape::circle
                             ? circle_crop(g_sel_cx, g_sel_cy, g_sel_r)
+                        : g_shape == capture_shape::diamond
+                            ? diamond_crop(g_sel_cx, g_sel_cy, g_sel_rx,
+                                           g_sel_ry)
                             : g_bgr(inclusive_rect_to_roi(
                                         g_sel_x0, g_sel_y0, g_sel_x1, g_sel_y1,
                                         g_bgr.cols, g_bgr.rows))

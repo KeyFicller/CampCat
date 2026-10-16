@@ -1212,31 +1212,43 @@ void draw_approval_settings(campcat::app_config &_c) {
 
 /// Draw `_region` on a canvas whose top-left is `_mn` at scale `_s` (1.0 for
 /// the correction window, smaller for a thumbnail). A circle is drawn as a
-/// disc: the corners a box would add are exactly what the shape exists to
-/// exclude.
+/// disc and a diamond as its four vertices: the corners a box would add are
+/// exactly what those shapes exist to exclude.
 /// `_fill` of 0 means no fill.
 void draw_region(ImDrawList *_dl, const ImVec2 &_mn, float _s,
                  const campcat::llm::region &_region, ImU32 _fill,
                  ImU32 _stroke, float _thickness) {
+    const auto at = [&](int _x, int _y) {
+        return ImVec2(_mn.x + static_cast<float>(_x) * _s,
+                      _mn.y + static_cast<float>(_y) * _s);
+    };
     if (const auto *b = std::get_if<campcat::llm::box>(&_region)) {
-        const ImVec2 p0(_mn.x + static_cast<float>(b->x) * _s,
-                        _mn.y + static_cast<float>(b->y) * _s);
-        const ImVec2 p1(_mn.x + static_cast<float>(b->x + b->w) * _s,
-                        _mn.y + static_cast<float>(b->y + b->h) * _s);
+        const ImVec2 p0 = at(b->x, b->y);
+        const ImVec2 p1 = at(b->x + b->w, b->y + b->h);
         if (_fill != 0) {
             _dl->AddRectFilled(p0, p1, _fill);
         }
         _dl->AddRect(p0, p1, _stroke, 0.0F, 0, _thickness);
         return;
     }
-    const auto &c = std::get<campcat::llm::circle>(_region);
-    const ImVec2 centre(_mn.x + static_cast<float>(c.cx) * _s,
-                        _mn.y + static_cast<float>(c.cy) * _s);
-    const float radius = static_cast<float>(c.r) * _s;
-    if (_fill != 0) {
-        _dl->AddCircleFilled(centre, radius, _fill);
+    if (const auto *c = std::get_if<campcat::llm::circle>(&_region)) {
+        const ImVec2 centre = at(c->cx, c->cy);
+        const float radius = static_cast<float>(c->r) * _s;
+        if (_fill != 0) {
+            _dl->AddCircleFilled(centre, radius, _fill);
+        }
+        _dl->AddCircle(centre, radius, _stroke, 0, _thickness);
+        return;
     }
-    _dl->AddCircle(centre, radius, _stroke, 0, _thickness);
+    const auto &d = std::get<campcat::llm::diamond>(_region);
+    const ImVec2 top = at(d.cx, d.cy - d.ry);
+    const ImVec2 right = at(d.cx + d.rx, d.cy);
+    const ImVec2 bottom = at(d.cx, d.cy + d.ry);
+    const ImVec2 left = at(d.cx - d.rx, d.cy);
+    if (_fill != 0) {
+        _dl->AddQuadFilled(top, right, bottom, left, _fill);
+    }
+    _dl->AddQuad(top, right, bottom, left, _stroke, _thickness);
 }
 
 /// A region's bounding box in image pixels: what the correction window's drag
@@ -1245,8 +1257,13 @@ campcat::llm::box region_bounds_ui(const campcat::llm::region &_region) {
     if (const auto *b = std::get_if<campcat::llm::box>(&_region)) {
         return *b;
     }
-    const auto &c = std::get<campcat::llm::circle>(_region);
-    return campcat::llm::box{c.cx - c.r, c.cy - c.r, 2 * c.r + 1, 2 * c.r + 1};
+    if (const auto *c = std::get_if<campcat::llm::circle>(&_region)) {
+        return campcat::llm::box{c->cx - c->r, c->cy - c->r, 2 * c->r + 1,
+                                 2 * c->r + 1};
+    }
+    const auto &d = std::get<campcat::llm::diamond>(_region);
+    return campcat::llm::box{d.cx - d.rx, d.cy - d.ry, 2 * d.rx + 1,
+                             2 * d.ry + 1};
 }
 
 /// The region-annotation window, opened by double-clicking the preview. What it
@@ -1257,8 +1274,8 @@ long g_annot_id = -1; ///< which question this edit belongs to (`_a.id`)
 bool g_annot_dragging = false;
 bool g_annot_has_region = false;
 /// Which shape the drag draws. Seeded from the region under correction, and
-/// switchable: a box the model got wrong may be a circle the user wants.
-enum class edit_shape { box, circle };
+/// switchable: a box the model got wrong may be a circle or a diamond.
+enum class edit_shape { box, circle, diamond };
 edit_shape g_annot_shape = edit_shape::box;
 int g_annot_ax = 0; ///< drag anchor, image px
 int g_annot_ay = 0;
@@ -1268,7 +1285,9 @@ int g_annot_x0 = 0; ///< committed box (x,y,w,h layout) or circle centre
 int g_annot_y0 = 0;
 int g_annot_x1 = 0; ///< box far corner, inclusive image px
 int g_annot_y1 = 0;
-int g_annot_r = 0; ///< committed circle radius
+int g_annot_r = 0;  ///< committed circle radius
+int g_annot_rx = 0; ///< committed diamond half-diagonals
+int g_annot_ry = 0;
 
 /// A redrawn region waiting to go with the reply. The send bar shows it, and
 /// Send and Reject carry it; it belongs to exactly one question.
@@ -1294,6 +1313,21 @@ campcat::llm::region annot_draft() {
                           : g_annot_r;
         return campcat::llm::circle{ax, ay, r};
     }
+    if (g_annot_shape == edit_shape::diamond) {
+        const int ax = g_annot_dragging ? g_annot_ax : g_annot_x0;
+        const int ay = g_annot_dragging ? g_annot_ay : g_annot_y0;
+        int rx = g_annot_rx;
+        int ry = g_annot_ry;
+        if (g_annot_dragging) {
+            // Both directions, or a centre near an edge would write a diamond
+            // whose vertices sit off the frame the tool then refuses.
+            const int room_x = std::min(ax, std::max(0, g_appr_w - 1 - ax));
+            const int room_y = std::min(ay, std::max(0, g_appr_h - 1 - ay));
+            rx = std::min(std::abs(g_annot_cx - ax), room_x);
+            ry = std::min(std::abs(g_annot_cy - ay), room_y);
+        }
+        return campcat::llm::diamond{ax, ay, rx, ry};
+    }
     const int x0 = g_annot_dragging ? g_annot_ax : g_annot_x0;
     const int y0 = g_annot_dragging ? g_annot_ay : g_annot_y0;
     const int x1 = g_annot_dragging ? g_annot_cx : g_annot_x1;
@@ -1316,14 +1350,23 @@ void open_annotation(const campcat::llm_approval &_a) {
         seed = _a.highlight[0];
     }
     g_annot_has_region = seed.has_value();
-    g_annot_shape = seed && std::holds_alternative<campcat::llm::circle>(*seed)
-                        ? edit_shape::circle
-                        : edit_shape::box;
+    if (seed && std::holds_alternative<campcat::llm::circle>(*seed)) {
+        g_annot_shape = edit_shape::circle;
+    } else if (seed && std::holds_alternative<campcat::llm::diamond>(*seed)) {
+        g_annot_shape = edit_shape::diamond;
+    } else {
+        g_annot_shape = edit_shape::box;
+    }
     if (seed) {
         if (const auto *c = std::get_if<campcat::llm::circle>(&*seed)) {
             g_annot_x0 = c->cx;
             g_annot_y0 = c->cy;
             g_annot_r = c->r;
+        } else if (const auto *d = std::get_if<campcat::llm::diamond>(&*seed)) {
+            g_annot_x0 = d->cx;
+            g_annot_y0 = d->cy;
+            g_annot_rx = d->rx;
+            g_annot_ry = d->ry;
         } else {
             const campcat::llm::box b = region_bounds_ui(*seed);
             g_annot_x0 = b.x;
@@ -1404,6 +1447,15 @@ void draw_annotation_window() {
                         g_annot_r = c.r;
                         g_annot_has_region = true;
                     }
+                } else if (g_annot_shape == edit_shape::diamond) {
+                    const auto &d = std::get<campcat::llm::diamond>(draft);
+                    if (d.rx > 0 && d.ry > 0) {
+                        g_annot_x0 = d.cx;
+                        g_annot_y0 = d.cy;
+                        g_annot_rx = d.rx;
+                        g_annot_ry = d.ry;
+                        g_annot_has_region = true;
+                    }
                 } else if (g_annot_cx != g_annot_ax ||
                            g_annot_cy != g_annot_ay) {
                     g_annot_x0 = std::min(g_annot_ax, g_annot_cx);
@@ -1441,15 +1493,21 @@ void draw_annotation_window() {
             if (g_annot_shape == edit_shape::circle) {
                 ImGui::TextDisabled("circle %d,%d r=%d px", g_annot_x0,
                                     g_annot_y0, g_annot_r);
+            } else if (g_annot_shape == edit_shape::diamond) {
+                ImGui::TextDisabled("diamond %d,%d rx=%d ry=%d px", g_annot_x0,
+                                    g_annot_y0, g_annot_rx, g_annot_ry);
             } else {
                 ImGui::TextDisabled("box %d,%d %dx%d px", g_annot_x0,
                                     g_annot_y0, g_annot_x1 - g_annot_x0 + 1,
                                     g_annot_y1 - g_annot_y0 + 1);
             }
         } else {
-            ImGui::TextDisabled(g_annot_shape == edit_shape::circle
-                                    ? "drag from the centre to set the radius"
-                                    : "drag on the image to pick a box");
+            ImGui::TextDisabled(
+                g_annot_shape == edit_shape::circle
+                    ? "drag from the centre to set the radius"
+                : g_annot_shape == edit_shape::diamond
+                    ? "drag from the centre; horizontal sets rx, vertical sets ry"
+                    : "drag on the image to pick a box");
         }
         // Switching shape drops the committed region: a box must not ride along
         // as a circle (or the other way round) just because it was drawn first.
@@ -1466,6 +1524,13 @@ void draw_annotation_window() {
         if (ImGui::RadioButton("circle", g_annot_shape == edit_shape::circle) &&
             g_annot_shape != edit_shape::circle) {
             g_annot_shape = edit_shape::circle;
+            g_annot_has_region = false;
+        }
+        ImGui::SameLine();
+        if (ImGui::RadioButton("diamond",
+                               g_annot_shape == edit_shape::diamond) &&
+            g_annot_shape != edit_shape::diamond) {
+            g_annot_shape = edit_shape::diamond;
             g_annot_has_region = false;
         }
         if (!g_annot_has_region) {

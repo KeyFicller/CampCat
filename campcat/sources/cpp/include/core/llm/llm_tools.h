@@ -46,10 +46,22 @@ struct circle {
     friend bool operator==(const circle &, const circle &) = default;
 };
 
-/// Either shape: what the approval layer, the correction UI and the geometry
+/// A filled diamond, an axis-aligned rhombus: centre (cx,cy) and the two
+/// half-diagonals. Vertices sit on the axes. Covers the pixels where
+/// `|dx|/rx + |dy|/ry <= 1`, so its bounding box is `2*rx+1` by `2*ry+1`.
+struct diamond {
+    int cx; ///< Centre X, screenshot px
+    int cy; ///< Centre Y
+    int rx; ///< Horizontal half-diagonal, at least 1
+    int ry; ///< Vertical half-diagonal, at least 1
+
+    friend bool operator==(const diamond &, const diamond &) = default;
+};
+
+/// A region: what the approval layer, the correction UI and the geometry
 /// helpers speak. Adding a shape means adding an alternative here, plus a branch
 /// wherever the shapes actually differ (bounds, crop, draw).
-using region = std::variant<box, circle>;
+using region = std::variant<box, circle, diamond>;
 
 /// One question for the human, asked before a gated tool is allowed to run.
 struct approval_request {

@@ -178,29 +178,47 @@ bool region_on_screen(int _img_w, int _img_h, const llm::region &_region,
     // The disc, not just its centre: every pixel it covers has to be in frame,
     // and the rightmost is cx+r (the bounding box is 2r+1 wide), so the test is
     // strict on that side.
-    const llm::circle &c = std::get<llm::circle>(_region);
-    if (c.r < 1 || c.cx - c.r < 0 || c.cy - c.r < 0 || c.cx + c.r >= _img_w ||
-        c.cy + c.r >= _img_h) {
-        *_error = "circle (" + std::to_string(c.cx) + "," +
-                  std::to_string(c.cy) + " r" + std::to_string(c.r) +
-                  ") out of range (screen " + std::to_string(_img_w) + "x" +
-                  std::to_string(_img_h) + ")";
+    if (const llm::circle *c = std::get_if<llm::circle>(&_region)) {
+        if (c->r < 1 || c->cx - c->r < 0 || c->cy - c->r < 0 ||
+            c->cx + c->r >= _img_w || c->cy + c->r >= _img_h) {
+            *_error = "circle (" + std::to_string(c->cx) + "," +
+                      std::to_string(c->cy) + " r" + std::to_string(c->r) +
+                      ") out of range (screen " + std::to_string(_img_w) + "x" +
+                      std::to_string(_img_h) + ")";
+            return false;
+        }
+        return true;
+    }
+    // Same edge rule as the disc: the rightmost vertex is cx+rx.
+    const llm::diamond &d = std::get<llm::diamond>(_region);
+    if (d.rx < 1 || d.ry < 1 || d.cx - d.rx < 0 || d.cy - d.ry < 0 ||
+        d.cx + d.rx >= _img_w || d.cy + d.ry >= _img_h) {
+        *_error = "diamond (" + std::to_string(d.cx) + "," +
+                  std::to_string(d.cy) + " rx" + std::to_string(d.rx) + " ry" +
+                  std::to_string(d.ry) + ") out of range (screen " +
+                  std::to_string(_img_w) + "x" + std::to_string(_img_h) + ")";
         return false;
     }
     return true;
 }
 
 /// One region as the `region` argument, so a sentence read back to the model
-/// can be passed straight in again: a box `{x,y,w,h}` or a circle `{cx,cy,r}`.
+/// can be passed straight in again: a box `{x,y,w,h}`, a circle `{cx,cy,r}`,
+/// or a diamond `{cx,cy,rx,ry}`.
 std::string region_arg_json(const llm::region &_region) {
     if (const llm::box *b = std::get_if<llm::box>(&_region)) {
         return "\"region\":{\"x\":" + std::to_string(b->x) + ",\"y\":" +
                std::to_string(b->y) + ",\"w\":" + std::to_string(b->w) +
                ",\"h\":" + std::to_string(b->h) + "}";
     }
-    const llm::circle &c = std::get<llm::circle>(_region);
-    return "\"region\":{\"cx\":" + std::to_string(c.cx) + ",\"cy\":" +
-           std::to_string(c.cy) + ",\"r\":" + std::to_string(c.r) + "}";
+    if (const llm::circle *c = std::get_if<llm::circle>(&_region)) {
+        return "\"region\":{\"cx\":" + std::to_string(c->cx) + ",\"cy\":" +
+               std::to_string(c->cy) + ",\"r\":" + std::to_string(c->r) + "}";
+    }
+    const llm::diamond &d = std::get<llm::diamond>(_region);
+    return "\"region\":{\"cx\":" + std::to_string(d.cx) + ",\"cy\":" +
+           std::to_string(d.cy) + ",\"rx\":" + std::to_string(d.rx) +
+           ",\"ry\":" + std::to_string(d.ry) + "}";
 }
 
 /// What to append to a refusal when the human redrew the region; empty when they
@@ -424,54 +442,81 @@ bool same_region(const llm::region &_a, const llm::region &_b) {
 }
 
 /// The region's bounding box, in screenshot pixels: what the snap works in, and
-/// what a disc's crop, label and draw all need.
+/// what a masked crop, label and draw all need.
 llm::box region_bounds(const llm::region &_region) {
     if (const llm::box *b = std::get_if<llm::box>(&_region)) {
         return *b;
     }
-    const llm::circle &c = std::get<llm::circle>(_region);
-    return llm::box{c.cx - c.r, c.cy - c.r, 2 * c.r + 1, 2 * c.r + 1};
+    if (const llm::circle *c = std::get_if<llm::circle>(&_region)) {
+        return llm::box{c->cx - c->r, c->cy - c->r, 2 * c->r + 1, 2 * c->r + 1};
+    }
+    const llm::diamond &d = std::get<llm::diamond>(_region);
+    return llm::box{d.cx - d.rx, d.cy - d.ry, 2 * d.rx + 1, 2 * d.ry + 1};
 }
 
-/// The point a region acts at: a box acts at its centre, a disc at its own.
+/// The point a region acts at: a box acts at its centre, a disc or diamond at
+/// its own.
 std::pair<int, int> region_center(const llm::region &_region) {
     if (const llm::box *b = std::get_if<llm::box>(&_region)) {
         return {b->x + b->w / 2, b->y + b->h / 2};
     }
-    const llm::circle &c = std::get<llm::circle>(_region);
-    return {c.cx, c.cy};
+    if (const llm::circle *c = std::get_if<llm::circle>(&_region)) {
+        return {c->cx, c->cy};
+    }
+    const llm::diamond &d = std::get<llm::diamond>(_region);
+    return {d.cx, d.cy};
 }
 
-/// A region's size and place, for a sentence read by a human: "40x30 at 10,20"
-/// or "r=20 at 100,200".
+/// A region's size and place, for a sentence read by a human: "40x30 at 10,20",
+/// "r=20 at 100,200", or "rx=20 ry=10 at 100,200".
 std::string region_phrase(const llm::region &_region) {
     if (const llm::box *b = std::get_if<llm::box>(&_region)) {
         return std::to_string(b->w) + "x" + std::to_string(b->h) + " at " +
                std::to_string(b->x) + "," + std::to_string(b->y);
     }
-    const llm::circle &c = std::get<llm::circle>(_region);
-    return "r=" + std::to_string(c.r) + " at " + std::to_string(c.cx) + "," +
-           std::to_string(c.cy);
+    if (const llm::circle *c = std::get_if<llm::circle>(&_region)) {
+        return "r=" + std::to_string(c->r) + " at " + std::to_string(c->cx) +
+               "," + std::to_string(c->cy);
+    }
+    const llm::diamond &d = std::get<llm::diamond>(_region);
+    return "rx=" + std::to_string(d.rx) + " ry=" + std::to_string(d.ry) +
+           " at " + std::to_string(d.cx) + "," + std::to_string(d.cy);
 }
 
-/// The region's pixels, as a template: BGR for a box, BGRA for a disc with the
-/// alpha carrying the shape. That alpha makes the template self-describing --
-/// the matcher reads the same channel back for its mask, so nothing on disk has
-/// to remember which shape was cut.
+/// The region's pixels, as a template: BGR for a box, BGRA for a disc or a
+/// diamond with the alpha carrying the shape. That alpha makes the template
+/// self-describing -- the matcher reads the same channel back for its mask, so
+/// nothing on disk has to remember which shape was cut.
 cv::Mat crop_region(const cv::Mat &_img, const llm::region &_region) {
     const llm::box b = region_bounds(_region);
     if (std::holds_alternative<llm::box>(_region)) {
         return _img(cv::Rect(b.x, b.y, b.w, b.h)).clone();
     }
-    const llm::circle &c = std::get<llm::circle>(_region);
     cv::Mat out;
     cv::cvtColor(_img(cv::Rect(b.x, b.y, b.w, b.h)), out, cv::COLOR_BGR2BGRA);
+    if (const llm::circle *c = std::get_if<llm::circle>(&_region)) {
+        for (int y = 0; y < out.rows; ++y) {
+            auto *row = out.ptr<cv::Vec4b>(y);
+            for (int x = 0; x < out.cols; ++x) {
+                const int dx = b.x + x - c->cx;
+                const int dy = b.y + y - c->cy;
+                row[x][3] = dx * dx + dy * dy <= c->r * c->r ? 255 : 0;
+            }
+        }
+        return out;
+    }
+    const llm::diamond &d = std::get<llm::diamond>(_region);
     for (int y = 0; y < out.rows; ++y) {
         auto *row = out.ptr<cv::Vec4b>(y);
         for (int x = 0; x < out.cols; ++x) {
-            const int dx = b.x + x - c.cx;
-            const int dy = b.y + y - c.cy;
-            row[x][3] = dx * dx + dy * dy <= c.r * c.r ? 255 : 0;
+            const long long dx = b.x + x - d.cx;
+            const long long dy = b.y + y - d.cy;
+            const long long adx = dx < 0 ? -dx : dx;
+            const long long ady = dy < 0 ? -dy : dy;
+            row[x][3] = adx * d.ry + ady * d.rx <=
+                                static_cast<long long>(d.rx) * d.ry
+                            ? 255
+                            : 0;
         }
     }
     return out;
@@ -696,20 +741,36 @@ struct circle {
                      js::str("Radius in pixels, at least 1.")}]] int r;
 };
 
-/// Either shape, told apart by its fields (`{x,y,w,h}` or `{cx,cy,r}`), so a
-/// tool that takes a region is one tool. No tag for the model to name: each
-/// alternative carries its own fields and none has a default.
-using shape = std::variant<box, circle>;
+/// A filled diamond: centre (cx,cy) and half-diagonals rx, ry. Vertices sit on
+/// the axes. Covers the pixels where `|dx|/rx + |dy|/ry <= 1`.
+struct diamond {
+    [[= js::desc{.text =
+                     js::str("Centre X, in screenshot pixels.")}]] int cx;
+    [[= js::desc{.text =
+                     js::str("Centre Y, in screenshot pixels.")}]] int cy;
+    [[= js::desc{.text = js::str(
+                     "Horizontal half-diagonal in pixels, at least 1.")}]] int rx;
+    [[= js::desc{.text = js::str(
+                     "Vertical half-diagonal in pixels, at least 1.")}]] int ry;
+};
+
+/// A region, told apart by its fields (`{x,y,w,h}`, `{cx,cy,r}`, or
+/// `{cx,cy,rx,ry}`), so a tool that takes a region is one tool. No tag for the
+/// model to name: each alternative carries its own fields and none has a default.
+using shape = std::variant<box, circle, diamond>;
 
 /// The model's spelling of a shape as the shared one. The only place the two
 /// sets of types meet: everything below `region_on_screen` speaks `llm::region`,
-/// and `tools::box` / `tools::circle` must not travel past this file.
+/// and the model-facing structs must not travel past this file.
 llm::region to_region(const shape &_shape) {
     if (const box *b = std::get_if<box>(&_shape)) {
         return llm::box{b->x, b->y, b->w, b->h};
     }
-    const circle &c = std::get<circle>(_shape);
-    return llm::circle{c.cx, c.cy, c.r};
+    if (const circle *c = std::get_if<circle>(&_shape)) {
+        return llm::circle{c->cx, c->cy, c->r};
+    }
+    const diamond &d = std::get<diamond>(_shape);
+    return llm::diamond{d.cx, d.cy, d.rx, d.ry};
 }
 
 /// The current screen decoded, or a `bind_error` when it cannot be. Every tool
@@ -838,8 +899,11 @@ CPP_REFLECT_TOOL(view_template)
 [[= js::image_result]][[= js::doc{
     .text = js::str(
         "Shows one region of a screenshot at its own size, with nothing drawn "
-        "on it. A box is {x,y,w,h}; a circle is {cx,cy,r}, and the pixels "
-        "outside that disc are transparent, exactly as save_template writes "
+        "on it. Pick the shape that matches the control: a box {x,y,w,h} for a "
+        "rectangle, a circle {cx,cy,r} for a round control, a diamond "
+        "{cx,cy,rx,ry} for a diamond (vertices on the axes). Pixels outside a "
+        "circle or a diamond are transparent, "
+        "exactly as save_template writes "
         "them. Use it with the region a failed statement reported, to see what "
         "is there now at the same scale as the template: the whole-screen view "
         "is scaled down, so this is the only way to compare the two pixel for "
@@ -847,7 +911,8 @@ CPP_REFLECT_TOOL(view_template)
         "on a screenshot, then save_template or a different element. Do not "
         "call it again only to tighten the same box.")}]]
     [[= js::param_docs(
-        js::str("The region to cut out: a box {x,y,w,h} or a circle {cx,cy,r}."),
+        js::str("The region to cut out: a box {x,y,w,h}, a circle {cx,cy,r}, or "
+                "a diamond {cx,cy,rx,ry}."),
         js::str("Which screenshot to look at: the number its caption showed. "
                 "Omit for the current screen; looking at another frame does "
                 "not make it current."))]] std::string
@@ -873,10 +938,12 @@ CPP_REFLECT_TOOL(view_crop)
     .text = js::str(
         "Draws a region on a screenshot and returns the marked image. Nothing "
         "is tapped and nothing needs approval; the region lives in the "
-        "picture. A box is {x,y,w,h} and a circle is {cx,cy,r}.")}]]
+        "picture. A box is {x,y,w,h}, a circle is {cx,cy,r} and a diamond is "
+        "{cx,cy,rx,ry}.")}]]
     [[= js::param_docs(
         js::str("Short label for what the region marks, e.g. \"the login button\"."),
-        js::str("The region to mark: a box {x,y,w,h} or a circle {cx,cy,r}."),
+        js::str("The region to mark: a box {x,y,w,h}, a circle {cx,cy,r}, or a "
+                "diamond {cx,cy,rx,ry}."),
         js::str("Which screenshot to look at: the number its caption showed. "
                 "Omit for the current screen; looking at another frame does "
                 "not make it current."))]] std::string
@@ -894,6 +961,14 @@ CPP_REFLECT_TOOL(view_crop)
     const llm::box b = region_bounds(r);
     if (const llm::circle *c = std::get_if<llm::circle>(&r)) {
         cv::circle(bgr, cv::Point(c->cx, c->cy), c->r, color, 4);
+    } else if (const llm::diamond *d = std::get_if<llm::diamond>(&r)) {
+        const std::vector<std::vector<cv::Point>> pts = {{
+            {d->cx, d->cy - d->ry},
+            {d->cx + d->rx, d->cy},
+            {d->cx, d->cy + d->ry},
+            {d->cx - d->rx, d->cy},
+        }};
+        cv::polylines(bgr, pts, true, color, 4);
     } else {
         cv::rectangle(bgr, cv::Rect(b.x, b.y, b.w, b.h), color, 4);
     }
@@ -918,7 +993,7 @@ std::string tap_region(const llm::region &_given) {
     }
     // Snap first, then use that region everywhere below: the preview, the tap
     // point and the sentence back all describe one region, so approving what is
-    // seen approves what happens. A disc is skipped -- the snap reads an
+    // seen approves what happens. Only a box is snapped -- the snap reads an
     // element's edges, which a boundary the human drew has no part in.
     llm::region use = _given;
     std::string snap_note;
@@ -978,12 +1053,14 @@ std::string tap_region(const llm::region &_given) {
 
 [[= js::doc{.text = js::str(
                 "Taps the element at this region, in screenshot pixels. A box "
-                "is {x,y,w,h} and a circle is {cx,cy,r}; the tap lands at its "
-                "centre. While human approval is on, the region is shown to "
-                "the user and nothing is tapped unless they approve it. "
-                "Nothing else needs a prior call.")}]]
-    [[= js::param_docs(js::str("The region to tap: a box {x,y,w,h} or a circle "
-                               "{cx,cy,r}."))]] std::string
+                "is {x,y,w,h}, a circle is {cx,cy,r} and a diamond is "
+                "{cx,cy,rx,ry}; the tap lands at its centre. While human "
+                "approval is on, the region is shown to the user and nothing "
+                "is tapped unless they approve it. Nothing else needs a prior "
+                "call.")}]]
+    [[= js::param_docs(js::str(
+        "The region to tap: a box {x,y,w,h}, a circle {cx,cy,r}, or a diamond "
+        "{cx,cy,rx,ry}."))]] std::string
     tap(shape region) {
     return tap_region(to_region(region));
 }
@@ -1220,7 +1297,7 @@ std::string save_template_region(std::string bundle, std::string name,
                                               &frame_png);
     // Given region first, so a bad one is refused on its own terms; then the
     // snap, against the very frame this cut comes from. Everything below cuts,
-    // previews and reports `use`. A disc is skipped -- the snap reads an
+    // previews and reports `use`. Only a box is snapped -- the snap reads an
     // element's edges, which a human's boundary has no part in.
     llm::region use = _given;
     std::string snap_note;
@@ -1295,9 +1372,13 @@ std::string save_template_region(std::string bundle, std::string name,
     .text = js::str(
         "Cuts one template PNG, out of one of the screenshots you have taken, "
         "into an existing script bundle, so that bundle's script can use it "
-        "with tap(\"name.png\"). The region is a box {x,y,w,h} or, for a round "
-        "element, a circle {cx,cy,r}: a circle is written with the disc's alpha "
-        "and matching then ignores every pixel outside it. While human approval "
+        "with tap(\"name.png\"). Pick the shape that matches the control: a box "
+        "{x,y,w,h} for a rectangle, a circle {cx,cy,r} for a round control, a "
+        "diamond {cx,cy,rx,ry} for a diamond (vertices on the axes). A box "
+        "around a round or diamond control keeps background the match must "
+        "ignore. A circle or a diamond is written with that shape's alpha and "
+        "matching then ignores every pixel "
+        "outside it. While human approval "
         "is on, the region is shown to the user and nothing is cut unless they "
         "approve it. It cuts from the picture you looked at, so screenshot "
         "right before you cut, and crop tight around the part that stays put.")}]]
@@ -1308,8 +1389,8 @@ std::string save_template_region(std::string bundle, std::string name,
             "Template name, a leaf name; \".png\" is appended when missing."),
         js::str("Which screenshot to cut from: the number its caption showed. "
                 "Omit for the most recent one."),
-        js::str("The region to cut out: a box {x,y,w,h} or a circle "
-                "{cx,cy,r}."))]] std::string
+        js::str("The region to cut out: a box {x,y,w,h}, a circle {cx,cy,r}, or "
+                "a diamond {cx,cy,rx,ry}."))]] std::string
         save_template(std::string bundle, std::string name,
                       std::optional<int> shot, shape region) {
     return save_template_region(std::move(bundle), std::move(name), shot,

@@ -20,6 +20,25 @@ _PNG = (
 BOX = {"x": 1, "y": 2, "w": 3, "h": 4}
 
 
+def test_a_diamond_is_not_read_as_a_circle():
+    region = {"cx": 50, "cy": 40, "rx": 10, "ry": 6}
+    assert region_review._shape_of(region) == "diamond"
+    assert region_review._bounds(region, "diamond") == (40, 34, 21, 13)
+    assert region_review._inside(region, "diamond", (100, 80))
+    assert not region_review._inside(
+        {"cx": 90, "cy": 40, "rx": 10, "ry": 5}, "diamond", (100, 80))
+    verdict, got, _, shape = region_review.parse_review(
+        'verdict: adjust\n'
+        'diamond: {"cx":50,"cy":40,"rx":8,"ry":5}\n'
+        "reason: tight",
+        "diamond",
+        kind="template",
+    )
+    assert verdict == "adjust"
+    assert shape == "diamond"
+    assert got == {"cx": 50, "cy": 40, "rx": 8, "ry": 5}
+
+
 def _png(w, h):
     buf = io.BytesIO()
     Image.new("RGB", (w, h), (20, 20, 20)).save(buf, "PNG")

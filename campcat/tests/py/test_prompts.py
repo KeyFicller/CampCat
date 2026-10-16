@@ -36,6 +36,8 @@ def test_scripter_prompt_crops_an_element_once():
     text = scripter.scripter_prompt()
     assert "view_crop` once" in text
     assert "tighten the same box" in text
+    assert "Pick the shape yourself" in text
+    assert "diamond (菱形" in text
 
 
 def test_scripter_prompt_uses_an_action_for_same_screen_work():
