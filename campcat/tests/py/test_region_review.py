@@ -164,7 +164,7 @@ def test_adjust_then_ok_sends_the_new_region_and_says_so(monkeypatch):
     ], None)
     assert calls[-1] == ("tap", {"region": {"x": 2, "y": 2, "w": 3, "h": 3}})
     text = _tap_text()[0]
-    assert "self-check already used box 2,2 3x3" in text
+    assert "(self-check 1.00; already used box 2,2 3x3." in text
     assert "Do not view_crop or save this region again this turn" in text
 
 
@@ -503,11 +503,12 @@ def test_template_pick_follows_the_crop_rules(monkeypatch):
         _say("pick: 2\nreason: rule 1, the circle"),
         _say("Done."),
     ], None, name="save_template")
-    picks = [text for text in _systems(model) if text.startswith("You see every crop")]
+    picks = [text for text in _systems(model) if text.startswith("You see every attempt")]
     assert picks
     assert "圆" in picks[-1]
     assert "留白" in picks[-1]
     assert "best matches" not in picks[-1]
+    assert "correction of the one before" not in picks[-1]
     assert [c for c in calls if c[0] == "save_template"][-1][1]["region"] == CIRCLE
 
 
@@ -522,3 +523,149 @@ def test_unreadable_template_pick_keeps_the_first_cut(monkeypatch):
     assert [c for c in calls if c[0] == "save_template"] == [
         ("save_template", {"region": BOX})]
     assert any("kept the first of 2" in text for text in _tap_text())
+
+
+def test_a_low_confidence_ok_gets_one_more_look(monkeypatch):
+    calls, model, _ = _drive(monkeypatch, [
+        _call("tap", {"region": dict(BOX), "expect": "btn"}),
+        _say("verdict: ok\nconfidence: 0.2\nreason: maybe"),
+        _say('verdict: adjust\nbox: {"x":2,"y":2,"w":3,"h":3}\n'
+             "confidence: 0.7\nreason: tighter"),
+        _say("verdict: ok\nconfidence: 0.9\nreason: fine"),
+        _say("pick: 1\nreason: the first"),
+        _say("Done."),
+    ], None)
+    texts = [review.content[0]["text"] for review in _reviews(model)]
+    assert sum("You were not sure last time" in text for text in texts) == 1
+    assert calls[-1][1]["region"] == BOX
+
+
+def test_a_sure_ok_stops_at_once(monkeypatch):
+    calls, model, _ = _drive(monkeypatch, [
+        _call("tap", {"region": dict(BOX), "expect": "btn"}),
+        _say("verdict: ok\nconfidence: 0.9\nreason: fine"),
+        _say("Done."),
+    ], None)
+    assert len(_reviews(model)) == 1
+    assert calls[-1] == ("tap", {"region": BOX})
+
+
+def test_the_score_shows_up_in_the_history(monkeypatch):
+    _drive(monkeypatch, [
+        _call("tap", {"region": dict(BOX), "expect": "btn"}),
+        _say("verdict: ok\nconfidence: 0.35\nreason: maybe"),
+        _say('verdict: adjust\nbox: {"x":2,"y":2,"w":3,"h":3}\n'
+             "confidence: 0.8\nreason: tighter"),
+        _say("verdict: ok\nconfidence: 0.7\nreason: fine"),
+        _say("pick: 1\nreason: the first"),
+        _say("Done."),
+    ], None)
+    # The last verdict is the one reported, in the same bracket as what the
+    # check did about it.
+    assert "(self-check 0.70; kept the first of 2: the first." in _tap_text()[0]
+
+
+def test_a_skipped_check_keeps_its_own_wording(monkeypatch):
+    _drive(monkeypatch, [
+        _call("tap", {"region": dict(BOX), "expect": "btn"}),
+        _say("looks good"),
+        _say("Done."),
+    ], None)
+    text = _tap_text()[0]
+    assert "(self-check skipped:" in text
+    assert "(self-check 0." not in text
+
+
+def test_the_score_is_shown_before_the_tool_runs(monkeypatch):
+    notes = []
+    monkeypatch.setattr(tools, "note", notes.append)
+    calls, _, _ = _drive(monkeypatch, [
+        _call("tap", {"region": dict(BOX), "expect": "btn"}),
+        _say("verdict: ok\nconfidence: 0.4\nreason: maybe"),
+        _say('verdict: adjust\nbox: {"x":2,"y":2,"w":3,"h":3}\n'
+             "confidence: 0.9\nreason: tighter"),
+        _say("verdict: ok\nconfidence: 0.8\nreason: fine"),
+        _say("pick: 1\nreason: the first"),
+        _say("Done."),
+    ], None)
+    # Once, before the host call: the approval gate reads the conversation, not
+    # the tool result, and the result only exists after it is answered.
+    assert notes == ["self-check 0.80; kept the first of 2: the first."
+                     " Do not view_crop or save this region again this turn"
+                     " unless the tool returned an error."]
+    assert calls[-1][0] == "tap"
+
+
+def test_a_rejected_region_says_nothing_about_its_score(monkeypatch):
+    notes = []
+    monkeypatch.setattr(tools, "note", notes.append)
+    _drive(monkeypatch, [
+        _call("tap", {"region": dict(BOX), "expect": "btn"}),
+        _say("verdict: reject\nconfidence: 0.1\nreason: wrong element"),
+        _say("Done."),
+    ], None)
+    assert notes == []
+
+
+def test_the_pick_judges_each_attempt_on_its_own(monkeypatch):
+    calls, model, _ = _drive(monkeypatch, [
+        _call("tap", {"region": dict(BOX), "expect": "btn"}),
+        _say('verdict: adjust\nbox: {"x":2,"y":2,"w":3,"h":3}\nreason: tightened'),
+        _say("verdict: ok\nreason: fine"),
+        _say("pick: 1\nreason: the first"),
+        _say("Done."),
+    ], None)
+    picks = [text for text in _systems(model) if text.startswith("You see every attempt")]
+    assert picks and "not better and not worse" in picks[-1]
+    assert "surroundings" in picks[-1]
+    # One text and two pictures per candidate; the judge's reason would only
+    # make the later attempt sound better.
+    wide = [review for review in _reviews(model) if len(review.content) > 3]
+    assert len(wide) == 1
+    assert len(wide[0].content) == 1 + 2 * 2
+    assert "tightened" not in wide[0].content[0]["text"]
+    assert "candidate 1" in wide[0].content[0]["text"]
+    assert [c[0] for c in calls].count("tight_crop") == 2 + 2
+    assert [c[0] for c in calls].count("mark") == 2 + 2
+
+
+def test_a_wired_scorer_picks_the_highest(monkeypatch):
+    scores = {1: 0.3, 2: 0.8}
+    monkeypatch.setattr(
+        region_review, "score_region",
+        lambda region, shape, shot: scores[region["x"]])
+    calls, model, _ = _drive(monkeypatch, [
+        _call("tap", {"region": dict(BOX), "expect": "btn"}),
+        _say('verdict: adjust\nbox: {"x":2,"y":2,"w":3,"h":3}\nreason: tighter'),
+        _say("verdict: ok\nreason: fine"),
+        _say("Done."),
+    ], None)
+    assert calls[-1] == ("tap", {"region": {"x": 2, "y": 2, "w": 3, "h": 3}})
+    assert [c[0] for c in calls].count("tight_crop") == 2
+    assert [review for review in _reviews(model) if len(review.content) > 3] == []
+    assert "(self-check 0.80;" in _tap_text()[0]
+
+
+def test_a_half_scored_or_broken_scorer_falls_back_to_the_model(monkeypatch):
+    def half(region, shape, shot):
+        return 0.5 if region["x"] == 1 else None
+
+    script = [
+        _call("tap", {"region": dict(BOX), "expect": "btn"}),
+        _say('verdict: adjust\nbox: {"x":2,"y":2,"w":3,"h":3}\nreason: tighter'),
+        _say("verdict: ok\nreason: fine"),
+        _say("pick: 1\nreason: the first"),
+        _say("Done."),
+    ]
+    monkeypatch.setattr(region_review, "score_region", half)
+    calls, model, _ = _drive(monkeypatch, list(script), None)
+    assert calls[-1][1]["region"] == BOX
+    assert [review for review in _reviews(model) if len(review.content) > 3]
+
+    def broken(region, shape, shot):
+        raise RuntimeError("no model")
+
+    monkeypatch.setattr(region_review, "score_region", broken)
+    calls, model, _ = _drive(monkeypatch, list(script), None)
+    assert calls[-1][1]["region"] == BOX
+    assert [review for review in _reviews(model) if len(review.content) > 3]

@@ -17,6 +17,7 @@ import agent.memorier as memorier
 import observability
 import session
 import tools
+from agent.region_rules import REGION_RULES
 
 
 # Only the scripter sees these. Anything the host sends that is not listed here
@@ -166,7 +167,8 @@ RULES = {
         "`{\"cx\":...,\"cy\":...,\"r\":...}`. A diamond (菱形, vertices on the axes) is "
         "`{\"cx\":...,\"cy\":...,\"rx\":...,\"ry\":...}`. A box around a round or diamond "
         "control keeps the background the match must ignore. A circle or a diamond writes "
-        "that shape's alpha and leaves every pixel outside it out of the match.\n"
+        "that shape's alpha and leaves every pixel outside it out of the match.\n" +
+        REGION_RULES +
         "6. Run the bundle: `run_script` with the source `run(\"<name>/main.ccat\")`. Pass "
         "that `run(...)` call and not the script's own text -- a bare `run_script` resolves "
         "template names against the script root, so the PNGs you just saved into the bundle "

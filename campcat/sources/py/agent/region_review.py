@@ -1,10 +1,11 @@
 """Check a region against its own crop before the host acts on it.
 
 One model call per round, with no tools: the crop at full size, and the area
-around it. A correction is kept, not trusted: when there is more than one,
-a last call sees every crop and picks one. Corrections drift, so a pick that
-cannot be read keeps the first proposal. A check that cannot run lets the
-original call through.
+around it. A region the check is not sure about gets one more look, asked for
+the strongest alternative it can see. Every attempt is only a candidate: the
+last call sees each one's cut and the surroundings it sits in, picks the best,
+and a pick that cannot be read keeps the first proposal. A check that cannot
+run lets the original call through.
 """
 
 from __future__ import annotations
@@ -21,6 +22,10 @@ import session
 import tools
 
 MAX_ROUNDS = 3
+
+# One 0..1 scale for the judge's own confidence and any scoring model wired in
+# later: below this, another attempt is worth trying.
+MIN_SCORE = 0.6
 
 # kind, and the shape a single region takes. update_script and save_anchor have
 # one region per template entry, read off that entry's cut.
@@ -43,6 +48,7 @@ REVIEW_PROMPT = (
     "drawn on it: the area around it at full resolution, or the whole frame "
     "scaled down, as the text says. Answer in exactly this form, nothing else:\n"
     "verdict: ok | adjust | reject\n"
+    "confidence: 0.0-1.0   (how sure you are this region is right; 0 = guessing)\n"
     "box: {\"x\":..,\"y\":..,\"w\":..,\"h\":..}   (only with adjust; a circle "
     "region writes circle: {\"cx\":..,\"cy\":..,\"r\":..}; a diamond region "
     "writes diamond: {\"cx\":..,\"cy\":..,\"rx\":..,\"ry\":..})\n"
@@ -52,12 +58,20 @@ REVIEW_PROMPT = (
     "in this frame."
 )
 
+_ALTERNATIVE = (
+    "You were not sure last time. Look again and name the strongest "
+    "alternative as `adjust`, switching to circle, diamond or box when the "
+    "control could be another shape. A try may be worse: it is only a "
+    "candidate, and the best of them is picked afterwards."
+)
+
 PICK_PROMPT = (
-    "You see every crop considered for one region, in order. 1 is the first "
-    "proposal; each later one is a correction of the one before it, and "
-    "corrections drift, so a later crop is not a better one. Pick the crop "
-    "that best matches the expectation: the control it names, tight around "
-    "it, nothing extra, and not cut off. Answer in exactly this form:\n"
+    "You see every attempt for one region, in order: the first proposal and "
+    "any try after it. For each, its cut, then the same region drawn in its "
+    "surroundings. The numbers only name the attempts: a later one is not "
+    "better and not worse than the first. Pick the cut that best matches the "
+    "expectation: the control it names, tight around it, nothing extra, and "
+    "not cut off. Answer in exactly this form:\n"
     "pick: <the number>\n"
     "reason: one sentence"
 )
@@ -70,7 +84,7 @@ _TEMPLATE_RULES = (
     "diamond control (菱形) keeps only a diamond {cx,cy,rx,ry}. A "
     "rectangular control keeps only a box {x,y,w,h}. While a right shape "
     "remains, drop the wrong one. A box around a round control is the wrong "
-    "shape.\n"
+    "shape. A diamond much wider than it is tall is a box, not a diamond.\n"
     "2. Clipping. Drop a crop that cuts the control off while a complete one "
     "remains. A circle is judged by its rim, not the corners outside the disc. "
     "A diamond is judged by its four vertices, not the corners of its box.\n"
@@ -82,9 +96,13 @@ _TEMPLATE_RULES = (
 )
 
 TEMPLATE_PICK_PROMPT = (
-    "You see every crop considered for one template, in order. 1 is the first "
-    "proposal; each later one is a correction.\n"
+    "You see every attempt for one template, in order: the first proposal and "
+    "any try after it. For each, its cut, then the same region drawn in its "
+    "surroundings. The numbers only name the attempts: a later one is not "
+    "better and not worse than the first.\n"
     + _TEMPLATE_RULES +
+    "\nJudge rule 2 (cutting the control off) on the surroundings picture, not "
+    "on the cut alone."
     "\nAnswer in exactly this form:\n"
     "pick: <the number>\n"
     "reason: one sentence naming which rule decided it"
@@ -127,7 +145,7 @@ _human: tuple | None = None
 # rejection may be retried once, and the second rejection ends it.
 _STOP = (" Do not view_crop or save this region again this turn "
          "unless the tool returned an error.")
-_KEPT = " (already checked this turn; kept the previous region." + _STOP + ")"
+_KEPT = "already checked this turn; kept the previous region." + _STOP
 _accepted: dict[str, dict] = {}
 _reject_count: dict[str, int] = {}
 _reject_reason: dict[str, str] = {}
@@ -150,6 +168,8 @@ class ReviewState(TypedDict, total=False):
     expect: str
     label: str
     rounds: int
+    confidence: float
+    tried_alt: bool
     crop_b64: str
     context_b64: str
     context_note: str
@@ -334,7 +354,46 @@ def _moved(shape: str, before: dict, after: dict) -> str:
                  f"at {after['cx']},{after['cy']}")
     else:
         where = (f"circle r={after['r']} at {after['cx']},{after['cy']}")
-    return f" (self-check already used {where}.{_STOP})"
+    return f"already used {where}.{_STOP}"
+
+
+_NUMBER = re.compile(r"[-+]?\d*\.?\d+")
+
+
+def _confidence(text: str) -> float:
+    """The judge's own 0..1 score, clamped; 1.0 when it did not give one."""
+    for line in text.splitlines():
+        if line.strip().lower().startswith("confidence:"):
+            found = _NUMBER.search(line.split(":", 1)[1])
+            if found is None:
+                return 1.0
+            return min(1.0, max(0.0, float(found.group())))
+    return 1.0
+
+
+def _needs_alt(state: ReviewState) -> bool:
+    """True when the last verdict accepted a region it was unsure about.
+
+    The judge that takes the extra look marks `tried_alt`, so one check gets at
+    most one of them.
+    """
+    return (state.get("verdict") == "ok"
+            and state.get("confidence", 1.0) < MIN_SCORE
+            and not state.get("tried_alt")
+            and state.get("rounds", 0) < MAX_ROUNDS)
+
+
+def _self_check(state: ReviewState, body: str) -> str:
+    """The check's score, and what it did about it, for the history.
+
+    The score is what the judge said and is also what a scoring model would
+    say, so a low one in the log explains a second look. The brackets around it
+    are the caller's: the same line goes into the model's result and into the
+    conversation.
+    """
+    score = state.get("confidence")
+    tag = "" if score is None else f" {score:.2f}"
+    return f"self-check{tag}{'; ' + body if body else ''}"
 
 
 def _picture(image: str) -> dict:
@@ -342,34 +401,46 @@ def _picture(image: str) -> dict:
             "image_url": {"url": f"data:{session.MIME};base64,{image}"}}
 
 
-def review_render(state: ReviewState) -> dict:
-    shape = state["shape"]
-    region = state["region"]
-    extra = {} if state.get("shot") is None else {"shot": state["shot"]}
+def _views(region: dict, shape: str, shot, label: str
+           ) -> tuple[str, str, str, tuple, str]:
+    """`(cut, context, note, frame, error)` for one region.
+
+    The cut is what would be used; the context is the same region drawn on the
+    frame around it, so a boundary that takes the control with it is visible.
+    `error` is the host's refusal, with the first three empty then.
+    """
+    extra = {} if shot is None else {"shot": shot}
     crop = tools.call_cpp("tight_crop", {"region": region, **extra})
     if not crop.get("ok"):
-        return {"verdict": "skip", "reason": str(crop.get("error", ""))}
-    marked = tools.call_cpp(
-        "mark", {"label": state.get("label") or "", "region": region, **extra})
+        return "", "", "", (), str(crop.get("error", ""))
+    marked = tools.call_cpp("mark", {"label": label, "region": region, **extra})
     if not marked.get("ok"):
-        return {"verdict": "skip", "reason": str(marked.get("error", ""))}
+        return "", "", "", (), str(marked.get("error", ""))
+    cut = crop.get("image_b64") or ""
     marked_b64 = marked.get("image_b64") or ""
     frame = session.png_size(marked_b64)
-    context = marked_b64
     if not frame:
-        note = "second picture: the whole frame"
-    else:
-        box = neighbourhood(_bounds(region, shape), frame)
-        cut = session.crop_png(marked_b64, box)
-        if cut:
-            context = cut
-            note = (f"second picture: neighbourhood {box[0]},{box[1]} "
-                    f"{box[2]}x{box[3]} of the {frame[0]}x{frame[1]} frame, "
-                    f"at full resolution; give coordinates in frame pixels")
-        else:
-            note = f"second picture: the whole {frame[0]}x{frame[1]} frame"
-    return {"crop_b64": crop.get("image_b64") or "", "context_b64": context,
-            "context_note": note, "frame_size": frame or ()}
+        return cut, marked_b64, "second picture: the whole frame", (), ""
+    box = neighbourhood(_bounds(region, shape), frame)
+    context = session.crop_png(marked_b64, box)
+    if not context:
+        return (cut, marked_b64,
+                f"second picture: the whole {frame[0]}x{frame[1]} frame",
+                frame, "")
+    note = (f"second picture: neighbourhood {box[0]},{box[1]} "
+            f"{box[2]}x{box[3]} of the {frame[0]}x{frame[1]} frame, "
+            f"at full resolution; give coordinates in frame pixels")
+    return cut, context, note, frame, ""
+
+
+def review_render(state: ReviewState) -> dict:
+    cut, context, note, frame, error = _views(
+        state["region"], state["shape"], state.get("shot"),
+        state.get("label") or "")
+    if error:
+        return {"verdict": "skip", "reason": error}
+    return {"crop_b64": cut, "context_b64": context, "context_note": note,
+            "frame_size": frame}
 
 
 def review_judge(state: ReviewState) -> dict:
@@ -380,6 +451,9 @@ def review_judge(state: ReviewState) -> dict:
         f"region: {json.dumps(state['region'], separators=(',', ':'))}\n"
         f"{state.get('context_note', '')}"
     )
+    alt = _needs_alt(state)
+    if alt:
+        text += "\n" + _ALTERNATIVE
     try:
         model = models.build_chat_model()
         response = model.invoke([
@@ -394,10 +468,13 @@ def review_judge(state: ReviewState) -> dict:
         raise
     except Exception as exc:  # noqa: BLE001 - a failed check lets the call through
         return {"verdict": "skip", "reason": str(exc), "rounds": rounds}
+    answer = session.content_text(getattr(response, "content", response))
     verdict, region, reason, shape = parse_review(
-        session.content_text(getattr(response, "content", response)),
-        state["shape"], kind=state["kind"])
-    out: dict = {"verdict": verdict, "reason": reason, "rounds": rounds}
+        answer, state["shape"], kind=state["kind"])
+    out: dict = {"verdict": verdict, "reason": reason, "rounds": rounds,
+                 "confidence": _confidence(answer)}
+    if alt:
+        out["tried_alt"] = True
     if verdict == "adjust" and _inside(region, shape, state.get("frame_size")):
         out["region"] = region
         out["shape"] = shape
@@ -418,6 +495,8 @@ def _after_render(state: ReviewState) -> str:
 def _after_judge(state: ReviewState) -> str:
     if state.get("verdict") == "adjust" and state.get("rounds", 0) < MAX_ROUNDS:
         return "render"
+    if _needs_alt(state):
+        return "render"
     # A correction is a candidate, not the answer: the last call picks among
     # them. One candidate means nothing moved, so there is nothing to pick.
     if (state.get("verdict") in ("ok", "adjust")
@@ -426,26 +505,70 @@ def _after_judge(state: ReviewState) -> str:
     return "end"
 
 
+def score_region(region: dict, shape: str, shot) -> float | None:
+    """0..1 for one candidate, the same scale as the judge's own confidence.
+
+    None until a scoring model is wired in: put it behind this function, and
+    the pick uses its numbers instead of asking the model.
+    """
+    return None
+
+
+def _scores(candidates: list, shot) -> list[float] | None:
+    """Every candidate's score, or None when any is missing or raised.
+
+    A partial set is not comparable -- the scoring model only knows boxes, and
+    a circle beside them has no number -- so the model picks instead.
+    """
+    scores = []
+    for candidate in candidates:
+        region = candidate["region"]
+        try:
+            score = score_region(region, _shape_of(region), shot)
+        except Exception:  # noqa: BLE001 - a broken scorer must not block the call
+            return None
+        if score is None:
+            return None
+        scores.append(float(score))
+    return scores
+
+
 def review_pick(state: ReviewState) -> dict:
-    """One crop from every one considered, by the prompt for this kind."""
+    """The best attempt, by score when a model is wired, else by the model.
+
+    A later attempt is no better than the first, so every candidate is shown
+    the same way -- its cut, then the surroundings where a boundary that took
+    the control with it shows -- and the text carries no reason to favour one.
+    """
     candidates = state.get("candidates") or []
     first = candidates[0]["region"]
-    extra = {} if state.get("shot") is None else {"shot": state["shot"]}
+    shot = state.get("shot")
+    scores = _scores(candidates, shot)
+    if scores is not None:
+        # Ties keep the earliest attempt, which is the original proposal.
+        best = max(range(len(candidates)), key=lambda i: (scores[i], -i))
+        # The number the pick actually used is the one the history should
+        # show, in place of the judge's own guess.
+        return {"region": candidates[best]["region"], "verdict": "ok",
+                "confidence": scores[best],
+                "reason": f"scored {scores[best]:.2f}"}
     lines = [
         REVIEW_CRITERIA[state["kind"]],
         f"expectation: {state.get('expect') or '(none given)'}",
     ]
     pictures = []
     for index, candidate in enumerate(candidates, 1):
-        crop = tools.call_cpp("tight_crop", {"region": candidate["region"], **extra})
-        if not crop.get("ok"):
+        region = candidate["region"]
+        cut, context, _, _, error = _views(
+            region, _shape_of(region), shot, f"candidate {index}")
+        if error:
             return {"region": first, "verdict": "ok",
-                    "reason": str(crop.get("error", "")) or "could not compare"}
-        pictures.append(_picture(crop.get("image_b64") or ""))
+                    "reason": error or "could not compare"}
+        pictures += [_picture(cut), _picture(context)]
         lines.append(
-            f"{index}. {json.dumps(candidate['region'], separators=(',', ':'))}"
-            f" — {candidate.get('note') or ''}")
-    lines.append("The pictures follow in that order.")
+            f"candidate {index}: {json.dumps(region, separators=(',', ':'))}")
+    lines.append("The pictures follow that order: each candidate's cut, then "
+                 "the same region in its surroundings.")
     try:
         model = models.build_chat_model()
         prompt = (TEMPLATE_PICK_PROMPT if state.get("kind") == "template"
@@ -517,15 +640,15 @@ def _one(kind: str, shape: str, region: dict, shot, expect: str,
             _reject_reason[key] = reason
         return region, "", reason
     if verdict == "skip":
-        return region, f" (self-check skipped: {out.get('reason') or 'unreadable'})", ""
+        return region, f"self-check skipped: {out.get('reason') or 'unreadable'}", ""
     final = out.get("region") or region
     if key:
         _accepted[key] = dict(final)
-    note = _moved(shape, region, final)
-    if not note and len(out.get("candidates") or []) > 1:
-        note = (f" (self-check kept the first of {len(out['candidates'])}: "
-                f"{out.get('reason') or ''}.{_STOP})")
-    return final, note, ""
+    body = _moved(shape, region, final)
+    if not body and len(out.get("candidates") or []) > 1:
+        body = (f"kept the first of {len(out['candidates'])}: "
+                f"{out.get('reason') or ''}.{_STOP}")
+    return final, _self_check(out, body), ""
 
 
 def _human_repeat(name: str, args: dict) -> bool:
@@ -565,7 +688,7 @@ def _review_update(args: dict) -> tuple[dict, str, str]:
             notes.append(note)
     out = _strip(args)
     out["templates"] = templates
-    return out, "".join(notes), ""
+    return out, "; ".join(notes), ""
 
 
 def review(name: str, args: dict) -> tuple[dict, str, str]:

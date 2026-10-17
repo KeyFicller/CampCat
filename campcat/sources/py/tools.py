@@ -25,6 +25,11 @@ class TurnInterrupted(Exception):
     """The host stopped this turn. The in-flight call has no tool_result."""
 
 
+def note(text: str) -> None:
+    """Show one line in the conversation, before the tool it describes runs."""
+    transport.emit(protocol.build_note(text))
+
+
 def call_cpp(name: str, args: dict) -> dict:
     """Run one tool on the host and return its `tool_result` message.
 

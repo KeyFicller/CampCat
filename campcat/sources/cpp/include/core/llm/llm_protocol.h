@@ -27,7 +27,7 @@ constexpr int k_protocol_version = 9;
  * callers can ignore stray lines instead of treating them as fatal.
  */
 struct message {
-    enum class kind { ready, log, result, chunk, tool_call, unknown };
+    enum class kind { ready, log, note, result, chunk, tool_call, unknown };
 
     kind type = kind::unknown;
     long id = 0;
@@ -49,6 +49,8 @@ struct message {
     // log
     std::string level;
     std::string log_message;
+
+    // note (shares `text`: a line the sidecar wants in the conversation)
 
     // ready
     int protocol = 0;

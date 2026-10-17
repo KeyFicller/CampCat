@@ -849,7 +849,10 @@ constexpr int k_default_swipe_ms = 300;
 
 [[= js::image_result]][[= js::doc{
     .text =
-        js::str("Takes a fresh screenshot of the device screen.")}]] std::string
+        js::str("Takes a fresh screenshot of the device screen and numbers it. "
+                "Use it before acting on a screen you have not seen since it "
+                "changed. Do not use it for an older frame -- view_shot does "
+                "that without replacing the current screen.")}]] std::string
     screenshot() {
     adb_api &adb = require_adb();
     cv::Mat bgr;
@@ -877,11 +880,10 @@ CPP_REFLECT_TOOL(screenshot)
 
 [[= js::image_result]][[= js::doc{
     .text = js::str(
-        "Shows a screenshot you took earlier in this session again, by its "
-        "number. Frames leave the message list as the turn moves on, so use "
-        "this when you need to look at an older one before cutting a template "
-        "from it. It does not change the current screen: a tap still lands on "
-        "the newest one.")}]][[= js::param_docs(
+        "Shows an earlier frame of this session again, by its number. Use it "
+        "to look at one before cutting a template from it. Do not use it for "
+        "the screen now -- screenshot; this does not replace it, so a tap "
+        "still lands on the newest.")}]][[= js::param_docs(
     js::str("Frame number from a screenshot caption."))]] std::string
     view_shot(int shot) {
     std::string error;
@@ -895,14 +897,12 @@ CPP_REFLECT_TOOL(view_shot)
 
 [[= js::image_result]][[= js::doc{
     .text = js::str(
-        "Shows a template PNG from a script bundle: what a failed tap, "
-        "tap_offset, swipe or wait_until was matching against. Look at it "
-        "together with a fresh screenshot or view_crop -- the template is the "
-        "side that did not match, so the question is whether the control it "
-        "holds is on the screen at all (then the step before it did not land, or "
-        "the screen is not the one you expected) or is there but different "
-        "(then the cut is loose or stale, or holds text that changes between "
-        "runs).")}]]
+        "Shows a template PNG: what a failed tap, swipe or wait_until was "
+        "matching against. Use it after a failed match, with a screenshot or "
+        "view_crop, to tell a control that is gone (the step before did not "
+        "land) from one that changed (a loose, stale or text-bearing cut). Do "
+        "not use it to judge a cut you are about to save -- view_crop shows "
+        "that.")}]]
     [[= js::param_docs(
         js::str("Bundle the template is in, as list_scripts showed it."),
         js::str("Template name, as read_script lists it; \".png\" is appended "
@@ -953,16 +953,14 @@ CPP_REFLECT_TOOL(view_template)
 
 [[= js::image_result]][[= js::doc{
     .text = js::str(
-        "Shows one region of a screenshot plus 16 pixels of screen around it "
-        "where the frame has room, with the cut drawn on it. Pick the shape "
-        "that matches the control: a box {x,y,w,h} for a rectangle, a circle "
-        "{cx,cy,r} for a round control, a diamond {cx,cy,rx,ry} for a diamond "
-        "(vertices on the axes). The drawn shape is the cut. Pixels outside "
-        "the line are context, not part of the template. save_template still "
-        "writes the tight cut, and a circle or a diamond is transparent "
-        "outside the shape there. It does not change the current screen. One "
-        "look per element on a screenshot, then save_template or a different "
-        "element. Do not call it again only to tighten the same box.")}]]
+        "Shows one region of a screenshot with the cut drawn on it, plus up to "
+        "16 pixels around it. Use it once per element, right before "
+        "save_template: the drawn shape is the cut, and pixels outside the "
+        "line are context, not part of the template. Do not use it to see a "
+        "screen (screenshot), or a second time to tighten the same box. The "
+        "shape follows the control: a box {x,y,w,h} for a rectangle, a circle "
+        "{cx,cy,r} for a round control, a diamond {cx,cy,rx,ry} for a diamond. "
+        "It does not change the current screen.")}]]
     [[= js::param_docs(
         js::str("The region to cut out: a box {x,y,w,h}, a circle {cx,cy,r}, or "
                 "a diamond {cx,cy,rx,ry}."),
@@ -989,8 +987,9 @@ CPP_REFLECT_TOOL(view_crop)
 
 [[= js::image_result]][[= js::doc{
     .text = js::str(
-        "The tight cut of a region, with nothing drawn on it. A circle or a "
-        "diamond is transparent outside the shape. Review uses this.")}]]
+        "The tight cut of a region; a circle or a diamond is transparent "
+        "outside its shape. Used by the region check. Do not use it for "
+        "context -- view_crop includes the surroundings.")}]]
     [[= js::param_docs(
         js::str("The region to cut out: a box {x,y,w,h}, a circle {cx,cy,r}, or "
                 "a diamond {cx,cy,rx,ry}."),
@@ -1017,10 +1016,10 @@ CPP_REFLECT_TOOL(tight_crop)
 
 [[= js::image_result]][[= js::doc{
     .text = js::str(
-        "Draws a region on a screenshot and returns the marked image. Nothing "
-        "is tapped and nothing needs approval; the region lives in the "
-        "picture. A box is {x,y,w,h}, a circle is {cx,cy,r} and a diamond is "
-        "{cx,cy,rx,ry}.")}]]
+        "Draws a region on a screenshot and returns the picture; nothing is "
+        "tapped or written, and nothing needs approval. Used by the region "
+        "check to show the surroundings. A box is {x,y,w,h}, a circle is "
+        "{cx,cy,r} and a diamond is {cx,cy,rx,ry}.")}]]
     [[= js::param_docs(
         js::str("Short label for what the region marks, e.g. \"the login button\"."),
         js::str("The region to mark: a box {x,y,w,h}, a circle {cx,cy,r}, or a "
@@ -1134,12 +1133,13 @@ std::string tap_region(const llm::region &_given) {
 }
 
 [[= js::doc{.text = js::str(
-                "Taps the element at this region, in screenshot pixels. A box "
-                "is {x,y,w,h}, a circle is {cx,cy,r} and a diamond is "
-                "{cx,cy,rx,ry}; the tap lands at its centre. While human "
-                "approval is on, the region is shown to the user and nothing "
-                "is tapped unless they approve it. Nothing else needs a prior "
-                "call.")}]]
+                "Taps the centre of a region, in screenshot pixels. Use it to "
+                "press the element the region names. Do not use it before "
+                "screenshotting the screen you are about to act on. A box is "
+                "{x,y,w,h}, a circle is {cx,cy,r} and a diamond is "
+                "{cx,cy,rx,ry}; the region is the control, not the room around "
+                "it. While human approval is on, the region is shown and "
+                "nothing is tapped unless they approve it.")}]]
     [[= js::param_docs(js::str(
         "The region to tap: a box {x,y,w,h}, a circle {cx,cy,r}, or a diamond "
         "{cx,cy,rx,ry}."))]] std::string
@@ -1151,14 +1151,11 @@ CPP_REFLECT_TOOL(tap)
 [[= js::doc{
     .text = js::str(
         "Boots the Android emulator (MuMu) this shell is configured for and "
-        "waits until the instance is up. Call it when the device is not "
-        "reachable and the user asks for something on the device. It blocks "
-        "for as long as the boot takes, up to about four minutes, and returns "
-        "either that the emulator is up or why it did not come up. A device "
-        "call batched with it runs before the boot finishes and fails, so give "
-        "it a round of its own. An emulator "
-        "that is already up is reported as such and nothing is started "
-        "again.")}]] std::string start_emulator() {
+        "waits until it is up, up to about four minutes. Use it when a device "
+        "call fails because the device is not reachable. Do not use it in the "
+        "same round as another device call -- that call runs before the boot "
+        "finishes and fails; give it a round of its own. Do not use it when "
+        "the emulator is already up: it says so and starts nothing.")}]] std::string start_emulator() {
     if (!g_ctx.start_emulator) {
         throw js::bind_error("no emulator control in this session");
     }
@@ -1197,12 +1194,11 @@ CPP_REFLECT_TOOL(start_emulator)
 
 [[= js::doc{
     .text = js::str(
-        "Returns to the Android launcher and force-stops every recent app, "
-        "so the device is on the home screen with nothing else running. Call "
-        "it before a flow that has to start from that screen: each run then "
-        "begins in the same place. It blocks until the apps are stopped. "
-        "While human approval is on, this is shown to the user and nothing "
-        "runs unless they approve it.")}]]
+        "Returns to the launcher and force-stops every recent app, blocking "
+        "until they are stopped. Use it at the start of a flow that has to "
+        "begin from a known screen. Do not use it mid-flow to back out of a "
+        "screen -- it closes the app you were working in. While human approval "
+        "is on, nothing runs unless the user approves it.")}]]
     std::string go_home() {
     if (needs_approval("go_home")) {
         if (!g_ctx.request_approval) {
@@ -1234,14 +1230,13 @@ CPP_REFLECT_TOOL(go_home)
 
 [[= js::quiet{.text = js::str("Ran script")}]][[= js::doc{
     .text = js::str(
-        "Runs a .ccat script on the device and returns what happened. "
-        "While human approval is on, the script is shown to the user "
-        "and nothing runs unless they approve it. Call ccat_help "
-        "for the language. The sandbox starts empty, so a statement that "
-        "needs a template PNG fails until save_template puts one in the "
-        "bundle (an `if` on a missing PNG is just false); tap_at and "
-        "swipe_at need no template, and run(\"<name>/main.ccat\") runs a "
-        "saved bundle.")}]]
+        "Runs a .ccat script on the device and returns what happened; with "
+        "human approval on, nothing runs without it. Use it to verify a script "
+        "you wrote and to check that a step landed. Do not run the same script "
+        "again unchanged as a fix. A template PNG save_template has not put in "
+        "the bundle makes a statement fail (an `if` on it is just false); "
+        "tap_at and swipe_at need no template, and run(\"<name>/main.ccat\") "
+        "runs a saved bundle. ccat_help has the language.")}]]
     [[= js::param_docs(
         js::str("The full .ccat script source to run."))]] std::string
         run_script(std::string source) {
@@ -1320,14 +1315,11 @@ std::string graph_check(const std::string &_graph) {
 
 [[= js::quiet{.text = js::str("Saved script {name}")}]][[= js::doc{
     .text = js::str(
-        "Saves a .ccat script as a reusable bundle under the LLM script root: "
-        "writes "
-        "main.ccat next to the template PNGs that script uses. While human "
-        "approval is "
-        "on, the name and source are shown to the user and nothing is written "
-        "unless "
-        "they approve it. It does not run anything; run it from a script with "
-        "run(\"<name>/main.ccat\").")}]]
+        "Saves .ccat source as a new bundle: main.ccat next to the template "
+        "PNGs it names; with human approval on, nothing is written without "
+        "it, and it runs nothing. Use it for a new skill, or a new edge of a "
+        "graph. Do not use it to change an existing bundle -- update_script "
+        "does that, and a name already taken is refused.")}]]
     [[= js::param_docs(
         js::str("Bundle name: a leaf name describing what the script does, "
                 "e.g. \"claim_reward\"."),
@@ -1470,18 +1462,17 @@ std::string save_template_region(std::string bundle, std::string name,
 
 [[= js::doc{
     .text = js::str(
-        "Cuts one template PNG, out of one of the screenshots you have taken, "
-        "into an existing script bundle, so that bundle's script can use it "
-        "with tap(\"name.png\"). Pick the shape that matches the control: a box "
-        "{x,y,w,h} for a rectangle, a circle {cx,cy,r} for a round control, a "
-        "diamond {cx,cy,rx,ry} for a diamond (vertices on the axes). A box "
-        "around a round or diamond control keeps background the match must "
-        "ignore. A circle or a diamond is written with that shape's alpha and "
-        "matching then ignores every pixel "
-        "outside it. While human approval "
-        "is on, the region is shown to the user and nothing is cut unless they "
-        "approve it. It cuts from the picture you looked at, so screenshot "
-        "right before you cut, and crop tight around the part that stays put.")}]]
+        "Cuts one template PNG from a screenshot into a bundle that already "
+        "exists, so its script can name it with tap(\"name.png\"); with human "
+        "approval on, nothing is cut without it. Use it once for every PNG a "
+        "script names, screenshotting right before the cut, tight around the "
+        "part that stays put. Do not cut again only to tighten the same box, "
+        "and do not cut from a frame older than the screen. The shape follows "
+        "the control: a box {x,y,w,h} for a rectangle, a circle {cx,cy,r} for "
+        "a round control, a diamond {cx,cy,rx,ry} for a diamond (vertices on "
+        "the axes). A box around a round or diamond control keeps background "
+        "the match must ignore, while those shapes write that shape's "
+        "alpha.")}]]
     [[= js::param_docs(
         js::str("Bundle to put the template in; it must already exist (see "
                 "save_script)."),
@@ -1500,8 +1491,9 @@ CPP_REFLECT_TOOL(save_template)
 
 [[= js::quiet{.text = js::str("Read CCAT.md")}]][[= js::doc{
     .text = js::str(
-        "Returns the full reference for the .ccat scripting language. "
-        "Call it before writing a script with run_script.")}]] std::string
+        "Returns the .ccat language reference. Use it before writing a script "
+        "with run_script. Do not use it for a bundle's own source -- "
+        "read_script.")}]] std::string
     ccat_help() {
     if (g_ctx.cfg == nullptr) {
         throw js::bind_error("no shell config; cannot locate CCAT.md");
@@ -1525,12 +1517,11 @@ CPP_REFLECT_TOOL(ccat_help)
 
 [[= js::quiet{.text = js::str("List scripts")}]][[= js::doc{
     .text = js::str(
-        "Lists the saved .ccat skill bundles, one \"name -- description\" "
-        "line each. Call this before writing a new skill: if a bundle "
-        "already does the job, use it with run(\"<name>/main.ccat\") "
-        "instead of writing it again, and call read_script to see how it "
-        "works or update_script to change it. The description is the "
-        "first // comment line of that bundle's main.ccat.")}]] std::string
+        "Lists the saved .ccat bundles, one \"name -- description\" line each, "
+        "the description being the first // line of main.ccat. Use it before "
+        "writing a new skill: a bundle that already does the job is run with "
+        "run(\"<name>/main.ccat\") rather than rewritten. Do not use it to "
+        "read a bundle's code -- read_script.")}]] std::string
     list_scripts() {
     const std::vector<std::string> names =
         ccat_lang::bundle_names(g_ctx.script_dir);
@@ -1577,10 +1568,10 @@ CPP_REFLECT_TOOL(list_scripts)
 
 [[= js::quiet{.text = js::str("Read script {name}")}]][[= js::doc{
     .text = js::str(
-        "Returns a saved bundle's main.ccat exactly as written, prefixed by a "
-        "header naming the bundle and listing its template PNGs. The "
-        "source is what you pass back as update_script's source, so edit "
-        "it from what this returns rather than from memory.")}]][
+        "Returns a bundle's main.ccat exactly as written, prefixed by a header "
+        "naming the bundle and its template PNGs. Use it to read a bundle, and "
+        "to edit it with update_script from what this returns. Do not use it "
+        "to see a template -- view_template.")}]][
     [= js::param_docs(
         js::str("Bundle name, as list_scripts showed it."))]] std::string
     read_script(std::string name) {
@@ -1829,17 +1820,11 @@ void require_anchor_script(const ccat_lang::Program &_prog) {
 
 [[= js::quiet{.text = js::str("Updated script {name}")}]][[= js::doc{
     .text = js::str(
-        "Replaces an existing bundle's main.ccat and its whole template set in "
-        "one step, under one approval. Declare every template the updated "
-        "script should have afterwards: an entry with a cut is re-cut from "
-        "that "
-        "screenshot, an entry with just a name keeps the PNG already there, "
-        "and "
-        "PNGs you do not declare are deleted. Prefer this "
-        "over saving a new "
-        "name when changing a skill you already have; save_script is for a new "
-        "one, and save_template for adjusting a single template while you work "
-        "out its box.")}]]
+        "Replaces a bundle's main.ccat and its whole template set in one step, "
+        "under one approval: a declared cut is re-cut, a declared name alone "
+        "keeps the PNG, and PNGs you do not declare are deleted. Use it to "
+        "change a skill that already exists. Do not use it to create one -- "
+        "save_script, or to try out a single cut -- save_template.")}]]
     [[= js::param_docs(
         js::str("Bundle to update; it must already exist (see list_scripts)."),
         js::str("The new main.ccat source, replacing the old one."),
@@ -1915,17 +1900,15 @@ CPP_REFLECT_TOOL(update_script)
 
 [[= js::quiet{.text = js::str("Save anchor {graph}.{anchor}")}]][[= js::doc{
     .text = js::str(
-        "Saves one screen of a game's graph as anchor bundle <graph>.<anchor>: "
+        "Saves one screen of a graph as anchor bundle <graph>.<anchor>: "
         "golden.md (what the screen is), main.ccat (whether it is showing) and "
-        "the templates that script names, under one approval. The script may "
-        "only judge -- has, if/elif/else, log, return true/false -- because "
-        "every anchor runs on every locate. A new anchor is first checked "
-        "against the latest screenshot: when an existing anchor already "
-        "recognises it, nothing is saved and you are told which one, so reuse "
-        "it. Saving an existing anchor replaces all three, like "
-        "update_script. The first anchor of a graph must be \"entry\", the "
-        "screen every navigation can start from. Join two anchors with an "
-        "edge by save_script(\"<graph>.<from>-<to>\", ...).")}]]
+        "its templates, under one approval. Use it to add a screen; a graph's "
+        "first anchor must be \"entry\". Do not save a second anchor for a "
+        "screen the graph has: a new anchor runs the existing ones and is "
+        "refused, naming the one that recognises it. Do not put actions in it "
+        "-- an anchor only judges, because every anchor runs on every locate. "
+        "Saving an existing anchor replaces all three, like update_script. "
+        "Join two anchors with save_script(\"<graph>.<from>-<to>\", ...).")}]]
     [[= js::param_docs(
         js::str("Graph name, [a-z0-9_]+, e.g. the game: \"shuaitu\"."),
         js::str("Anchor name, [a-z0-9_]+: the screen, e.g. \"main_city\"."),
@@ -2016,11 +1999,11 @@ CPP_REFLECT_TOOL(save_anchor)
 
 [[= js::quiet{.text = js::str("Read graph {name}")}]][[= js::doc{
     .text = js::str(
-        "Returns a screen graph as its bundles describe it: every anchor "
-        "(bundle <graph>.<anchor> with a golden.md) with its kind and the first "
-        "line of its description, every edge (bundle <graph>.<a>-<b>), and "
-        "every problem that would stop goto from using it. Read an anchor's or "
-        "an edge's script with read_script.")}]]
+        "Returns a graph as its bundles describe it: every anchor with its kind "
+        "and the first line of its description, every edge, and every problem "
+        "that would stop goto from using it. Use it before a goto, and before "
+        "adding a screen or an edge. Do not use it to read a script -- "
+        "read_script does that.")}]]
     [[= js::param_docs(
         js::str("Graph name, the part before the dot (list_scripts marks its "
                 "<graph>.entry bundle [graph ...])."))]] std::string
@@ -2037,15 +2020,12 @@ CPP_REFLECT_TOOL(save_anchor)
 }
 CPP_REFLECT_TOOL(read_graph)
 
-[[= js::doc{.text = js::str("Deletes a saved script bundle: its main.ccat and "
-                            "every template in the "
-                            "folder. It cannot be undone. It is refused while "
-                            "another script reaches it "
-                            "with run(...) -- update or delete that script "
-                            "first (list_scripts shows what "
-                            "exists). While human approval is on, the deletion "
-                            "is shown to the user and "
-                            "nothing is removed unless they approve it.")}]]
+[[= js::doc{.text = js::str("Deletes a bundle: its main.ccat and every "
+                            "template, which cannot be undone; with human "
+                            "approval on, nothing is removed without it. Use "
+                            "it for a bundle nothing reaches any more. Do not "
+                            "use it while another script runs it with run(...) "
+                            "-- update or delete that script first.")}]]
     [[= js::param_docs(
         js::str("Bundle to delete, as list_scripts showed it."))]] std::string
         delete_script(std::string name) {
@@ -2089,19 +2069,12 @@ CPP_REFLECT_TOOL(delete_script)
 
 [[= js::doc{
     .text = js::str(
-        "Renames a saved script bundle and rewrites every script that runs it, "
-        "so "
-        "nothing is left pointing at the old name -- do not edit those scripts "
-        "yourself afterwards, it is already done here. Refused when a script "
-        "reaches "
-        "it through a `defs` name instead of a literal path (there is no text "
-        "to "
-        "rewrite; update that script first), and when the new name is taken or "
-        "is "
-        "not a plain file name. While human approval is on, the rename and the "
-        "scripts it will update are shown to the user and nothing happens "
-        "unless "
-        "they approve it.")}]]
+        "Renames a bundle and rewrites every script that runs it by literal "
+        "path, under one approval -- do not edit those scripts yourself "
+        "afterwards. Use it to rename an existing bundle. Do not use it when a "
+        "script reaches the bundle through a `defs` name: there is no text to "
+        "rewrite, so update that script first. Refused when the new name is "
+        "taken or is not a plain file name.")}]]
     [[= js::param_docs(
         js::str("Bundle to rename, as list_scripts showed it."),
         js::str("The new name: a plain file name, not a path."))]] std::string

@@ -107,6 +107,9 @@ void llm_host::handle_line(const std::string &_line) {
     case llm_protocol::message::kind::log:
         automation_log::emit("[llm] " + msg.log_message);
         break;
+    case llm_protocol::message::kind::note:
+        record_note(msg.text);
+        break;
     case llm_protocol::message::kind::result: {
         std::lock_guard<std::mutex> lk(m_mu);
         if (msg.id == m_pending_id) {

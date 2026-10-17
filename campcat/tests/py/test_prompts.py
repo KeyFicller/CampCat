@@ -1,7 +1,9 @@
 """The two prompts. The operator never sees the script language; the scripter does."""
 
 import agent.operator as operator
+import agent.region_review as region_review
 import agent.scripter as scripter
+from agent.region_rules import REGION_RULES
 
 
 def test_operator_prompt_drops_the_script_language():
@@ -86,3 +88,14 @@ def test_ordinary_prompt_still_offers_the_whole_device():
     text = operator.operator_prompt()
     assert text.startswith(operator.OPERATOR_PERSONA)
     assert operator.SOLO_PERSONA not in text
+
+
+def test_every_prompt_that_proposes_a_region_shares_the_rules():
+    # The rules come from the redrawn samples. A copy left behind in one
+    # prompt is how the proposer and the check start disagreeing about what a
+    # good region is.
+    assert REGION_RULES in operator.operator_prompt()
+    assert REGION_RULES in operator.operator_prompt(True)
+    assert REGION_RULES in scripter.scripter_prompt()
+    assert "much wider than it is tall" in region_review.REVIEW_CRITERIA[
+        "template"]

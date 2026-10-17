@@ -177,13 +177,17 @@ def _host_result(name: str, args: dict) -> tuple[object, list]:
     args, note, rejected = region_review.review(name, args)
     if rejected:
         return "error: self-check rejected this region: " + rejected, []
+    # Said before the call because the approval gate, which comes first, is
+    # where the score helps: the host's own note on this call cannot carry it.
+    if note:
+        tools.note(note)
     reply = tools.call_cpp(name, args)
     if reply.get("ok"):
         content: object = reply.get("text") or "ok"
     else:
         content = "error: " + str(reply.get("error", ""))
     if note and isinstance(content, str):
-        content += note
+        content += " (" + note + ")"
     image = reply.get("image_b64") or ""
     if isinstance(content, str):
         region_review.remember_human_region(content)

@@ -31,6 +31,11 @@ def build_log(level: str, message: str) -> dict:
     return {"type": "log", "level": level, "message": message}
 
 
+def build_note(text: str) -> dict:
+    """A line for the conversation, shown as a step before the tool runs."""
+    return {"type": "note", "text": text}
+
+
 def build_chunk(rid: object, text: str = "", thinking: bool = False) -> dict:
     """One streaming delta, or a reasoning heartbeat when `thinking`."""
     msg = {"type": "chunk", "id": rid}

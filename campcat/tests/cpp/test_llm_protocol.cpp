@@ -216,6 +216,15 @@ TEST(LlmFuse, AlarmFiresOnAViewCropStreakOrHalfTheCap) {
         std::string::npos);
 }
 
+TEST(LlmProtocol, ANoteCarriesItsLine) {
+    // The sidecar's self-check score rides here: a tool result only exists
+    // after the approval gate is answered, so the score has to arrive first.
+    campcat::llm_protocol::message msg;
+    ASSERT_TRUE(parse_line(R"({"type":"note","text":"self-check 0.42"})", &msg));
+    EXPECT_EQ(msg.type, campcat::llm_protocol::message::kind::note);
+    EXPECT_EQ(msg.text, "self-check 0.42");
+}
+
 TEST(LlmProtocol, MissingUsageFieldsDoNotZero) {
     campcat::llm_protocol::message msg;
     ASSERT_TRUE(

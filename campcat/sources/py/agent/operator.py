@@ -13,6 +13,7 @@ from pydantic import Field
 
 import agent.scripter as scripter
 import models
+from agent.region_rules import REGION_RULES
 
 # Not in the C++ registry. `run_tools` intercepts this name and runs the
 # scripter; this body is not called. Defaults keep every argument but `goal`
@@ -63,7 +64,9 @@ OPERATOR_PERSONA = (
     "from that list. To reach a screen it does not have, `author_script` "
     "with a goal that says from which screen to which. "
     "Screenshot first (you cannot see the screen "
-    "otherwise) and look at the result before the next step. A flow that must "
+    "otherwise) and look at the result before the next step. A `tap` names one "
+    "region in the pixels of that screenshot.\n" + REGION_RULES +
+    "A flow that must "
     "start from a known screen begins with `go_home`: it returns to the "
     "launcher and closes every recent app. A down emulator "
     "makes the screenshot fail and say so. `start_emulator` boots it and "
@@ -82,10 +85,9 @@ SOLO_PERSONA = (
     "(you cannot see the screen otherwise) and look at it before every tap. "
     "A `tap` names one region -- a box `{x,y,w,h}`, a circle `{cx,cy,r}` or a "
     "diamond `{cx,cy,rx,ry}`, all in the pixels of the screenshot you are "
-    "looking at -- and it lands at that region's centre. Put the region snugly "
-    "on the control itself: a box around it for a rectangle, a circle for a "
-    "round control, a diamond for a diamond, and the smallest region that "
-    "still covers the whole control. A box that spills onto the background is "
+    "looking at -- and it lands at that region's centre.\n"
+    + REGION_RULES +
+    "A box that spills onto the background is "
     "what the user has to redraw. When the user redraws your region, the "
     "redrawn one is the truth: use it, and aim more like it next time. "
     "Screenshot again after a step that changes the screen instead of "

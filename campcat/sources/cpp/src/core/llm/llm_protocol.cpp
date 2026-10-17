@@ -177,6 +177,11 @@ bool parse_line(std::string_view _line, message *_out) {
         _out->log_message = j.value("message", std::string());
         return true;
     }
+    if (type == "note") {
+        _out->type = message::kind::note;
+        _out->text = j.value("text", std::string());
+        return true;
+    }
     if (type == "result") {
         _out->type = message::kind::result;
         _out->id = j.value("id", 0L);
