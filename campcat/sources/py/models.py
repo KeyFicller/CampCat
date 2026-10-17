@@ -16,10 +16,15 @@ from langchain_core.callbacks import BaseCallbackHandler
 import session
 
 
-DEFAULT_MAX_TOKENS = 1024
+# Room for the answer plus the reasoning that precedes it: DeepSeek bills its
+# chain of thought against `max_tokens`, so a tight cap spends the whole budget
+# thinking and returns no content at all. Qwen's plan endpoint caps only the
+# visible answer, so this is slack there and a floor here.
+DEFAULT_MAX_TOKENS = 8192 * 16
 # The memory rewrite is a longer output than a reply: it replaces up to
-# `memorier.DEFAULT_MEMORY_MAX_CHARS` characters in one go.
-DEFAULT_MEMORY_MAX_TOKENS = 4096
+# `memorier.DEFAULT_MEMORY_MAX_CHARS` characters in one go, and it thinks
+# first like every other call.
+DEFAULT_MEMORY_MAX_TOKENS = 8192 * 16
 # Every knob, including which variable holds the key and which holds the base
 # URL. Both are passed to the client explicitly, so neither name has to be one an
 # integration already knows: `QWEN_API_KEY` is ours, not ChatOpenAI's. A blank
@@ -27,13 +32,15 @@ DEFAULT_MEMORY_MAX_TOKENS = 4096
 #
 # `extra_body` is the provider's own thinking switch: Qwen3.7 and DeepSeek V4
 # both think by default, and sending one's shape to the other is not a no-op.
+# Both are asked to think: the regions and scripts here are decided from a
+# screenshot, where a fast guess is the common failure.
 PROVIDERS = {
     "deepseek": {
         "key_env": "DEEPSEEK_API_KEY",
         "base_url_env": "DEEPSEEK_BASE_URL",
         "base_url": "https://api.deepseek.com",
         "model": "deepseek:deepseek-flash",
-        "extra_body": {"thinking": {"type": "disabled"}},
+        "extra_body": {"thinking": {"type": "enabled"}},
     },
     "qwen": {
         # The `openai:` prefix is what tells init_chat_model which client to
@@ -43,8 +50,8 @@ PROVIDERS = {
         "key_env": "QWEN_API_KEY",
         "base_url_env": "QWEN_BASE_URL",
         "base_url": "https://token-plan.maas.qianwenaiapi.com/compatible-mode/v1",
-        "model": "openai:qwen3.8-flash",
-        "extra_body": {"enable_thinking": False},
+        "model": "openai:qwen3.8-max",
+        "extra_body": {"enable_thinking": True},
     },
 }
 DEFAULT_PROVIDER = "deepseek"

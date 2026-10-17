@@ -14,7 +14,7 @@
       "tap": true,
       "update_script": false
     },
-    "require": true
+    "require": false
   },
   "box_snap": {
     "strategy": "none"
@@ -43,7 +43,7 @@
   },
   "region_score": {
     "data_dir": "training_data",
-    "record": true
+    "record": false
   },
   "scheduler": {
     "interval_seconds": 300,

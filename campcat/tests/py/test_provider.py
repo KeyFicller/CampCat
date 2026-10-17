@@ -57,7 +57,7 @@ def test_deepseek_is_the_default_and_keeps_its_wire_format(monkeypatch):
     assert seen["name"] == "deepseek:deepseek-flash"
     assert seen["base_url"] == "https://api.deepseek.com"
     assert seen["api_key"] == "sk-deepseek"
-    assert seen["extra_body"] == {"thinking": {"type": "disabled"}}
+    assert seen["extra_body"] == {"thinking": {"type": "enabled"}}
 
 
 def test_the_request_picks_qwen_and_its_thinking_parameter(monkeypatch):
@@ -68,14 +68,14 @@ def test_the_request_picks_qwen_and_its_thinking_parameter(monkeypatch):
 
     models.build_chat_model()
 
-    assert seen["name"] == "openai:qwen3.8-flash"
+    assert seen["name"] == "openai:qwen3.8-max"
     assert seen["base_url"] == models.PROVIDERS["qwen"]["base_url"]
     # Its own name, not OPENAI_API_KEY: the key is passed in, so the integration
     # never looks one up.
     assert seen["api_key"] == "sk-qwen"
     # Not DeepSeek's shape: Qwen3.7 thinks by default too, and its own switch is
     # the only one it understands.
-    assert seen["extra_body"] == {"enable_thinking": False}
+    assert seen["extra_body"] == {"enable_thinking": True}
 
 
 def test_a_base_url_env_var_overrides_the_default(monkeypatch):
@@ -110,7 +110,7 @@ def test_the_request_wins_over_the_environment(monkeypatch):
 
     models.build_chat_model()
 
-    assert seen["name"] == "openai:qwen3.8-flash"
+    assert seen["name"] == "openai:qwen3.8-max"
 
 
 def test_an_empty_request_falls_back_to_the_environment(monkeypatch):
@@ -122,7 +122,7 @@ def test_an_empty_request_falls_back_to_the_environment(monkeypatch):
 
     models.build_chat_model()
 
-    assert seen["name"] == "openai:qwen3.8-flash"
+    assert seen["name"] == "openai:qwen3.8-max"
 
 
 def test_an_unknown_provider_is_refused_rather_than_falling_back(monkeypatch):
@@ -138,12 +138,12 @@ def test_an_explicit_model_still_overrides_the_preset(monkeypatch):
     _clear(monkeypatch)
     models.set_provider("qwen")
     monkeypatch.setenv("QWEN_API_KEY", "sk-qwen")
-    monkeypatch.setenv("CAMPCAT_LLM_MODEL", "openai:qwen3.8-max")
+    monkeypatch.setenv("CAMPCAT_LLM_MODEL", "openai:qwen3.7-max")
     seen = _capture(monkeypatch)
 
     models.build_chat_model()
 
-    assert seen["name"] == "openai:qwen3.8-max"
+    assert seen["name"] == "openai:qwen3.7-max"
 
 
 def test_key_and_base_url_reach_the_real_client(monkeypatch):

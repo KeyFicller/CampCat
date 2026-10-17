@@ -42,6 +42,20 @@ EXPECT_DOC = (
     "call runs."
 )
 
+_PRESSURE = (
+    "Assume the region is wrong until you have looked for the fault and not "
+    "found it. You did not draw this: a first proposal carries margin, and a "
+    "correction that already ran can overshoot the other way. Name the one "
+    "edge -- left, right, top, bottom, or the shape itself -- most likely to "
+    "be off, and answer ok only if you would ship this exact crop unchanged "
+    "to every later run. A crop you sign off on is reused long after this "
+    "check is gone, so a fault you saw and let pass is the expensive one. "
+    "Adjusting is cheap and is compared, not trusted: a worse try is dropped, "
+    "so there is no reason to accept a crop you would not use yourself. The "
+    "confidence number is not a vote either: a low one buys one more look and "
+    "counts against nothing, while a high one just ends the check."
+)
+
 REVIEW_PROMPT = (
     "You check one region another agent proposed, before it is used. You see "
     "the region cut out at its own size, and a second picture with the region "
@@ -55,7 +69,7 @@ REVIEW_PROMPT = (
     "reason: one sentence\n"
     "Use adjust for a small correction of the edges, in the frame's pixels. "
     "Use reject when the region is on the wrong element or the element is not "
-    "in this frame."
+    "in this frame.\n" + _PRESSURE
 )
 
 _ALTERNATIVE = (
@@ -78,21 +92,25 @@ PICK_PROMPT = (
 
 # Shared by the one-crop check and the pick, so the two cannot drift.
 _TEMPLATE_RULES = (
-    "Apply these rules in order and stop at the first that decides. Color, "
-    "readable text, and how much a crop looks like a button do not count.\n"
-    "1. Shape. A round control (圆) keeps only a circle {cx,cy,r}. A "
+    "Apply these rules in order and stop at the first that decides. Color and "
+    "how much a crop looks like a button do not count.\n"
+    "1. Text boundary. When the control is text -- a label, a menu row, a "
+    "button caption -- the glyphs are the control: the edges sit on the first "
+    "and the last stroke, and it is a box around exactly those pixels. Not the "
+    "button, pill or panel they sit on, and no 留白 for legibility either.\n"
+    "2. Shape. A round control (圆) keeps only a circle {cx,cy,r}. A "
     "diamond control (菱形) keeps only a diamond {cx,cy,rx,ry}. A "
     "rectangular control keeps only a box {x,y,w,h}. While a right shape "
     "remains, drop the wrong one. A box around a round control is the wrong "
     "shape. A diamond much wider than it is tall is a box, not a diamond.\n"
-    "2. Clipping. Drop a crop that cuts the control off while a complete one "
+    "3. Clipping. Drop a crop that cuts the control off while a complete one "
     "remains. A circle is judged by its rim, not the corners outside the disc. "
     "A diamond is judged by its four vertices, not the corners of its box.\n"
-    "3. Edges. A crop whose edge sits on the control beats one with background "
+    "4. Edges. A crop whose edge sits on the control beats one with background "
     "between the edge and the control (留白). While a flush crop remains, drop "
     "the ones with that gap.\n"
-    "4. If none sit on the edge, keep the one with the least 留白.\n"
-    "5. If more than one remain, keep the lowest number, the first proposal."
+    "5. If none sit on the edge, keep the one with the least 留白.\n"
+    "6. If more than one remain, keep the lowest number, the first proposal."
 )
 
 TEMPLATE_PICK_PROMPT = (
@@ -101,7 +119,7 @@ TEMPLATE_PICK_PROMPT = (
     "surroundings. The numbers only name the attempts: a later one is not "
     "better and not worse than the first.\n"
     + _TEMPLATE_RULES +
-    "\nJudge rule 2 (cutting the control off) on the surroundings picture, not "
+    "\nJudge rule 3 (cutting the control off) on the surroundings picture, not "
     "on the cut alone."
     "\nAnswer in exactly this form:\n"
     "pick: <the number>\n"
@@ -113,7 +131,8 @@ REVIEW_CRITERIA = {
     "template": (
         "The region becomes a template.\n" + _TEMPLATE_RULES + "\n"
         "On this one crop, answer ok only when its shape is right and its edge "
-        "already sits on the control. Otherwise adjust to that boundary, and "
+        "already sits on the control -- on the glyphs, when the control is text. "
+        "Otherwise adjust to that boundary, and "
         "switch circle, diamond and box when the shape is wrong. Reject only when the "
         "region is on the wrong element or the element is not in this frame."
     ),

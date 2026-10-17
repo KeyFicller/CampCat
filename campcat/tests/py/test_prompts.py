@@ -99,3 +99,22 @@ def test_every_prompt_that_proposes_a_region_shares_the_rules():
     assert REGION_RULES in scripter.scripter_prompt()
     assert "much wider than it is tall" in region_review.REVIEW_CRITERIA[
         "template"]
+
+
+def test_the_check_is_pushed_to_correct_before_accepting():
+    # A rubber stamp is the failure worth tuning against: the check is the only
+    # reader that sees the boundary before the matcher has to live with it.
+    system = region_review._review_system("template")
+    assert "Assume the region is wrong until" in system
+    assert "reused long after this check is gone" in system
+    assert "a low one buys one more look" in system
+    # It also reviews taps, where the same pressure applies.
+    assert "Assume the region is wrong until" in region_review._review_system("tap")
+
+
+def test_a_text_control_is_cropped_to_its_glyphs():
+    # The button behind a caption changes with state; the glyphs do not. Both
+    # the proposer and the check have to say so, or one pads and one trims.
+    assert "Text boundary first" in REGION_RULES
+    assert "Text boundary." in region_review.REVIEW_CRITERIA["template"]
+    assert "Text boundary." in region_review.TEMPLATE_PICK_PROMPT
