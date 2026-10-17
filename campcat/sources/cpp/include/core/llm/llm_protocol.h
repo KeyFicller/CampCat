@@ -113,10 +113,11 @@ std::string base64_encode(const unsigned char *_data, std::size_t _len);
  * @param[in] _scripter_memory The scripter's own notes. Sent even when empty.
  * @param[in] _provider Which model provider the sidecar should build, from the
  * host's settings. Sent even when empty, for the same reason as `_memory`.
- * @param[in] _operator_only Withhold the scripter handoff, so only the operator
- * drives. Set while the host records training samples: a handoff would cut
- * templates from a different agent than the one being taught. Omitting the
- * field (the default) leaves the handoff on, which is what older sidecars read.
+ * @param[in] _operator_only Only the operator drives, and only with the tools
+ * a training sample needs (`SOLO` on the sidecar). Set while the host records
+ * training samples, so one sample holds one agent's regions. Omitting the
+ * field (the default) leaves the ordinary toolset, which is what older
+ * sidecars read.
  */
 std::string build_turn_request(long _id, std::string_view _text,
                                std::string_view _tools_json,

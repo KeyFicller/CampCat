@@ -108,9 +108,9 @@ public:
      * Values below 1 use the default. A change mid-turn waits for the next one.
      * @param[in] _max_model_rounds How many model rounds this turn may take,
      * sent to the sidecar. Values below 1 use the default.
-     * @param[in] _operator_only Withhold the scripter handoff for this turn
-     * (see `build_turn_request`). The settings that decide it are read live by
-     * the caller, like the approval gate.
+     * @param[in] _operator_only Only the operator drives, and only with the
+     * tools a training sample needs (see `build_turn_request`). The settings
+     * that decide it are read live by the caller, like the approval gate.
      */
     llm_result run_turn(const std::filesystem::path &_config_home,
                         const std::string &_provider,

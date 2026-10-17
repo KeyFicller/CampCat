@@ -476,6 +476,11 @@ int main(int argc, char **argv) {
         st.push_job_snapshot(&cfg_view);
     }
 
+    // The settings popup edits the live config and nothing else, so this is
+    // where a change made there outlives the run. Before `stop_workers` and
+    // before the log sink goes: the save reports through the log.
+    st.save_config(st.snapshot_cfg());
+
     st.stop_workers();
 
     st.close_launched_mumu();

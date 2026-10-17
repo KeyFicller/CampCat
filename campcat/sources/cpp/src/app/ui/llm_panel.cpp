@@ -672,8 +672,8 @@ void run_prompt_loop(campcat::shell_state *_st, const campcat::app_config &_cfg,
         campcat::llm_result res = g_host.run_turn(
             _cfg.config_home, _cfg.llm.provider, _prompt,
             _cfg.llm.max_dispatches, _cfg.llm.max_model_rounds,
-            // Sampling is on: the human is correcting one agent's regions, so
-            // the handoff that would cut templates from another is withheld.
+            // Sampling is on: the human is correcting this agent's regions, so
+            // only it runs, and only with the two tools a sample needs.
             _cfg.region_score.record);
         post_turn(std::move(res));
         std::optional<std::string> next = take_queued();

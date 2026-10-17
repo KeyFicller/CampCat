@@ -72,6 +72,31 @@ OPERATOR_PERSONA = (
     "When the user only asks a question, answer it."
 )
 
+# Said instead of `OPERATOR_PERSONA` when the host records training samples: it
+# names the two tools that exist, and what a region is for, so a redraw is a
+# correction the model can learn from rather than a guess at a coordinate.
+SOLO_PERSONA = (
+    "You operate an Android device through four tools only: `screenshot`, "
+    "`tap`, `go_home` and `start_emulator`. You cannot run a saved script or "
+    "write one; do not offer or attempt any of that. Take a screenshot first "
+    "(you cannot see the screen otherwise) and look at it before every tap. "
+    "A `tap` names one region -- a box `{x,y,w,h}`, a circle `{cx,cy,r}` or a "
+    "diamond `{cx,cy,rx,ry}`, all in the pixels of the screenshot you are "
+    "looking at -- and it lands at that region's centre. Put the region snugly "
+    "on the control itself: a box around it for a rectangle, a circle for a "
+    "round control, a diamond for a diamond, and the smallest region that "
+    "still covers the whole control. A box that spills onto the background is "
+    "what the user has to redraw. When the user redraws your region, the "
+    "redrawn one is the truth: use it, and aim more like it next time. "
+    "Screenshot again after a step that changes the screen instead of "
+    "assuming what it did. A flow that must start from a known screen begins "
+    "with `go_home`: it returns to the launcher and closes every recent app. "
+    "A down emulator makes the screenshot fail and say so; `start_emulator` "
+    "boots it and blocks until the instance is up, so call it alone -- a "
+    "screenshot in the same round runs first, while the boot is still going, "
+    "and fails too. When the user only asks a question, answer it."
+)
+
 _RULES = {
     "autonomy": (
         "Act instead of asking. Take the next step rather than ending on a "
@@ -101,6 +126,11 @@ _RULES = {
 
 _RULE_NAMES = ("autonomy", "format")
 
+# The tools `solo` leaves: look at the screen, act on a region, boot a device
+# that is down, and get back to a known screen. Named here rather than derived,
+# because this list is what a training sample may contain.
+SOLO = frozenset({"screenshot", "tap", "start_emulator", "go_home"})
+
 
 def _rules(names: tuple[str, ...]) -> str:
     """One `## name` block per rule."""
@@ -115,28 +145,25 @@ def _name(tool: dict) -> str | None:
     return name if isinstance(name, str) else None
 
 
-def operator_tools(host_tools: list, allow_handoff: bool = True) -> list:
+def operator_tools(host_tools: list, solo: bool = False) -> list:
     """Host tools the operator may call, plus the handoff tool.
 
-    `allow_handoff` false withholds the handoff, so the operator is the only
-    agent this turn: what the host wants while it records training samples.
+    `solo` is what the host asks for while it records training samples: the
+    operator drives alone, and with only the tools a sample needs -- look at the
+    screen, then act on a region. Everything else is withheld, including the
+    handoff, so one agent's regions are all a sample can contain.
     """
     hidden = scripter.SCRIPTER_ONLY | scripter.HIDDEN
     kept = [tool for tool in host_tools if _name(tool) not in hidden]
-    if not allow_handoff:
-        return kept
+    if solo:
+        return [tool for tool in kept if _name(tool) in SOLO]
     return kept + [author_script]
 
 
-def operator_prompt(allow_handoff: bool = True) -> str:
+def operator_prompt(solo: bool = False) -> str:
     """Who the operator is. An env override replaces the whole thing, cheatsheet included."""
     override = models._env("CAMPCAT_LLM_SYSTEM_PROMPT")
     if override:
         return override
-    prompt = OPERATOR_PERSONA + "\n\n" + _rules(_RULE_NAMES)
-    if not allow_handoff:
-        # Said out loud: the persona above names the handoff, and a model that
-        # is offered no such tool will otherwise spend a round calling it.
-        prompt += ("\n\n## solo\n\n`author_script` is unavailable right now. "
-                   "Do the device work yourself with the tools you have.")
-    return prompt
+    persona = SOLO_PERSONA if solo else OPERATOR_PERSONA
+    return persona + "\n\n" + _rules(_RULE_NAMES)

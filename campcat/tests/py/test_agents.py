@@ -66,12 +66,15 @@ def test_unknown_tool_stays_with_the_operator():
     assert _names(scripter.scripter_tools(host)) == ["diagnose_template"]
 
 
-def test_operator_only_withholds_the_handoff():
+def test_operator_only_keeps_what_a_sample_needs():
     host = [_tool(name) for name in HOST_NAMES]
-    table = operator.operator_tools(host, allow_handoff=False)
+    table = operator.operator_tools(host, solo=True)
+    # Exactly what a training sample needs: look at the screen, act on a
+    # region, boot a device that is down, get back to a known screen. A handoff
+    # or a saved-script run would put a second agent in the sample.
+    assert _names(table) == [
+        "screenshot", "tap", "start_emulator", "go_home"]
     assert "author_script" not in _names(table)
-    # Everything else is unchanged: this withholds one tool, not the agent.
-    assert _names(table) == [n for n in OPERATOR_NAMES if n != "author_script"]
 
 
 def test_nameless_tool_stays_with_the_operator():

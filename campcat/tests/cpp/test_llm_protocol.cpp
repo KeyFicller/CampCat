@@ -130,8 +130,53 @@ TEST(AppConfig, ConfigHomeIsTheLibraryBesideTheConfigFile) {
               std::filesystem::temp_directory_path() / "ccat_library");
 }
 
-TEST(LlmFuse, UnlimitedRendersAsInfinity) {
-    EXPECT_EQ(campcat::llm::format_fuse(100000), "\xE2\x88\x9E");
+TEST(AppConfig, ThePopupSettingsSurviveASave) {
+    // What the settings popup changes -- provider, the approval gates, the
+    // snap -- used to live only in memory until the file was saved by hand.
+    // The exit save leans on this being a faithful round trip.
+    const std::filesystem::path path =
+        std::filesystem::temp_directory_path() / "campcat_popup_cfg.json";
+    {
+        std::ofstream out(path);
+        out << R"({"input":{"tap_delay_ms":200}})";
+    }
+    campcat::app_config cfg = campcat::app_config::load_from_file(path);
+    cfg.llm.provider = "qwen";
+    cfg.approval.require = false;
+    cfg.approval.gates.tap = false;
+    cfg.box_snap.strategy = campcat::box_snap_strategy::step;
+    cfg.region_score.record = true;
+    cfg.save_to_file(path);
+
+    const campcat::app_config again = campcat::app_config::load_from_file(path);
+    std::filesystem::remove(path);
+
+    EXPECT_EQ(again.llm.provider, "qwen");
+    EXPECT_FALSE(again.approval.require);
+    EXPECT_FALSE(again.approval.gates.tap);
+    EXPECT_TRUE(again.approval.gates.save_template); // untouched gates stay on
+    EXPECT_EQ(again.box_snap.strategy, campcat::box_snap_strategy::step);
+    EXPECT_TRUE(again.region_score.record);
+    EXPECT_EQ(again.input.tap_delay_ms, 200); // and the rest is not lost
+}
+
+TEST(AppConfig, ABareFilenameSaves) {
+    // `config.json` is passed as a bare relative name unless argv says
+    // otherwise, so its parent path is empty. A create_directories("") in the
+    // shell's save threw here and lost the whole write.
+    const std::filesystem::path bare = "campcat_bare_cfg_test.json";
+    campcat::app_config cfg = campcat::app_config::defaults();
+    cfg.llm.provider = "qwen";
+    cfg.region_score.record = true;
+    cfg.save_to_file(bare);
+    const campcat::app_config again = campcat::app_config::load_from_file(bare);
+    std::filesystem::remove(bare);
+
+    EXPECT_EQ(again.llm.provider, "qwen");
+    EXPECT_TRUE(again.region_score.record);
+}
+
+TEST(LlmFuse, UnlimitedRendersAsInfinity) {    EXPECT_EQ(campcat::llm::format_fuse(100000), "\xE2\x88\x9E");
 }
 
 TEST(LlmFuse, AFiniteCapRendersAsTheNumber) {

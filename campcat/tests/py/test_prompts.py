@@ -69,11 +69,20 @@ def test_prompt_override_covers_only_the_operator(monkeypatch):
     assert "OVERRIDE" not in scripter.scripter_prompt()
 
 
-def test_operator_prompt_says_the_handoff_is_gone_when_withheld():
-    # The persona names the handoff, so a withheld tool has to be stated or the
-    # model spends a round calling something that is not offered.
-    text = operator.operator_prompt(False)
-    assert "unavailable" in text
-    assert "## solo" in text
+def test_solo_prompt_is_its_own_persona():
+    # Appending a note to a persona that names eight tools leaves the model
+    # reading about tools it does not have; solo gets its own text instead.
+    text = operator.operator_prompt(True)
+    assert text.startswith(operator.SOLO_PERSONA)
+    assert operator.OPERATOR_PERSONA not in text
+    for gone in ("author_script", "run_script", "list_scripts", "read_graph"):
+        assert gone not in text
+    assert "`screenshot`, `tap`, `go_home` and `start_emulator`" in text
+    assert "call it alone" in text  # the boot blocks, so it is asked for solo
+    assert "## format" in text  # the shared rules still ride along
+
+
+def test_ordinary_prompt_still_offers_the_whole_device():
+    text = operator.operator_prompt()
     assert text.startswith(operator.OPERATOR_PERSONA)
-    assert "unavailable" not in operator.operator_prompt(True).split("## solo")[0]
+    assert operator.SOLO_PERSONA not in text

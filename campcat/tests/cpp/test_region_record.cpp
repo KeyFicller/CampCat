@@ -150,7 +150,9 @@ protected:
         campcat::llm::set_context(ctx);
     }
 
-    std::filesystem::path data() const { return m_root / "training_data"; }
+    std::filesystem::path data() const {
+        return m_root / "training_data" / m_cfg.llm.provider;
+    }
 
     std::filesystem::path m_root;
     campcat::app_config m_cfg;
@@ -315,6 +317,18 @@ TEST_F(Recorder, TapApprovalIsNotRecorded) {
     EXPECT_TRUE(reply.ok) << reply.error;
 
     EXPECT_TRUE(sample_dirs(data()).empty());
+}
+
+TEST_F(Recorder, SamplesGoUnderTheProvider) {
+    m_cfg.llm.provider = "deepseek";
+    install({false, "not quite", kRedrawn});
+    const auto reply = campcat::llm::dispatch(
+        "tap", R"({"region":{"x":20,"y":20,"w":30,"h":30}})");
+    EXPECT_FALSE(reply.ok);
+
+    EXPECT_EQ(sample_dirs(data()).size(), 1U);
+    EXPECT_TRUE(std::filesystem::exists(m_root / "training_data" / "deepseek"));
+    EXPECT_FALSE(std::filesystem::exists(m_root / "training_data" / "qwen"));
 }
 
 TEST_F(Recorder, TapCircleRedrawIsRecorded) {

@@ -138,7 +138,8 @@ bool persist_config_to_disk(const campcat::app_config &_shell_written,
                             const std::filesystem::path &_shell_path,
                             std::string *_error_out = nullptr) {
     try {
-        std::filesystem::create_directories(_shell_path.parent_path());
+        // `save_to_file` creates the parent directory itself. Calling it here
+        // too threw on the default bare `config.json`, whose parent is "".
         _shell_written.save_to_file(_shell_path);
         return true;
     } catch (const std::exception &ex) {

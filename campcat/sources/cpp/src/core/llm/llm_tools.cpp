@@ -609,6 +609,10 @@ void record_human_region(const cv::Mat &_frame, const llm::region &_given,
     if (root.is_relative()) {
         root = std::filesystem::path(g_ctx.cfg->config_home).parent_path() / root;
     }
+    // One folder per provider: a redraw made on qwen says nothing about what
+    // deepseek proposed, and a scorer trained on the mix learns two models'
+    // mistakes as if both were ground truth.
+    root /= g_ctx.cfg->llm.provider;
     region_sample sample;
     sample.frame = _frame;
     sample.given = _given;

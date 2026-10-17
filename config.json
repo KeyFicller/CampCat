@@ -5,37 +5,49 @@
   },
   "approval": {
     "gates": {
-      "delete_script": true,
-      "rename_script": true,
-      "run_script": true,
-      "save_script": true,
-      "save_template": true,
+      "delete_script": false,
+      "go_home": false,
+      "rename_script": false,
+      "run_script": false,
+      "save_script": false,
+      "save_template": false,
       "tap": true,
-      "update_script": true
+      "update_script": false
     },
     "require": true
   },
+  "box_snap": {
+    "strategy": "none"
+  },
+  "config_home": "/Users/keyficller/Documents/CampCat/ccat_library",
   "input": {
     "action_gap_ms": 1000,
     "swipe_duration_ms": 300,
     "tap_delay_ms": 150
   },
+  "llm": {
+    "max_dispatches": 10000,
+    "max_model_rounds": 1000,
+    "provider": "qwen"
+  },
   "match": {
+    "box_threshold": 0.7,
+    "circle_threshold": 0.96,
     "debug": false,
     "debug_dir": "match_debug",
-    "multiscale": false,
-    "box_threshold": 0.7
-  },
-  "region_score": {
-    "record": true,
-    "data_dir": "training_data"
+    "multiscale": false
   },
   "mumu": {
     "device_index": 0,
     "tool_path": "/Applications/MuMuPlayer.app/Contents/MacOS/mumutool"
   },
+  "region_score": {
+    "data_dir": "training_data",
+    "record": true
+  },
   "scheduler": {
     "interval_seconds": 300,
     "jitter_seconds": 7
-  }
+  },
+  "script_bundle": ""
 }

@@ -57,7 +57,7 @@ class TurnState(TypedDict, total=False):
     reply: str      # response: model output
     turns: int      # response: turns retained in the conversation
     max_model_rounds: int  # request: per-turn round cap; default MAX_MODEL_ROUNDS
-    operator_only: bool  # request: withhold the scripter handoff
+    operator_only: bool  # request: operator alone, screenshot and tap only
     error: str
     interrupted: bool  # the user sent a new message; commit, then stop
 
@@ -84,7 +84,7 @@ def build_messages(state: TurnState) -> dict:
     """The model input: prompt, conversation, the last screen, this turn's text."""
     messages: list[object] = [
         SystemMessage(
-            content=operator.operator_prompt(not state.get("operator_only"))
+            content=operator.operator_prompt(bool(state.get("operator_only")))
             + memorier.memory_block(state.get("memory") or "")
         )
     ]
@@ -150,7 +150,7 @@ def _invoke(state: TurnState, offered: list) -> dict:
 def invoke(state: TurnState) -> dict:
     """The operator's model turn: every host tool except the scripter's own."""
     return _invoke(state, operator.operator_tools(
-        state.get("tools") or [], not state.get("operator_only")))
+        state.get("tools") or [], bool(state.get("operator_only"))))
 
 
 def run_subgraph(compiled, state: dict, callbacks=None) -> dict:
@@ -259,13 +259,14 @@ def run_tools(state: TurnState) -> dict:
     def run_one(call: dict) -> tuple[object, list]:
         name = call.get("name", "")
         args = call.get("args") or {}
+        if state.get("operator_only") and name not in operator.SOLO:
+            # Not offered this turn, so this is the model calling from the
+            # prompt alone. Refused rather than run: one agent, one pair of
+            # tools, is the point of the flag -- and a stray call must not
+            # start the scripter or drive the device behind it.
+            return ("error: only " + ", ".join(sorted(operator.SOLO))
+                    + " are available right now; " + name + " is not", [])
         if name == operator.AUTHOR_SCRIPT_NAME:
-            if state.get("operator_only"):
-                # Not offered this turn, so this is the model calling from the
-                # prompt alone. Refused rather than run: one agent at a time is
-                # the point of the flag.
-                return ("error: author_script is unavailable right now; do the "
-                        "work yourself with the other tools", [])
             # The screen belongs to the device. A shot the scripter took is the
             # one a later tap in this turn is checked against, so the operator
             # has to see it before that tap. An interrupt inside the scripter

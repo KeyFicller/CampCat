@@ -106,9 +106,10 @@ def test_scripter_model_error_stays_in_the_tool_result(monkeypatch, scripted):
     assert session.scripter_history() == []
 
 
-def test_operator_only_refuses_the_handoff(monkeypatch, scripted):
-    # Not offered this turn, so this is the model calling from the prompt
-    # alone; the scripter must not start anyway.
+def test_operator_only_refuses_everything_but_screenshot_and_tap(monkeypatch, scripted):
+    # Not offered this turn, so these are the model calling from the prompt
+    # alone. Refused rather than run: neither may start the scripter or drive
+    # the device behind the sample.
     session.reset()
     calls = []
 
@@ -119,7 +120,9 @@ def test_operator_only_refuses_the_handoff(monkeypatch, scripted):
     monkeypatch.setattr(tools, "call_cpp", fake_call_cpp)
     model = scripted([
         AIMessage(content="", tool_calls=[
-            _call("author_script", {"goal": "签到"}, "a")]),
+            _call("author_script", {"goal": "签到"}, "a"),
+            _call("run_script", {}, "r"),
+        ]),
         AIMessage(content="Done."),
     ])
     monkeypatch.setattr(models, "build_chat_model", lambda **_: model)
@@ -130,8 +133,39 @@ def test_operator_only_refuses_the_handoff(monkeypatch, scripted):
 
     assert calls == []
     assert session.scripter_history() == []
-    assert _tool_messages()[0].content.startswith("error:")
-    assert "author_script is unavailable" in _tool_messages()[0].content
+    assert [m.content for m in _tool_messages()] == [
+        "error: only go_home, screenshot, start_emulator, tap are available "
+        "right now; author_script is not",
+        "error: only go_home, screenshot, start_emulator, tap are available "
+        "right now; run_script is not",
+    ]
+
+
+def test_operator_only_still_runs_what_it_keeps(monkeypatch, scripted):
+    session.reset()
+    calls = []
+
+    def fake_call_cpp(name, args):
+        calls.append(name)
+        return {"ok": True, "text": name + " ok"}
+
+    monkeypatch.setattr(tools, "call_cpp", fake_call_cpp)
+    model = scripted([
+        AIMessage(content="", tool_calls=[
+            _call("start_emulator", {}, "e"),
+            _call("go_home", {}, "h"),
+            _call("screenshot", {}, "s"),
+            _call("tap", {}, "t"),
+        ]),
+        AIMessage(content="Done."),
+    ])
+    monkeypatch.setattr(models, "build_chat_model", lambda **_: model)
+    out = {}
+    list(graph.stream_turn(
+        {"text": "look and tap", "tools": [], "memory": "", "operator_only": True},
+        out))
+
+    assert calls == ["start_emulator", "go_home", "screenshot", "tap"]
 
 
 def test_second_handoff_sees_the_first(monkeypatch, scripted):
