@@ -533,19 +533,6 @@ cv::Mat grey_frame() {
     return cv::Mat(kScreenH, kScreenW, CV_8UC3, cv::Scalar(128, 128, 128));
 }
 
-bool all_pixels(const cv::Mat &_img, const cv::Scalar &_color) {
-    for (int y = 0; y < _img.rows; ++y) {
-        for (int x = 0; x < _img.cols; ++x) {
-            const cv::Vec3b px = _img.at<cv::Vec3b>(y, x);
-            if (px[0] != _color[0] || px[1] != _color[1] ||
-                px[2] != _color[2]) {
-                return false;
-            }
-        }
-    }
-    return true;
-}
-
 /// Two screenshots, so frame 1 and frame 2 both exist and the current screen
 /// is frame 2. `forget_frames` first: numbering is process-global.
 class FrameTools : public ::testing::Test {
@@ -575,18 +562,28 @@ private:
     std::unique_ptr<SequencedAdb> m_adb;
 };
 
+/// `view_crop` pads 16px and strokes the cut, so the frame colour only survives
+/// past that stroke. (24, 24) is in the pad, still inside frame 1's white half.
+cv::Vec3b pad_pixel(const std::string &_png) {
+    const cv::Mat img = decode_png(_png);
+    if (img.size() != cv::Size(26, 26)) {
+        ADD_FAILURE() << "view is " << img.cols << "x" << img.rows
+                      << ", expected 26x26";
+        return {};
+    }
+    return img.at<cv::Vec3b>(24, 24);
+}
+
 TEST_F(FrameTools, CropReadsTheNamedFrame) {
     const auto named = call(
         "view_crop", R"({"region":{"x":0,"y":0,"w":10,"h":10},"shot":1})");
     ASSERT_TRUE(named.ok) << named.error;
-    EXPECT_TRUE(all_pixels(decode_png(named.image_png),
-                           cv::Scalar(255, 255, 255)));
+    EXPECT_EQ(pad_pixel(named.image_png), cv::Vec3b(255, 255, 255));
 
     const auto current =
         call("view_crop", R"({"region":{"x":0,"y":0,"w":10,"h":10}})");
     ASSERT_TRUE(current.ok) << current.error;
-    EXPECT_TRUE(
-        all_pixels(decode_png(current.image_png), cv::Scalar(128, 128, 128)));
+    EXPECT_EQ(pad_pixel(current.image_png), cv::Vec3b(128, 128, 128));
 }
 
 TEST_F(FrameTools, CropOfAnOldFrameKeepsTheCurrentScreen) {
@@ -595,13 +592,11 @@ TEST_F(FrameTools, CropOfAnOldFrameKeepsTheCurrentScreen) {
     ASSERT_TRUE(named.ok) << named.error;
     // The named crop has to be frame 1, or this only checks the current screen
     // twice and passes while `shot` is ignored.
-    EXPECT_TRUE(all_pixels(decode_png(named.image_png),
-                           cv::Scalar(255, 255, 255)));
+    EXPECT_EQ(pad_pixel(named.image_png), cv::Vec3b(255, 255, 255));
     const auto current =
         call("view_crop", R"({"region":{"x":0,"y":0,"w":10,"h":10}})");
     ASSERT_TRUE(current.ok) << current.error;
-    EXPECT_TRUE(
-        all_pixels(decode_png(current.image_png), cv::Scalar(128, 128, 128)));
+    EXPECT_EQ(pad_pixel(current.image_png), cv::Vec3b(128, 128, 128));
 }
 
 TEST_F(FrameTools, MarkDrawsOnTheNamedFrame) {
