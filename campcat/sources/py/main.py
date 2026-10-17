@@ -79,6 +79,9 @@ def handle_request(req: dict) -> Iterator[dict]:
                 # Long-term notes, read off disk by the host this turn.
                 "memory": req.get("memory") or "",
                 "max_model_rounds": graph.rounds_of(req.get("max_model_rounds")),
+                # Set by the host while it records training samples: the
+                # operator alone drives, no handoff to the scripter.
+                "operator_only": req.get("operator_only") is True,
             },
             out,
         ):

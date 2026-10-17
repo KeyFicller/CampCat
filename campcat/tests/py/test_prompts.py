@@ -67,3 +67,13 @@ def test_prompt_override_covers_only_the_operator(monkeypatch):
     assert operator.operator_prompt() == "OVERRIDE"
     assert scripter.scripter_prompt() == untouched
     assert "OVERRIDE" not in scripter.scripter_prompt()
+
+
+def test_operator_prompt_says_the_handoff_is_gone_when_withheld():
+    # The persona names the handoff, so a withheld tool has to be stated or the
+    # model spends a round calling something that is not offered.
+    text = operator.operator_prompt(False)
+    assert "unavailable" in text
+    assert "## solo" in text
+    assert text.startswith(operator.OPERATOR_PERSONA)
+    assert "unavailable" not in operator.operator_prompt(True).split("## solo")[0]

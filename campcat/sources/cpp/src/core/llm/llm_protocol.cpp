@@ -54,7 +54,7 @@ std::string build_turn_request(long _id, std::string_view _text,
                                std::string_view _memory,
                                std::string_view _scripter_memory,
                                std::string_view _provider,
-                               int _max_model_rounds) {
+                               int _max_model_rounds, bool _operator_only) {
     nlohmann::json j;
     j["type"] = "turn";
     j["id"] = _id;
@@ -68,6 +68,11 @@ std::string build_turn_request(long _id, std::string_view _text,
     j["scripter_memory"] = std::string(_scripter_memory);
     j["provider"] = std::string(_provider);
     j["max_model_rounds"] = _max_model_rounds;
+    // Absent rather than false: a sidecar that predates the field reads a
+    // missing key as "the handoff is on", which is what it already did.
+    if (_operator_only) {
+        j["operator_only"] = true;
+    }
     return j.dump();
 }
 

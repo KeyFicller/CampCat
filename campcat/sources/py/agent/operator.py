@@ -115,16 +115,28 @@ def _name(tool: dict) -> str | None:
     return name if isinstance(name, str) else None
 
 
-def operator_tools(host_tools: list) -> list:
-    """Host tools the operator may call, plus the handoff tool."""
+def operator_tools(host_tools: list, allow_handoff: bool = True) -> list:
+    """Host tools the operator may call, plus the handoff tool.
+
+    `allow_handoff` false withholds the handoff, so the operator is the only
+    agent this turn: what the host wants while it records training samples.
+    """
     hidden = scripter.SCRIPTER_ONLY | scripter.HIDDEN
     kept = [tool for tool in host_tools if _name(tool) not in hidden]
+    if not allow_handoff:
+        return kept
     return kept + [author_script]
 
 
-def operator_prompt() -> str:
+def operator_prompt(allow_handoff: bool = True) -> str:
     """Who the operator is. An env override replaces the whole thing, cheatsheet included."""
     override = models._env("CAMPCAT_LLM_SYSTEM_PROMPT")
     if override:
         return override
-    return OPERATOR_PERSONA + "\n\n" + _rules(_RULE_NAMES)
+    prompt = OPERATOR_PERSONA + "\n\n" + _rules(_RULE_NAMES)
+    if not allow_handoff:
+        # Said out loud: the persona above names the handoff, and a model that
+        # is offered no such tool will otherwise spend a round calling it.
+        prompt += ("\n\n## solo\n\n`author_script` is unavailable right now. "
+                   "Do the device work yourself with the tools you have.")
+    return prompt

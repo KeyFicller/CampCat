@@ -83,7 +83,8 @@ constexpr int k_shutdown_memorize_timeout_ms = 5000;
  *
  * The C++ side knows nothing about the model, endpoint or prompts: it hands
  * over the user's instruction and reads back text. Those settings live in
- * `campcat/sources/py/` (see `campcat/sources/py/models.py`), where the child process reads them itself.
+ * `campcat/sources/py/` (see `campcat/sources/py/models.py`), where the child
+ * process reads them itself.
  *
  * The child is started lazily on the first `run_turn` and reused afterwards.
  * `run_turn` never throws; every failure is reported through `llm_result`.
@@ -107,11 +108,14 @@ public:
      * Values below 1 use the default. A change mid-turn waits for the next one.
      * @param[in] _max_model_rounds How many model rounds this turn may take,
      * sent to the sidecar. Values below 1 use the default.
+     * @param[in] _operator_only Withhold the scripter handoff for this turn
+     * (see `build_turn_request`). The settings that decide it are read live by
+     * the caller, like the approval gate.
      */
     llm_result run_turn(const std::filesystem::path &_config_home,
                         const std::string &_provider,
                         const std::string &_prompt, int _max_dispatches,
-                        int _max_model_rounds);
+                        int _max_model_rounds, bool _operator_only);
 
     /// The latest usage the sidecar reported. Safe to call from the UI thread.
     llm_protocol::usage_stats usage() const;

@@ -21,9 +21,9 @@ using campcat::llm_protocol::build_turn_request;
 using campcat::llm_protocol::parse_line;
 
 nlohmann::json turn_with(const std::string &_provider) {
-    return nlohmann::json::parse(build_turn_request(
-        1, "hi", "", "notes", "", _provider,
-        campcat::llm::k_default_max_model_rounds));
+    return nlohmann::json::parse(
+        build_turn_request(1, "hi", "", "notes", "", _provider,
+                           campcat::llm::k_default_max_model_rounds));
 }
 
 TEST(LlmProtocol, TurnCarriesTheSelectedProvider) {
@@ -54,8 +54,8 @@ TEST(LlmProtocol, InterruptNamesTheTurn) {
 
 TEST(LlmProtocol, ResultInterruptedDefaultsFalse) {
     campcat::llm_protocol::message msg;
-    ASSERT_TRUE(parse_line(
-        R"({"type":"result","id":1,"ok":true,"text":"hi"})", &msg));
+    ASSERT_TRUE(
+        parse_line(R"({"type":"result","id":1,"ok":true,"text":"hi"})", &msg));
 
     EXPECT_TRUE(msg.ok);
     EXPECT_FALSE(msg.interrupted);
@@ -74,8 +74,8 @@ TEST(LlmProtocol, ResultInterruptedTrueIsRead) {
 TEST(LlmProtocol, MemorizeCarriesTheSelectedProvider) {
     // Consolidation builds a model too, so a Qwen-only setup fails here unless
     // the provider comes along.
-    const nlohmann::json j =
-        nlohmann::json::parse(build_memorize_request(2, "notes", "qwen", "operator"));
+    const nlohmann::json j = nlohmann::json::parse(
+        build_memorize_request(2, "notes", "qwen", "operator"));
 
     EXPECT_EQ(j["type"], "memorize");
     EXPECT_EQ(j["provider"], "qwen");
@@ -161,17 +161,20 @@ TEST(LlmFuse, AlarmFiresOnAViewCropStreakOrHalfTheCap) {
     EXPECT_NE(both.find("view_crop"), std::string::npos);
     EXPECT_NE(both.find("5/10"), std::string::npos);
 
-    // An unlimited cap never reaches a half, and a cap of 1 has no half above 0.
-    EXPECT_TRUE(dispatch_alarm(50000, campcat::llm::k_fuse_unlimited, 0).empty());
+    // An unlimited cap never reaches a half, and a cap of 1 has no half above
+    // 0.
+    EXPECT_TRUE(
+        dispatch_alarm(50000, campcat::llm::k_fuse_unlimited, 0).empty());
     EXPECT_TRUE(dispatch_alarm(1, 1, 0).empty());
-    EXPECT_NE(dispatch_alarm(1, campcat::llm::k_fuse_unlimited, 3).find("view_crop"),
-              std::string::npos);
+    EXPECT_NE(
+        dispatch_alarm(1, campcat::llm::k_fuse_unlimited, 3).find("view_crop"),
+        std::string::npos);
 }
 
 TEST(LlmProtocol, MissingUsageFieldsDoNotZero) {
     campcat::llm_protocol::message msg;
-    ASSERT_TRUE(parse_line(
-        R"({"type":"result","id":1,"ok":true,"text":"hi"})", &msg));
+    ASSERT_TRUE(
+        parse_line(R"({"type":"result","id":1,"ok":true,"text":"hi"})", &msg));
     EXPECT_FALSE(msg.has_llm_calls);
     EXPECT_FALSE(msg.has_tool_calls);
     EXPECT_FALSE(msg.has_context);
@@ -200,18 +203,32 @@ TEST(LlmProtocol, ToolCallCarriesUsage) {
 }
 
 TEST(LlmProtocol, TurnCarriesTheRoundCap) {
-    const nlohmann::json j =
-        nlohmann::json::parse(build_turn_request(1, "hi", "", "notes", "", "qwen", 20));
+    const nlohmann::json j = nlohmann::json::parse(
+        build_turn_request(1, "hi", "", "notes", "", "qwen", 20));
     EXPECT_EQ(j["max_model_rounds"], 20);
 }
 
 TEST(LlmProtocol, TurnCarriesScripterMemoryEvenWhenEmpty) {
-    const nlohmann::json j = nlohmann::json::parse(build_turn_request(
-        1, "hi", "", "notes", "", "qwen", 20));
+    const nlohmann::json j = nlohmann::json::parse(
+        build_turn_request(1, "hi", "", "notes", "", "qwen", 20));
     EXPECT_EQ(j["memory"], "notes");
     ASSERT_TRUE(j.contains("scripter_memory"));
     EXPECT_EQ(j["scripter_memory"], "");
     EXPECT_EQ(j["max_model_rounds"], 20);
+}
+
+TEST(LlmProtocol, OperatorOnlyIsOmittedUnlessAskedFor) {
+    // A sidecar that predates the field reads a missing key as "handoff on",
+    // so sending `false` and omitting it must be the same message shape.
+    const nlohmann::json j = nlohmann::json::parse(
+        build_turn_request(1, "hi", "", "notes", "", "qwen", 20));
+    EXPECT_FALSE(j.contains("operator_only"));
+}
+
+TEST(LlmProtocol, OperatorOnlyWithholdsTheHandoff) {
+    const nlohmann::json j = nlohmann::json::parse(
+        build_turn_request(1, "hi", "", "notes", "", "qwen", 20, true));
+    EXPECT_EQ(j["operator_only"], true);
 }
 
 TEST(LlmProtocol, MemorizeNamesTheAgent) {
@@ -238,7 +255,8 @@ TEST(LlmMemory, TheTwoFilesStayApart) {
     EXPECT_FALSE(campcat::llm::write_memory(
         dir, campcat::llm::memory_kind::scripter_notes, ""));
     EXPECT_FALSE(campcat::llm::write_memory(
-        dir, campcat::llm::memory_kind::scripter_notes, std::string(4001, 'x')));
+        dir, campcat::llm::memory_kind::scripter_notes,
+        std::string(4001, 'x')));
     std::string op;
     ASSERT_TRUE(campcat::llm::read_memory(
         dir, campcat::llm::memory_kind::operator_notes, &op));
@@ -284,8 +302,8 @@ TEST(LlmMemory, AnUnreadableFileIsNotReplaced) {
     std::filesystem::create_directories(dir);
     EXPECT_TRUE(campcat::llm::write_memory(
         dir, campcat::llm::memory_kind::operator_notes, "keep"));
-    std::filesystem::create_directory(
-        campcat::llm::memory_path(dir, campcat::llm::memory_kind::scripter_notes));
+    std::filesystem::create_directory(campcat::llm::memory_path(
+        dir, campcat::llm::memory_kind::scripter_notes));
     EXPECT_FALSE(campcat::llm::write_memory(
         dir, campcat::llm::memory_kind::scripter_notes, "new"));
     std::string op;

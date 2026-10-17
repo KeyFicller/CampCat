@@ -404,8 +404,8 @@ std::string llm_host::run_tool(const llm_protocol::message &_call) {
         dest += alarm;
     }
     if (reply.ok) {
-        std::string shown = reply.quiet_note.empty() ? text
-                                                     : std::string(reply.quiet_note);
+        std::string shown =
+            reply.quiet_note.empty() ? text : std::string(reply.quiet_note);
         if (!alarm.empty() && !reply.quiet_note.empty()) {
             shown += "\n" + alarm;
         }
@@ -424,8 +424,7 @@ std::string llm_host::run_tool(const llm_protocol::message &_call) {
         // looking at the page while the model takes screenshot after
         // screenshot.
         m_event_images.emplace_back(m_tool_image_id, reply.image_png);
-        while (static_cast<int>(m_event_images.size()) >
-               k_event_image_stash) {
+        while (static_cast<int>(m_event_images.size()) > k_event_image_stash) {
             m_event_images.pop_front();
         }
     }
@@ -517,11 +516,10 @@ llm_protocol::usage_stats llm_host::usage() const {
 llm_result llm_host::run_turn(const std::filesystem::path &_config_home,
                               const std::string &_provider,
                               const std::string &_prompt, int _max_dispatches,
-                              int _max_model_rounds) {
+                              int _max_model_rounds, bool _operator_only) {
     llm_result r;
-    m_turn_max_dispatches = _max_dispatches >= 1
-                                ? _max_dispatches
-                                : llm::k_default_max_dispatches;
+    m_turn_max_dispatches =
+        _max_dispatches >= 1 ? _max_dispatches : llm::k_default_max_dispatches;
     if (_max_model_rounds < 1) {
         _max_model_rounds = llm::k_default_max_model_rounds;
     }
@@ -554,21 +552,21 @@ llm_result llm_host::run_turn(const std::filesystem::path &_config_home,
     if (!llm::read_memory(_config_home, llm::memory_kind::operator_notes,
                           &memory)) {
         memory.clear();
-        record_note(
-            "operator long-term memory file is unreadable; continuing without it");
+        record_note("operator long-term memory file is unreadable; continuing "
+                    "without it");
     }
     std::string scripter_memory;
     if (!llm::read_memory(_config_home, llm::memory_kind::scripter_notes,
                           &scripter_memory)) {
         scripter_memory.clear();
-        record_note(
-            "scripter long-term memory file is unreadable; continuing without it");
+        record_note("scripter long-term memory file is unreadable; continuing "
+                    "without it");
     }
 
     const long id = next_request_id();
     std::string request = llm_protocol::build_turn_request(
         id, _prompt, llm::tools_json(), memory, scripter_memory, _provider,
-        _max_model_rounds);
+        _max_model_rounds, _operator_only);
     request.push_back('\n');
     const llm_result turn = exchange(request, k_request_timeout_ms);
     // This turn may have replaced the screenshot; take it back for the next one
@@ -622,9 +620,10 @@ llm_result llm_host::memorize(const std::filesystem::path &_config_home,
     }
 
     if (!llm::write_memory(_config_home, _kind, out.text)) {
-        r.error = std::string(llm::memory_agent_name(_kind)) +
-                  " long-term memory was not written (unreadable, empty, or over " +
-                  std::to_string(llm::k_memory_max_chars) + " characters)";
+        r.error =
+            std::string(llm::memory_agent_name(_kind)) +
+            " long-term memory was not written (unreadable, empty, or over " +
+            std::to_string(llm::k_memory_max_chars) + " characters)";
         return r;
     }
     r.ok = true;
@@ -735,20 +734,18 @@ bool llm_host::ensure_running(const std::filesystem::path &,
     return false;
 }
 
-llm_protocol::usage_stats llm_host::usage() const {
-    return {};
-}
+llm_protocol::usage_stats llm_host::usage() const { return {}; }
 
 llm_result llm_host::run_turn(const std::filesystem::path &,
                               const std::string &, const std::string &, int,
-                              int) {
+                              int, bool) {
     llm_result r;
     r.error = "the LLM sidecar is not supported on Windows";
     return r;
 }
 
-llm_result llm_host::memorize(const std::filesystem::path &, const std::string &,
-                              llm::memory_kind, int) {
+llm_result llm_host::memorize(const std::filesystem::path &,
+                              const std::string &, llm::memory_kind, int) {
     llm_result r;
     r.error = "the LLM sidecar is not supported on Windows";
     return r;
@@ -823,9 +820,9 @@ llm_host::service_approval(const llm::approval_request &_req) {
 
 llm_approval llm_host::pending_approval() const {
     std::lock_guard<std::mutex> lk(m_approval_mu);
-    return llm_approval{m_approval_pending,       m_next_approval_id,
-                        m_approval_req.tool,      m_approval_req.summary,
-                        m_approval_req.highlight, m_approval_req.editable,
+    return llm_approval{m_approval_pending,         m_next_approval_id,
+                        m_approval_req.tool,        m_approval_req.summary,
+                        m_approval_req.highlight,   m_approval_req.editable,
                         m_approval_req.given_region};
 }
 

@@ -106,6 +106,34 @@ def test_scripter_model_error_stays_in_the_tool_result(monkeypatch, scripted):
     assert session.scripter_history() == []
 
 
+def test_operator_only_refuses_the_handoff(monkeypatch, scripted):
+    # Not offered this turn, so this is the model calling from the prompt
+    # alone; the scripter must not start anyway.
+    session.reset()
+    calls = []
+
+    def fake_call_cpp(name, args):
+        calls.append(name)
+        return {"ok": True, "text": name + " ok"}
+
+    monkeypatch.setattr(tools, "call_cpp", fake_call_cpp)
+    model = scripted([
+        AIMessage(content="", tool_calls=[
+            _call("author_script", {"goal": "签到"}, "a")]),
+        AIMessage(content="Done."),
+    ])
+    monkeypatch.setattr(models, "build_chat_model", lambda **_: model)
+    out = {}
+    list(graph.stream_turn(
+        {"text": "write it", "tools": [], "memory": "", "operator_only": True},
+        out))
+
+    assert calls == []
+    assert session.scripter_history() == []
+    assert _tool_messages()[0].content.startswith("error:")
+    assert "author_script is unavailable" in _tool_messages()[0].content
+
+
 def test_second_handoff_sees_the_first(monkeypatch, scripted):
     model = scripted([
         AIMessage(content="", tool_calls=[
