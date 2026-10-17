@@ -8,7 +8,7 @@ import agent.operator as operator
 import agent.scripter as scripter
 
 HOST_NAMES = (
-    "screenshot view_shot view_template view_crop mark tap start_emulator "
+    "screenshot view_shot view_template view_crop tight_crop mark tap start_emulator "
     "go_home run_script save_script save_template ccat_help list_scripts "
     "read_script "
     "update_script read_graph save_anchor delete_script rename_script"
@@ -56,6 +56,8 @@ def test_operator_and_scripter_split_the_host_table():
     assert covered == set(HOST_NAMES) - scripter.HIDDEN
     assert "mark" not in _names(operator_table)
     assert "mark" not in _names(scripter_table)
+    assert "tight_crop" not in _names(operator_table)
+    assert "tight_crop" not in _names(scripter_table)
 
 
 def test_unknown_tool_stays_with_the_operator():

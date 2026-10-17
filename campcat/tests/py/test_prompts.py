@@ -37,6 +37,8 @@ def test_scripter_prompt_crops_an_element_once():
     text = scripter.scripter_prompt()
     assert "view_crop` once" in text
     assert "tighten the same box" in text
+    assert "Inside the line is what `save_template` stores." in text
+    assert "16 pixels" in text
     assert "Pick the shape yourself" in text
     assert "diamond (菱形" in text
 

@@ -291,21 +291,59 @@ TEST_F(ShapeTools, AZeroSizedBoxIsRefused) {
 
 // --- where a region's bounds and centre land --------------------------------
 
-// A crop is the region's bounding box, so its size is what `region_bounds`
-// computed. A disc's is 2r+1 square: the disc plus the one-pixel rim that makes
-// its centre land on a pixel rather than between four.
+// view_crop shows 16 pixels of screen around the cut, clipped at the frame,
+// and strokes the cut. A tight crop is what `tight_crop` still returns.
+const cv::Vec3b k_stroke(60, 200, 255);
+const cv::Vec3b k_grey(40, 40, 40);
+
 TEST_F(ShapeTools, ACropIsTheRegionsBoundingBox) {
-    const auto box = call("view_crop", R"({"region":{"x":10,"y":20,"w":30,"h":15}})");
+    const auto box =
+        call("view_crop", R"({"region":{"x":20,"y":20,"w":30,"h":15}})");
     ASSERT_TRUE(box.ok) << box.error;
-    EXPECT_EQ(decode_png(box.image_png).size(), cv::Size(30, 15));
+    const cv::Mat padded = decode_png(box.image_png);
+    ASSERT_EQ(padded.type(), CV_8UC3);
+    ASSERT_EQ(padded.size(), cv::Size(62, 47));
+    EXPECT_EQ(padded.at<cv::Vec3b>(0, 0), k_grey);
+    EXPECT_EQ(padded.at<cv::Vec3b>(16, 31), k_stroke);
+
+    const auto clipped =
+        call("view_crop", R"({"region":{"x":10,"y":20,"w":30,"h":15}})");
+    ASSERT_TRUE(clipped.ok) << clipped.error;
+    EXPECT_EQ(decode_png(clipped.image_png).size(), cv::Size(56, 47));
 
     const auto disc =
         call("view_crop", R"({"region":{"cx":50,"cy":40,"r":12}})");
     ASSERT_TRUE(disc.ok) << disc.error;
-    EXPECT_EQ(decode_png(disc.image_png).size(), cv::Size(25, 25));
+    EXPECT_EQ(decode_png(disc.image_png).size(), cv::Size(57, 57));
 
     const auto diamond =
         call("view_crop", R"({"region":{"cx":50,"cy":40,"rx":10,"ry":6}})");
+    ASSERT_TRUE(diamond.ok) << diamond.error;
+    const cv::Mat marked = decode_png(diamond.image_png);
+    ASSERT_EQ(marked.type(), CV_8UC3);
+    EXPECT_EQ(marked.size(), cv::Size(53, 45));
+    EXPECT_NE(marked.at<cv::Vec3b>(16, 16), k_stroke);
+    EXPECT_EQ(marked.at<cv::Vec3b>(22, 36), k_stroke);
+
+    const auto flush =
+        call("view_crop", R"({"region":{"x":90,"y":70,"w":10,"h":10}})");
+    ASSERT_TRUE(flush.ok) << flush.error;
+    EXPECT_EQ(decode_png(flush.image_png).size(), cv::Size(26, 26));
+}
+
+TEST_F(ShapeTools, TightCropIsTheRegionsBoundingBox) {
+    const auto box =
+        call("tight_crop", R"({"region":{"x":10,"y":20,"w":30,"h":15}})");
+    ASSERT_TRUE(box.ok) << box.error;
+    EXPECT_EQ(decode_png(box.image_png).size(), cv::Size(30, 15));
+
+    const auto disc =
+        call("tight_crop", R"({"region":{"cx":50,"cy":40,"r":12}})");
+    ASSERT_TRUE(disc.ok) << disc.error;
+    EXPECT_EQ(decode_png(disc.image_png).size(), cv::Size(25, 25));
+
+    const auto diamond =
+        call("tight_crop", R"({"region":{"cx":50,"cy":40,"rx":10,"ry":6}})");
     ASSERT_TRUE(diamond.ok) << diamond.error;
     EXPECT_EQ(decode_png(diamond.image_png).size(), cv::Size(21, 13));
 }
@@ -314,7 +352,7 @@ TEST_F(ShapeTools, ACropIsTheRegionsBoundingBox) {
 // vertices sit inside. A full rectangle would make those corners opaque.
 TEST_F(ShapeTools, ADiamondCropIsTransparentOutsideTheVertices) {
     const auto reply =
-        call("view_crop", R"({"region":{"cx":50,"cy":40,"rx":10,"ry":6}})");
+        call("tight_crop", R"({"region":{"cx":50,"cy":40,"rx":10,"ry":6}})");
     ASSERT_TRUE(reply.ok) << reply.error;
     const cv::Mat crop = decode_png(reply.image_png);
     ASSERT_EQ(crop.type(), CV_8UC4);

@@ -112,10 +112,10 @@ def _drive(monkeypatch, responses, args, name="tap", host=None, images=None,
         calls.append((tool, tool_args))
         if tool == "tap" and tool_args.get("region", {}).get("x") == 1 and host:
             return host
-        if tool == "view_crop" and shots.get("crop_error"):
+        if tool == "tight_crop" and shots.get("crop_error"):
             return {"ok": False, "error": shots["crop_error"]}
         image = shots.get(tool, _PNG)
-        if tool in ("view_crop", "mark"):
+        if tool in ("tight_crop", "mark"):
             return {"ok": True, "text": "ok", "image_b64": image}
         return {"ok": True, "text": "ok"}
 
@@ -149,7 +149,7 @@ def test_ok_sends_the_original_region_without_expect(monkeypatch):
         _say("verdict: ok\nreason: fine"),
         _say("Done."),
     ], None)
-    assert [c[0] for c in calls] == ["view_crop", "mark", "tap"]
+    assert [c[0] for c in calls] == ["tight_crop", "mark", "tap"]
     assert calls[2][1] == {"region": BOX}
     assert "expect" not in calls[2][1]
 
@@ -179,7 +179,7 @@ def test_three_adjusts_then_the_pick_chooses(monkeypatch):
     ], None)
     assert len(_reviews(model)) == 4
     # Three looks while correcting, then one crop per candidate for the pick.
-    assert [c[0] for c in calls].count("view_crop") == 7
+    assert [c[0] for c in calls].count("tight_crop") == 7
     assert calls[-1][1]["region"] == {"x": 2, "y": 2, "w": 3, "h": 3}
 
 
@@ -217,7 +217,7 @@ def test_human_region_is_not_reviewed(monkeypatch):
         "text": 'tapped; call tap again with this corrected region '
                 '{"shot":1,"region":{"x":5,"y":5,"w":5,"h":5}}',
     })
-    assert [c[0] for c in calls] == ["view_crop", "mark", "tap", "tap"]
+    assert [c[0] for c in calls] == ["tight_crop", "mark", "tap", "tap"]
     assert calls[-1][1]["region"] == corrected
 
 
@@ -316,9 +316,9 @@ def test_template_review_uses_its_shot(monkeypatch):
         _say("verdict: ok\nreason: fine"),
         _say("Done."),
     ], None, name="save_template")
-    tap_views = [args for name, args in calls if name in ("view_crop", "mark")][:2]
+    tap_views = [args for name, args in calls if name in ("tight_crop", "mark")][:2]
     assert all("shot" not in args for args in tap_views)
-    template_views = [args for name, args in calls if name in ("view_crop", "mark")][2:]
+    template_views = [args for name, args in calls if name in ("tight_crop", "mark")][2:]
     assert [args["shot"] for args in template_views] == [2, 2]
 
 
@@ -453,7 +453,7 @@ def test_interrupt_inside_review_stops_the_turn(monkeypatch):
     calls, _, out = _drive(monkeypatch, [
         _call("tap", {"region": dict(BOX), "expect": "btn"}),
         _say("Done."),
-    ], None, interrupt_on="view_crop")
+    ], None, interrupt_on="tight_crop")
     assert "tap" not in [c[0] for c in calls]
     assert _tap_text() == [tools.INTERRUPTED_TEXT]
     assert not out.get("error")
@@ -488,7 +488,7 @@ def test_template_adjust_to_a_circle_is_what_the_host_gets(monkeypatch):
         _say("pick: 2\nreason: rule 1"),
         _say("Done."),
     ], None, name="save_template")
-    crops = [c[1]["region"] for c in calls if c[0] == "view_crop"]
+    crops = [c[1]["region"] for c in calls if c[0] == "tight_crop"]
     assert crops[1] == CIRCLE
     assert [c for c in calls if c[0] == "save_template"] == [
         ("save_template", {"region": CIRCLE})]

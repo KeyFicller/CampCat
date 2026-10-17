@@ -522,6 +522,36 @@ cv::Mat crop_region(const cv::Mat &_img, const llm::region &_region) {
     return out;
 }
 
+/// How far past the cut `view_crop` shows. Clipped at the frame, so a region
+/// on the edge simply has less context on that side.
+constexpr int k_view_margin = 16;
+
+/// The cut plus `k_view_margin` of screen, with the cut stroked. Opaque: a
+/// circle's corners stay visible here, unlike the masked template.
+cv::Mat view_with_margin(const cv::Mat &_img, const llm::region &_region) {
+    const llm::box b = region_bounds(_region);
+    const int x0 = std::max(0, b.x - k_view_margin);
+    const int y0 = std::max(0, b.y - k_view_margin);
+    const int x1 = std::min(_img.cols, b.x + b.w + k_view_margin);
+    const int y1 = std::min(_img.rows, b.y + b.h + k_view_margin);
+    cv::Mat out = _img(cv::Rect(x0, y0, x1 - x0, y1 - y0)).clone();
+    const cv::Scalar color(60, 200, 255); // same stroke as `mark`
+    if (const llm::circle *c = std::get_if<llm::circle>(&_region)) {
+        cv::circle(out, cv::Point(c->cx - x0, c->cy - y0), c->r, color, 4);
+    } else if (const llm::diamond *d = std::get_if<llm::diamond>(&_region)) {
+        const std::vector<std::vector<cv::Point>> pts = {{
+            {d->cx - x0, d->cy - d->ry - y0},
+            {d->cx + d->rx - x0, d->cy - y0},
+            {d->cx - x0, d->cy + d->ry - y0},
+            {d->cx - d->rx - x0, d->cy - y0},
+        }};
+        cv::polylines(out, pts, true, color, 4);
+    } else {
+        cv::rectangle(out, cv::Rect(b.x - x0, b.y - y0, b.w, b.h), color, 4);
+    }
+    return out;
+}
+
 /// A template of one flat colour has no variance, and normalized correlation is
 /// undefined without it: OpenCV scores such a template 1.0 everywhere, so it
 /// would match every screen and its anchor would be useless. Refused at the
@@ -898,18 +928,16 @@ CPP_REFLECT_TOOL(view_template)
 
 [[= js::image_result]][[= js::doc{
     .text = js::str(
-        "Shows one region of a screenshot at its own size, with nothing drawn "
-        "on it. Pick the shape that matches the control: a box {x,y,w,h} for a "
-        "rectangle, a circle {cx,cy,r} for a round control, a diamond "
-        "{cx,cy,rx,ry} for a diamond (vertices on the axes). Pixels outside a "
-        "circle or a diamond are transparent, "
-        "exactly as save_template writes "
-        "them. Use it with the region a failed statement reported, to see what "
-        "is there now at the same scale as the template: the whole-screen view "
-        "is scaled down, so this is the only way to compare the two pixel for "
-        "pixel. It does not change the current screen. One look per element "
-        "on a screenshot, then save_template or a different element. Do not "
-        "call it again only to tighten the same box.")}]]
+        "Shows one region of a screenshot plus 16 pixels of screen around it "
+        "where the frame has room, with the cut drawn on it. Pick the shape "
+        "that matches the control: a box {x,y,w,h} for a rectangle, a circle "
+        "{cx,cy,r} for a round control, a diamond {cx,cy,rx,ry} for a diamond "
+        "(vertices on the axes). The drawn shape is the cut. Pixels outside "
+        "the line are context, not part of the template. save_template still "
+        "writes the tight cut, and a circle or a diamond is transparent "
+        "outside the shape there. It does not change the current screen. One "
+        "look per element on a screenshot, then save_template or a different "
+        "element. Do not call it again only to tighten the same box.")}]]
     [[= js::param_docs(
         js::str("The region to cut out: a box {x,y,w,h}, a circle {cx,cy,r}, or "
                 "a diamond {cx,cy,rx,ry}."),
@@ -927,12 +955,40 @@ CPP_REFLECT_TOOL(view_template)
         throw js::bind_error(error);
     }
     std::vector<unsigned char> png;
-    if (!cv::imencode(".png", crop_region(bgr, r), png)) {
+    if (!cv::imencode(".png", view_with_margin(bgr, r), png)) {
         throw js::bind_error("png encode failed");
     }
     return std::string(png.begin(), png.end());
 }
 CPP_REFLECT_TOOL(view_crop)
+
+[[= js::image_result]][[= js::doc{
+    .text = js::str(
+        "The tight cut of a region, with nothing drawn on it. A circle or a "
+        "diamond is transparent outside the shape. Review uses this.")}]]
+    [[= js::param_docs(
+        js::str("The region to cut out: a box {x,y,w,h}, a circle {cx,cy,r}, or "
+                "a diamond {cx,cy,rx,ry}."),
+        js::str("Which screenshot to look at: the number its caption showed. "
+                "Omit for the current screen; looking at another frame does "
+                "not make it current."))]] std::string
+    tight_crop(shape region, std::optional<int> shot) {
+    cv::Mat bgr;
+    std::string error;
+    if (!frame_mat(shot, &bgr, &error)) {
+        throw js::bind_error(error);
+    }
+    const llm::region r = to_region(region);
+    if (!region_on_screen(bgr.cols, bgr.rows, r, &error)) {
+        throw js::bind_error(error);
+    }
+    std::vector<unsigned char> png;
+    if (!cv::imencode(".png", crop_region(bgr, r), png)) {
+        throw js::bind_error("png encode failed");
+    }
+    return std::string(png.begin(), png.end());
+}
+CPP_REFLECT_TOOL(tight_crop)
 
 [[= js::image_result]][[= js::doc{
     .text = js::str(

@@ -29,7 +29,7 @@ SCRIPTER_ONLY = frozenset({
 })
 # Registered in C++ for the review pipeline, which calls them itself. A model
 # is not offered them: the approval bubble already shows a region.
-HIDDEN = frozenset({"mark"})
+HIDDEN = frozenset({"mark", "tight_crop"})
 # Offered to both: the operator runs saved skills, looks at the screen and
 # reads a graph before goto; the scripter verifies what it wrote and cuts
 # templates from fresh frames.
@@ -182,6 +182,10 @@ RULES = {
         "`last_error`. `save_script` refuses an existing name."
     ),
     "script_rules": (
+        "  * A `view_crop` image draws the cut and shows up to 16 pixels of screen "
+        "outside it. Inside the line is what `save_template` stores. Outside the "
+        "line is context: do not enlarge the region to take it in, and do not crop "
+        "again only to leave it out.\n"
         "  * A failing statement stops the script. That error is what you get back -- not a "
         "screen that looks wrong.\n"
         "  * Anchor every action. After a tap, swipe or `run(...)`, assert the screen it "

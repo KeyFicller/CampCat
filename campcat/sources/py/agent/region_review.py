@@ -346,7 +346,7 @@ def review_render(state: ReviewState) -> dict:
     shape = state["shape"]
     region = state["region"]
     extra = {} if state.get("shot") is None else {"shot": state["shot"]}
-    crop = tools.call_cpp("view_crop", {"region": region, **extra})
+    crop = tools.call_cpp("tight_crop", {"region": region, **extra})
     if not crop.get("ok"):
         return {"verdict": "skip", "reason": str(crop.get("error", ""))}
     marked = tools.call_cpp(
@@ -437,7 +437,7 @@ def review_pick(state: ReviewState) -> dict:
     ]
     pictures = []
     for index, candidate in enumerate(candidates, 1):
-        crop = tools.call_cpp("view_crop", {"region": candidate["region"], **extra})
+        crop = tools.call_cpp("tight_crop", {"region": candidate["region"], **extra})
         if not crop.get("ok"):
             return {"region": first, "verdict": "ok",
                     "reason": str(crop.get("error", "")) or "could not compare"}
