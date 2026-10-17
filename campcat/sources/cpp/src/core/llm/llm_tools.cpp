@@ -5,6 +5,7 @@
 #include "core/app_config.h"
 #include "core/automation_log.h"
 #include "core/box_snap.h"
+#include "core/region_record.h"
 #include "core/script/ccat_bundle.h" // bundle_main / bundle_names / ...
 #include "core/script/ccat_graph.h"  // screen graph: scan / summary / tags
 #include "core/script/ccat_parser.h" // parse_program / parse_error
@@ -595,6 +596,26 @@ std::string snapped_box_note(const llm::box &_from, const llm::box &_to) {
            " " + std::to_string(_to.w) + "x" + std::to_string(_to.h) + ")";
 }
 
+/// Records a region the human redrew, when sampling is on. Never throws -- the
+/// sample must not undo the refusal it rode in on.
+void record_human_region(const cv::Mat &_frame, const llm::region &_given,
+                         const std::optional<llm::region> &_human) {
+    if (g_ctx.cfg == nullptr || !g_ctx.cfg->region_score.record ||
+        !_human.has_value() || _frame.empty()) {
+        return;
+    }
+    const std::string &dir = g_ctx.cfg->region_score.data_dir;
+    std::filesystem::path root = dir.empty() ? "training_data" : dir;
+    if (root.is_relative()) {
+        root = std::filesystem::path(g_ctx.cfg->config_home).parent_path() / root;
+    }
+    region_sample sample;
+    sample.frame = _frame;
+    sample.given = _given;
+    sample.human = *_human;
+    record_region_sample(root, sample);
+}
+
 /// How a template request names the frame it cuts from, for the approval
 /// bubble.
 std::string shot_phrase(const std::optional<int> &_shot) {
@@ -1083,6 +1104,7 @@ std::string tap_region(const llm::region &_given) {
         req.editable = true;
         const llm::approval_decision decision = g_ctx.request_approval(req);
         if (!decision.approved) {
+            record_human_region(current_screen_mat(), _given, decision.redrawn);
             // Empty guidance and no redrawn region keep this string
             // byte-for-byte the same as the bare refusal.
             std::string msg =
@@ -1409,6 +1431,7 @@ std::string save_template_region(std::string bundle, std::string name,
         req.editable = true;
         const llm::approval_decision decision = g_ctx.request_approval(req);
         if (!decision.approved) {
+            record_human_region(img, _given, decision.redrawn);
             std::string msg =
                 decision.guidance.empty()
                     ? std::string("user rejected saving the template")

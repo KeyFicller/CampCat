@@ -18,5 +18,6 @@ imgui.ini
 !/ccat_library/CCAT.md
 /.summary
 /docs
+/training_data/
 /.worktrees/
 /logs/

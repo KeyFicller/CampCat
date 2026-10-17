@@ -13,6 +13,7 @@ add_executable(test_campcat_core cpp/test_approval_gate.cpp
                                  cpp/test_llm_host.cpp
                                  cpp/test_llm_protocol.cpp
                                  cpp/test_recents_packages.cpp
+                                 cpp/test_region_record.cpp
                                  cpp/test_shapes.cpp)
 # `src` is on the path for `llm_tool_schema.h` alone: the tool schemas are what
 # the model is handed, so asserting on them means reading the header that builds

@@ -109,6 +109,16 @@ struct box_snap_config {
     box_snap_strategy strategy = box_snap_strategy::none;
 };
 
+/// Training samples for the region scorer (see `core/region_record.h`).
+struct region_score_config {
+    /// Off by default: this writes a screenshot to disk on every region the
+    /// human redraws.
+    bool record = false;
+    /// Where samples and frames go, relative to the repo root
+    /// (`config_home.parent_path()`); used as is when absolute.
+    std::string data_dir = "training_data";
+};
+
 /**
  * @brief Shell JSON document loaded from disk: adb settings, matchers
  * heuristic defaults, scheduler, persistence paths.
@@ -132,6 +142,7 @@ struct app_config {
     approval_config approval{};
     llm_config llm{};
     box_snap_config box_snap{};
+    region_score_config region_score{};
     scheduler_config scheduler{};
     /// Script 页选中的 bundle 名（`<config_home>/<name>/main.ccat`）；空 =
     /// 未选。

@@ -239,6 +239,7 @@ add_library(campcat_core STATIC
   campcat/sources/cpp/src/core/vision/template_matcher.cpp
   campcat/sources/cpp/src/core/vision/screen_template_ops.cpp
   campcat/sources/cpp/src/core/vision/box_snap.cpp
+  campcat/sources/cpp/src/core/vision/region_record.cpp
   campcat/sources/cpp/src/core/config/app_config.cpp
   campcat/sources/cpp/src/core/automation/automation_factory.cpp
   campcat/sources/cpp/src/core/app/scheduler.cpp

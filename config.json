@@ -26,6 +26,10 @@
     "multiscale": false,
     "box_threshold": 0.7
   },
+  "region_score": {
+    "record": true,
+    "data_dir": "training_data"
+  },
   "mumu": {
     "device_index": 0,
     "tool_path": "/Applications/MuMuPlayer.app/Contents/MacOS/mumutool"
