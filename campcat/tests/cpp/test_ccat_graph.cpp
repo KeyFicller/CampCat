@@ -26,6 +26,7 @@ using campcat::ccat_lang::anchor_def;
 using campcat::ccat_lang::anchor_kind;
 using campcat::ccat_lang::bundle_run;
 using campcat::ccat_lang::bundle_tags;
+using campcat::ccat_lang::create_action_bundle;
 using campcat::ccat_lang::graph_action;
 using campcat::ccat_lang::graph_edge;
 using campcat::ccat_lang::graph_names;
@@ -789,6 +790,62 @@ TEST(CcatGraph, GotoInAnActionIsAProblem) {
         }
     }
     EXPECT_TRUE(named);
+}
+
+TEST(CcatGraph, CreateActionBundleIsScanned) {
+    toy g("create_action");
+    EXPECT_EQ(create_action_bundle(g.dir, "g", "a", "talk"), "");
+    const auto scanned = scan_graph(g.dir, "g");
+    bool found = false;
+    for (const graph_action &action : scanned.graph.actions) {
+        if (action.script == "g.a.talk") {
+            found = true;
+            EXPECT_EQ(action.anchor, "a");
+            EXPECT_EQ(action.name, "talk");
+        }
+    }
+    EXPECT_TRUE(found);
+}
+
+TEST(CcatGraph, CreateActionRefusesASecondOne) {
+    toy g("create_action_twice");
+    EXPECT_EQ(create_action_bundle(g.dir, "g", "a", "talk"), "");
+    const std::filesystem::path main = g.dir / "g.a.talk" / "main.ccat";
+    write_file(main, "return true\n");
+    EXPECT_NE(
+        create_action_bundle(g.dir, "g", "a", "talk").find("already exists"),
+        std::string::npos);
+    std::error_code ec;
+    EXPECT_EQ(std::filesystem::file_size(main, ec),
+              std::string("return true\n").size());
+}
+
+TEST(CcatGraph, CreateActionRefusesALooseAnchor) {
+    toy g("create_action_loose");
+    write_file(g.dir / "g.pop" / "golden.md",
+               "---\nkind: popup\nclose: g.a\n---\npop\n");
+    write_file(g.dir / "g.pop" / "main.ccat", "return false\n");
+    EXPECT_NE(create_action_bundle(g.dir, "g", "pop", "talk").find("not a page"),
+              std::string::npos);
+    EXPECT_FALSE(std::filesystem::exists(g.dir / "g.pop.talk"));
+}
+
+TEST(CcatGraph, CreateActionRefusesABadName) {
+    toy g("create_action_bad_name");
+    EXPECT_NE(
+        create_action_bundle(g.dir, "g", "a", "Bad-Name").find("is not a name"),
+        std::string::npos);
+    EXPECT_NE(create_action_bundle(g.dir, "g", "a", "").find("empty"),
+              std::string::npos);
+    EXPECT_FALSE(std::filesystem::exists(g.dir / "g.a.Bad-Name"));
+}
+
+TEST(CcatGraph, CreateActionRefusesAMissingAnchor) {
+    toy g("create_action_missing");
+    EXPECT_NE(
+        create_action_bundle(g.dir, "g", "nope", "talk").find("does not exist"),
+        std::string::npos);
+    EXPECT_FALSE(std::filesystem::exists(g.dir / "g.nope"));
 }
 
 } // namespace

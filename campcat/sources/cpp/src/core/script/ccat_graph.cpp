@@ -553,6 +553,63 @@ std::string script_graph_block(const std::filesystem::path &_library,
     return _name + ": anchor script with no golden.md; save_anchor writes it";
 }
 
+namespace {
+/// Why `_part` cannot be one segment of a bundle name.
+std::string bad_part(std::string_view _part) {
+    if (_part.empty()) {
+        return "the name is empty";
+    }
+    return std::string(_part) +
+           " is not a name: lowercase letters, digits and _ only";
+}
+} // namespace
+
+std::string create_action_bundle(const std::filesystem::path &_library,
+                                 std::string_view _graph,
+                                 std::string_view _anchor,
+                                 std::string_view _action) {
+    if (!graph_part_name(_graph)) {
+        return bad_part(_graph);
+    }
+    if (!graph_part_name(_anchor)) {
+        return bad_part(_anchor);
+    }
+    if (!graph_part_name(_action)) {
+        return bad_part(_action);
+    }
+    const std::string on = std::string(_graph) + "." + std::string(_anchor);
+    if (!golden_there(_library, on)) {
+        return "anchor " + on + " does not exist";
+    }
+    std::string golden;
+    std::string err;
+    read_text_file(_library / on / "golden.md", &golden);
+    const std::optional<golden_doc> doc = parse_golden_md(golden, &err);
+    if (!doc.has_value()) {
+        return on + ": " + err;
+    }
+    if (doc->kind != anchor_kind::page) {
+        return on + " is not a page; an action runs on a page only";
+    }
+    const std::string bundle = on + "." + std::string(_action);
+    const std::filesystem::path main = bundle_main(_library, bundle);
+    std::error_code ec;
+    if (std::filesystem::exists(main, ec)) {
+        return bundle + " already exists";
+    }
+    std::filesystem::create_directories(main.parent_path(), ec);
+    std::ofstream out(main, std::ios::binary | std::ios::trunc);
+    out << "// " << _action << " on " << _graph << ":" << _anchor << "\n"
+        << "// An action starts and ends on " << _anchor
+        << "; goto is not allowed in an action.\n"
+        << "return false\n";
+    out.close();
+    if (!out) {
+        return "could not write " + bundle + "/main.ccat";
+    }
+    return "";
+}
+
 std::optional<golden_doc> parse_golden_md(std::string_view _text,
                                           std::string *_err) {
     std::string text(_text);

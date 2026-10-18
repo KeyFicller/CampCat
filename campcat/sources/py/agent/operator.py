@@ -23,6 +23,12 @@ def author_script(
     goal: Annotated[str, Field(description=(
         "What the script must do, in the user's words plus "
         "anything you learned from the screen."))],
+    steps: Annotated[str, Field(description=(
+        "What you already did on the device, one line per step: the screen "
+        "you were on, and each control you tapped with its final region and "
+        "what that region should contain. The script agent cannot see this "
+        "conversation. When a tap result says `already used`, copy that "
+        "region, not the one you proposed."))] = "",
     bundle: Annotated[str, Field(description=(
         "Bundle to create or change; omit to let the script agent pick."))] = "",
     shots: Annotated[list[int], Field(description=(
@@ -39,7 +45,9 @@ def author_script(
     verify, and reports back. Put every constraint the user stated into
     `goal` verbatim: the script agent sees nothing else of this
     conversation. Without `fix: true` or `last_error`, it cannot change
-    a bundle that already exists.
+    a bundle that already exists. `steps` is what you already did on the
+    device: the screens you saw and the final region of every control you
+    tapped. Without it the script agent re-finds each control from scratch.
     """
     raise RuntimeError("author_script is dispatched by run_tools")
 
@@ -57,6 +65,9 @@ OPERATOR_PERSONA = (
     "into `goal` verbatim. Pass `fix: true` only when the user asked to change "
     "a bundle that already exists, and `last_error` when the last `run_script` "
     "failed. Any other handoff must not change an existing bundle. "
+    "Put every screen you looked at and every control you tapped into "
+    "`steps`, one line each, with the final region and what it should "
+    "contain; copy the `already used` region when a result reports one. "
     "A game tagged `[graph <graph>, ...]` has a map of its screens. "
     "Call `read_graph` with that graph name before a `goto`: it lists "
     "every anchor and every edge. To reach one of those anchors, "

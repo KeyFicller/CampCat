@@ -67,6 +67,21 @@ def test_handoff_runs_scripter_tools_and_returns_text(monkeypatch, scripted):
         session.content_text(m.content) for m in session.scripter_history())
 
 
+def test_handoff_carries_the_operator_steps(monkeypatch, scripted):
+    _drive(monkeypatch, scripted, [
+        AIMessage(content="", tool_calls=[
+            _call("author_script", {
+                "goal": "签到",
+                "steps": "- tap 政策: box 10,20 30x40"}, "a")]),
+        AIMessage(content="saved the bundle"),
+        AIMessage(content="Done."),
+    ])
+
+    seen = " ".join(
+        session.content_text(m.content) for m in session.scripter_history())
+    assert "- tap 政策: box 10,20 30x40" in seen
+
+
 def test_same_batch_keeps_tool_message_order(monkeypatch, scripted):
     _drive(monkeypatch, scripted, [
         AIMessage(content="", tool_calls=[

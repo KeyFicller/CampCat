@@ -107,6 +107,19 @@ std::string script_graph_block(const std::filesystem::path &_library,
                                const std::string &_name,
                                const Program &_program);
 
+/**
+ * @brief Write a new action bundle `<graph>.<anchor>.<action>` holding a
+ * skeleton main.ccat, so a person can start one by hand.
+ *
+ * @return Empty when the file was written; otherwise one sentence naming why
+ * not -- a name that is not `[a-z0-9_]+`, an anchor that is missing or not a
+ * page, or a bundle that already exists. Nothing is created on failure.
+ */
+std::string create_action_bundle(const std::filesystem::path &_library,
+                                 std::string_view _graph,
+                                 std::string_view _anchor,
+                                 std::string_view _action);
+
 struct loaded_graph {
     bool ok = false;
     screen_graph graph;

@@ -57,6 +57,9 @@ def scripter_tools(host_tools: list) -> list:
 def brief_of(args: dict) -> str:
     """The scripter's one user message. Empty optional fields are left out."""
     lines = [f"goal: {args.get('goal', '')}"]
+    steps = (args.get("steps") or "").strip()
+    if steps:
+        lines.append(f"steps:\n{steps}")
     bundle = args.get("bundle") or ""
     if bundle:
         lines.append(f"bundle: {bundle}")

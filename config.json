@@ -5,16 +5,16 @@
   },
   "approval": {
     "gates": {
-      "delete_script": false,
-      "go_home": false,
-      "rename_script": false,
-      "run_script": false,
-      "save_script": false,
-      "save_template": false,
+      "delete_script": true,
+      "go_home": true,
+      "rename_script": true,
+      "run_script": true,
+      "save_script": true,
+      "save_template": true,
       "tap": true,
-      "update_script": false
+      "update_script": true
     },
-    "require": false
+    "require": true
   },
   "box_snap": {
     "strategy": "none"
@@ -28,7 +28,7 @@
   "llm": {
     "max_dispatches": 10000,
     "max_model_rounds": 1000,
-    "provider": "qwen"
+    "provider": "deepseek"
   },
   "match": {
     "box_threshold": 0.7,
@@ -49,5 +49,5 @@
     "interval_seconds": 300,
     "jitter_seconds": 7
   },
-  "script_bundle": ""
+  "script_bundle": "stzb.recruit.coin_once"
 }

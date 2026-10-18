@@ -94,7 +94,8 @@ def test_author_script_schema_comes_from_the_tool():
     assert "fix: true" in fn["description"]
     assert params["required"] == ["goal"]
     assert list(params["properties"]) == [
-        "goal", "bundle", "shots", "last_error", "fix"]
+        "goal", "steps", "bundle", "shots", "last_error", "fix"]
+    assert params["properties"]["steps"]["type"] == "string"
     assert params["properties"]["shots"]["items"]["type"] == "integer"
     assert params["properties"]["fix"]["type"] == "boolean"
     assert "omit" in params["properties"]["bundle"]["description"]
@@ -116,3 +117,7 @@ def test_brief_keeps_only_the_fields_that_were_given():
     assert scripter.brief_of({"goal": "签到", "fix": True}) == "goal: 签到\nfix: true"
     assert scripter.brief_of({"goal": "签到", "fix": "true"}) == "goal: 签到"
     assert scripter.brief_of({"goal": "签到", "fix": False}) == "goal: 签到"
+    assert scripter.brief_of({
+        "goal": "签到", "steps": "- screen #3: 内政\n- tap 政策: box 1,2 3x4",
+    }) == "goal: 签到\nsteps:\n- screen #3: 内政\n- tap 政策: box 1,2 3x4"
+    assert scripter.brief_of({"goal": "签到", "steps": " \n "}) == "goal: 签到"

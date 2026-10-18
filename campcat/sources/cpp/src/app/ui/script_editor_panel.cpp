@@ -69,6 +69,10 @@ std::string g_graph;
 std::vector<std::string> g_nodes;
 std::vector<std::string> g_edges;
 std::map<std::string, std::vector<std::string>> g_actions;
+/// The anchors an action may hang on: `bundle_tags` reports every anchor in
+/// `g_nodes`, popups and loading pages included, and the graph check rejects an
+/// action on those.
+std::vector<std::string> g_page_nodes;
 double g_next_scan = 0.0;
 
 /// The deletion being confirmed, and -- when `g_delete_error` is set -- the
@@ -87,6 +91,16 @@ std::vector<std::string>
     g_rename_referrers; ///< shown as the rewrite blast radius
 std::string g_rename_buf;
 bool g_rename_pending = false;
+
+/// The new action being created: the anchor it runs on, the name typed for it,
+/// and, when the last attempt was refused, `create_action_bundle`'s sentence.
+/// The error remembers the name it was about, so correcting the name drops it.
+constexpr char k_new_action_popup[] = "New action";
+std::string g_new_action_anchor;
+std::string g_new_action_name;
+std::string g_new_action_error;
+std::string g_new_action_error_for;
+bool g_new_action_pending = false;
 
 /// A decoded template, kept between hovers: key is the absolute path.
 struct preview_tex {
@@ -121,6 +135,7 @@ void classify_graph(const std::filesystem::path &_dir) {
     g_nodes.clear();
     g_edges.clear();
     g_actions.clear();
+    g_page_nodes.clear();
     if (g_graph.empty()) {
         return;
     }
@@ -133,6 +148,9 @@ void classify_graph(const std::filesystem::path &_dir) {
             campcat::ccat_lang::bundle_tags(_dir, name);
         if (tag.anchor_of == g_graph) {
             g_nodes.push_back(name);
+            if (tag.kind == campcat::ccat_lang::anchor_kind::page) {
+                g_page_nodes.push_back(name);
+            }
         } else if (tag.edge_of == g_graph) {
             g_edges.push_back(name);
         } else if (tag.action_of == g_graph) {
@@ -309,9 +327,12 @@ void draw_template_preview(const std::filesystem::path &_path,
 }
 
 /// Drag, hover, double-click and the right-click menu for the item just drawn.
+/// `_new_action_on` is the anchor id when this row is an anchor of the open
+/// graph, which is the only row that can start an action.
 void script_row_actions(const std::filesystem::path &_dir,
                         const std::string &_name, std::string *_rename,
-                        std::optional<std::string> *_to_delete) {
+                        std::optional<std::string> *_to_delete,
+                        std::string_view _new_action_on = {}) {
     // The row is the grab handle for a drag onto the prompt box -- the whole
     // row, because a handle of its own would squeeze the name, as with the
     // menu below. Safe before the hover block: ImGui clears hover while a
@@ -338,6 +359,13 @@ void script_row_actions(const std::filesystem::path &_dir,
     // Behind a right click: the column is 180 wide and the row is one
     // Selectable, so a button of its own would squeeze the name.
     if (ImGui::BeginPopupContextItem("ctx")) {
+        if (!_new_action_on.empty() && ImGui::MenuItem("New action...")) {
+            g_new_action_anchor = std::string(_new_action_on);
+            g_new_action_name.clear();
+            g_new_action_error.clear();
+            g_new_action_error_for.clear();
+            g_new_action_pending = true;
+        }
         if (ImGui::MenuItem("Rename")) {
             *_rename = _name;
         }
@@ -350,10 +378,11 @@ void script_row_actions(const std::filesystem::path &_dir,
 
 void draw_script_row(const std::filesystem::path &_dir, const std::string &_name,
                      const char *_label, std::string *_rename,
-                     std::optional<std::string> *_to_delete) {
+                     std::optional<std::string> *_to_delete,
+                     std::string_view _new_action_on = {}) {
     ImGui::PushID(_name.c_str());
     ImGui::Selectable(_label, false, ImGuiSelectableFlags_AllowDoubleClick);
-    script_row_actions(_dir, _name, _rename, _to_delete);
+    script_row_actions(_dir, _name, _rename, _to_delete, _new_action_on);
     ImGui::PopID();
 }
 
@@ -373,8 +402,13 @@ void draw_name_list(const std::filesystem::path &_dir, const char *_id,
     ImGui::EndChild();
 }
 
-/// Anchors of the open graph. One with actions is a tree; the child label is
-/// the action name, and the drag still carries the full bundle name.
+/// Anchors of the open graph. One with actions expands; the child label is the
+/// action name, and the drag still carries the full bundle name.
+///
+/// A plain `Selectable`, not a tree node: a tree node reserves the arrow's width
+/// in front of the label, which puts every anchor a glyph to the right of the
+/// edge rows beside it. The arrow goes at the right end of the row instead, so
+/// the whole column starts at one x.
 void draw_node_list(const std::filesystem::path &_dir, float _h,
                     const std::string &_prefix, std::string *_rename,
                     std::optional<std::string> *_to_delete) {
@@ -382,21 +416,55 @@ void draw_node_list(const std::filesystem::path &_dir, float _h,
     if (g_nodes.empty()) {
         ImGui::TextDisabled("none");
     }
+    const ImGuiStyle &style = ImGui::GetStyle();
+    const float indent = ImGui::GetFontSize() + style.FramePadding.x * 2.0F;
     for (const std::string &name : g_nodes) {
         const std::string label =
             name.rfind(_prefix, 0) == 0 ? name.substr(_prefix.size()) : name;
         const auto found = g_actions.find(name);
-        if (found == g_actions.end() || found->second.empty()) {
-            draw_script_row(_dir, name, label.c_str(), _rename, _to_delete);
-            continue;
-        }
+        const bool has_actions =
+            found != g_actions.end() && !found->second.empty();
         ImGui::PushID(name.c_str());
-        const bool open = ImGui::TreeNodeEx(
-            "##node",
-            ImGuiTreeNodeFlags_OpenOnArrow | ImGuiTreeNodeFlags_SpanAvailWidth,
-            "%s", label.c_str());
-        script_row_actions(_dir, name, _rename, _to_delete);
-        if (open) {
+        // Open state lives in the window's storage, keyed by the anchor, so it
+        // survives the rescan that rebuilds this list.
+        ImGuiID open_id = ImGui::GetID("##open");
+        ImGuiStorage *storage = ImGui::GetStateStorage();
+        bool open = storage->GetBool(open_id, false);
+        ImGui::Selectable(label.c_str(), false,
+                          ImGuiSelectableFlags_AllowDoubleClick);
+        const ImVec2 row_min = ImGui::GetItemRectMin();
+        const ImVec2 row_max = ImGui::GetItemRectMax();
+        const bool can_act = std::find(g_page_nodes.begin(), g_page_nodes.end(),
+                                       name) != g_page_nodes.end();
+        script_row_actions(_dir, name, _rename, _to_delete,
+                           can_act ? std::string_view(label)
+                                   : std::string_view{});
+        if (has_actions) {
+            const float font = ImGui::GetFontSize();
+            const float right = row_max.x - style.FramePadding.x;
+            const ImVec2 centre(right - font * 0.5F,
+                                (row_min.y + row_max.y) * 0.5F);
+            const bool on_arrow = ImGui::IsItemHovered() &&
+                                  ImGui::GetMousePos().x >= right - font;
+            if (on_arrow && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+                open = !open;
+                storage->SetBool(open_id, open);
+            }
+            const float u = font * 0.22F;
+            const ImU32 col = ImGui::GetColorU32(ImGuiCol_Text);
+            ImDrawList *draw = ImGui::GetWindowDrawList();
+            if (open) {
+                draw->AddTriangleFilled(ImVec2(centre.x - u, centre.y - u),
+                                        ImVec2(centre.x + u, centre.y - u),
+                                        ImVec2(centre.x, centre.y + u), col);
+            } else {
+                draw->AddTriangleFilled(ImVec2(centre.x - u, centre.y - u),
+                                        ImVec2(centre.x - u, centre.y + u),
+                                        ImVec2(centre.x + u, centre.y), col);
+            }
+        }
+        if (has_actions && open) {
+            ImGui::Indent(indent);
             for (const std::string &action : found->second) {
                 const std::size_t dot = action.rfind('.');
                 const std::string action_label =
@@ -404,7 +472,7 @@ void draw_node_list(const std::filesystem::path &_dir, float _h,
                 draw_script_row(_dir, action, action_label.c_str(), _rename,
                                 _to_delete);
             }
-            ImGui::TreePop();
+            ImGui::Unindent(indent);
         }
         ImGui::PopID();
     }
@@ -511,6 +579,81 @@ void draw_rename_modal(const std::filesystem::path &_dir) {
         g_rename_name.clear();
         g_rename_referrers.clear();
         g_rename_error.clear();
+    }
+    ImGui::EndPopup();
+}
+
+/// The anchor row's "New action..." prompt: name one, and a bundle
+/// `<graph>.<anchor>.<name>` with a skeleton main.ccat is written and opened.
+void draw_new_action_modal(const std::filesystem::path &_dir) {
+    if (g_new_action_pending) {
+        ImGui::OpenPopup(k_new_action_popup);
+        g_new_action_pending = false;
+    }
+    if (!ImGui::BeginPopupModal(k_new_action_popup, nullptr,
+                                ImGuiWindowFlags_AlwaysAutoResize)) {
+        return;
+    }
+    const std::string bundle =
+        g_graph + "." + g_new_action_anchor + "." + g_new_action_name;
+    ImGui::Text("New action on %s:%s", g_graph.c_str(),
+                g_new_action_anchor.c_str());
+    ImGui::TextDisabled("Bundle: %s", bundle.c_str());
+    ImGui::SetNextItemWidth(220.0F);
+    const bool entered = ImGui::InputText("##action_name", &g_new_action_name,
+                                          ImGuiInputTextFlags_EnterReturnsTrue);
+    ImGui::SetItemDefaultFocus();
+
+    // The name is checked as it is typed, so `Create` is never pressed for a
+    // bundle the writer would refuse; the writer still has the last word.
+    std::string why;
+    std::error_code ec;
+    if (g_new_action_name.empty()) {
+        why = "type a name";
+    } else if (!campcat::ccat_lang::graph_part_name(g_new_action_name)) {
+        why = "lowercase letters, digits and _ only";
+    } else if (std::filesystem::exists(
+                   campcat::ccat_lang::bundle_main(_dir, bundle), ec)) {
+        why = "that bundle already exists";
+    }
+    if (g_new_action_error_for != g_new_action_name) {
+        g_new_action_error.clear();
+    }
+    if (!g_new_action_error.empty()) {
+        ImGui::TextColored(k_err_col, "%s", g_new_action_error.c_str());
+    } else if (!why.empty()) {
+        ImGui::TextDisabled("%s", why.c_str());
+    }
+
+    const bool ready = why.empty();
+    if (!ready) {
+        ImGui::BeginDisabled();
+    }
+    if (ImGui::Button("Create") || (entered && ready)) {
+        const std::string err = campcat::ccat_lang::create_action_bundle(
+            _dir, g_graph, g_new_action_anchor, g_new_action_name);
+        if (err.empty()) {
+            ImGui::CloseCurrentPopup();
+            g_next_scan = 0.0; // the new row next frame, not within a second
+            scan_scripts(_dir); // rescans, and reclassifies with it
+            open_editor(_dir, bundle);
+            g_new_action_anchor.clear();
+            g_new_action_name.clear();
+        } else {
+            g_new_action_error = err;
+            g_new_action_error_for = g_new_action_name;
+        }
+    }
+    if (!ready) {
+        ImGui::EndDisabled();
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Cancel")) {
+        ImGui::CloseCurrentPopup();
+        g_new_action_anchor.clear();
+        g_new_action_name.clear();
+        g_new_action_error.clear();
+        g_new_action_error_for.clear();
     }
     ImGui::EndPopup();
 }
@@ -699,6 +842,7 @@ void script_editor_panel_draw(const std::filesystem::path &_script_dir,
     }
     draw_delete_modal(_script_dir);
     draw_rename_modal(_script_dir);
+    draw_new_action_modal(_script_dir);
     script_editor_draw_windows();
 }
 
