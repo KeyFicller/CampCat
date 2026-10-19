@@ -1598,9 +1598,10 @@ CPP_REFLECT_TOOL(save_template)
     if (g_ctx.cfg == nullptr) {
         throw js::bind_error("no shell config; cannot locate CCAT.md");
     }
-    // CCAT.md sits in the library beside the scripts it documents.
+    // Beside config.json, in the app's own checkout: the language belongs to
+    // the interpreter, not to a skill pack (which is bundles only).
     const std::filesystem::path path =
-        std::filesystem::path(g_ctx.cfg->config_home) / "CCAT.md";
+        std::filesystem::path(g_ctx.cfg->config_home).parent_path() / "CCAT.md";
     // Read per call, no cache: a function-local static would freeze whichever
     // g_ctx the first call happened to see, and this tool is called rarely
     // enough that the read costs nothing.

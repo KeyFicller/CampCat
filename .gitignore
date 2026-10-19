@@ -13,9 +13,8 @@ compile_commands.json
 imgui.ini
 /.vscode
 /.env
-/ccat_library/*
-!/ccat_library/gold.ccat
-!/ccat_library/CCAT.md
+# ccat_library is a submodule (KeyFicller/CampCat-Packs): its contents are
+# that repository's, and the parent records only the commit it points at.
 /.summary
 /docs
 /training_data/

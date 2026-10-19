@@ -13,3 +13,7 @@
 [submodule ".cursor/skills/answer-me-with-html"]
 	path = .cursor/skills/answer-me-with-html
 	url = https://github.com/QingYunA/answer-me-with-html.git
+[submodule "ccat_library"]
+	path = ccat_library
+	url = https://github.com/KeyFicller/CampCat-Packs.git
+	update = none

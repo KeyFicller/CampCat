@@ -6,6 +6,7 @@
 #include <core/llm/llm_fuse.h>
 #include <core/llm/llm_host.h>
 #include <core/llm/llm_protocol.h>
+#include <core/llm/llm_tools.h>
 
 #include <gtest/gtest.h>
 #include <nlohmann/json.hpp>
@@ -128,6 +129,33 @@ TEST(AppConfig, ConfigHomeIsTheLibraryBesideTheConfigFile) {
 
     EXPECT_EQ(std::filesystem::path(cfg.config_home),
               std::filesystem::temp_directory_path() / "ccat_library");
+}
+
+TEST(LlmTools, CcatHelpReadsTheDocBesideTheLibrary) {
+    // The language reference belongs to the interpreter, not to a skill pack:
+    // it sits beside config.json, one level above config_home. Asking the tool
+    // is the only way to pin where it looks, since a miss is a thrown error.
+    const std::filesystem::path root =
+        std::filesystem::temp_directory_path() / "campcat_ccat_help";
+    std::filesystem::remove_all(root);
+    std::filesystem::create_directories(root / "ccat_library");
+    {
+        std::ofstream out(root / "CCAT.md");
+        out << "the language\n";
+    }
+
+    campcat::app_config cfg{};
+    cfg.config_home = (root / "ccat_library").string();
+    campcat::llm::tool_context ctx;
+    ctx.cfg = &cfg;
+    campcat::llm::set_context(ctx);
+    const campcat::llm::tool_reply reply =
+        campcat::llm::dispatch("ccat_help", "{}");
+    campcat::llm::set_context({});
+    std::filesystem::remove_all(root);
+
+    ASSERT_TRUE(reply.ok) << reply.error;
+    EXPECT_EQ(reply.text, "the language\n");
 }
 
 TEST(AppConfig, ThePopupSettingsSurviveASave) {

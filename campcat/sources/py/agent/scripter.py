@@ -323,16 +323,15 @@ RULES = {
 
 
 def _read_gold_script() -> str:
-    """The worked example, read from the library rather than copied here.
+    """The worked example, read from the app's own checkout rather than copied here.
 
     One example in one file, edited in one place -- `ccat_help` reads `CCAT.md`
-    the same way. A missing file is not fatal, since the
+    from beside `config.json` the same way; neither belongs to a skill pack,
+    which is bundles only. A missing file is not fatal, since the
     rules above stand on their own, so an empty string is the answer and the
     block is left out.
     """
-    path = (
-        Path(__file__).resolve().parents[4] / "ccat_library" / "gold.ccat"
-    )
+    path = Path(__file__).resolve().parents[4] / "gold.ccat"
     try:
         return path.read_text(encoding="utf-8").strip()
     except OSError:

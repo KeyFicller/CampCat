@@ -6,7 +6,7 @@
 
 ![intro](campcat/sources/cpp/assets/images/intro.jpg)
 
-**脚本驱动** —— 为了确定性，定时调度的时候不漂移。OpenCV 在本地匹配模板，没有大模型参与：同一个屏幕，每次都是同一串点击，稳定，可复现。技能包是一段 `.ccat` 脚本加上它的模板图，语言见 [CCAT.md](ccat_library/CCAT.md)。
+**脚本驱动** —— 为了确定性，定时调度的时候不漂移。OpenCV 在本地匹配模板，没有大模型参与：同一个屏幕，每次都是同一串点击，稳定，可复现。技能包是一段 `.ccat` 脚本加上它的模板图，语言见 [CCAT.md](CCAT.md)。
 
 **LLM 探索** —— 为了把写脚本的迭代成本压下来。人只说一句目标，视觉模型看屏幕去探索，跑通的经验写成脚本落盘，再交给上面那条路，本质上是个脚本作者。
 
@@ -40,6 +40,16 @@
 
 ### 写成的图
 ![graph_built](campcat/sources/cpp/assets/images/graph_built.png)
+
+## 技能包仓库
+
+`ccat_library/` 是一个子模块（[CampCat-Packs](https://github.com/KeyFicller/CampCat-Packs)），只放技能包：`.ccat` 脚本、模板图、`operator.md`。语言手册 `CCAT.md`、范例 `gold.ccat` 属于这个仓库，不在包里。
+
+默认不拉取，要用的时候：
+
+```bash
+git submodule update --init --checkout ccat_library
+```
 
 ## 作为 MCP 服务
 
