@@ -1312,12 +1312,42 @@ std::string run_parsed(const ccat_lang::Program &_prog,
 }
 CPP_REFLECT_TOOL(run_script)
 
+/// Where the device is after `_name` runs: an edge ends on its `to` anchor, an
+/// action on the anchor it belongs to, an anchor on itself. Empty when the
+/// bundle is not part of a graph, so a plain skill claims nothing.
+std::string landing_of(const std::string &_name) {
+    const std::size_t dot = _name.find('.');
+    if (dot == std::string::npos) {
+        return {};
+    }
+    const std::string graph = _name.substr(0, dot);
+    const ccat_lang::scanned_graph scanned =
+        ccat_lang::scan_graph(g_ctx.script_dir, graph);
+    for (const ccat_lang::graph_edge &e : scanned.graph.edges) {
+        if (e.script == _name) {
+            return graph + "." + e.to;
+        }
+    }
+    for (const ccat_lang::graph_action &a : scanned.graph.actions) {
+        if (a.script == _name) {
+            return graph + "." + a.anchor;
+        }
+    }
+    for (const ccat_lang::anchor_def &a : scanned.graph.anchors) {
+        if (a.id == _name.substr(dot + 1)) {
+            return _name;
+        }
+    }
+    return {};
+}
+
 [[= js::quiet{.text = js::str("Ran bundle {name}")}]][[= js::doc{
     .text = js::str(
         "Runs a saved bundle by name, exactly as its main.ccat stands on disk. "
         "Use it to play a whole skill; list_scripts has the names. With human "
-        "approval on, the run waits for it. To run a script that is not saved "
-        "yet, use run_script.")}]]
+        "approval on, the run waits for it. A run that succeeds ends by naming "
+        "the anchor it landed on, so do not locate to confirm one. To run a "
+        "script that is not saved yet, use run_script.")}]]
     [[= js::param_docs(
         js::str("Bundle name, as list_scripts shows it."))]] std::string
         run_bundle(std::string name) {
@@ -1359,7 +1389,11 @@ CPP_REFLECT_TOOL(run_script)
         }
     }
     const std::unique_ptr<ccat_lang::Program> prog = parse_or_throw(source);
-    return run_parsed(*prog, g_ctx.script_dir / name);
+    const std::string ran = run_parsed(*prog, g_ctx.script_dir / name);
+    // Only a run that got here landed somewhere, and the name says where: the
+    // page it ended on is what the client would otherwise screenshot to learn.
+    const std::string landed = landing_of(name);
+    return landed.empty() ? ran : ran + " [now on " + landed + "]";
 }
 CPP_REFLECT_TOOL(run_bundle)
 
@@ -2097,8 +2131,9 @@ CPP_REFLECT_TOOL(read_graph)
         "Answers which screen of this graph the device is on, in one line: "
         "\"<graph>.<anchor> (page)\", \"(transient)\", \"(popup)\", "
         "\"unknown\" or \"ambiguous\". Use it only when you do not already "
-        "know which screen the device is on -- before a run to see where it "
-        "starts, or after one to see where it stopped. It taps nothing, and "
+        "know which screen the device is on -- before a run whose starting "
+        "screen you cannot name. A run that succeeds names the anchor it "
+        "landed on, so it is never the way to check one. It taps nothing, and "
         "it reads the current screenshot rather than taking one. For a "
         "question a script asked, use screenshot: that is the only reason to "
         "pull a picture.")}]]

@@ -52,6 +52,11 @@ WAIT_SECONDS = 60.0
 # rejecting the request.
 _OPEN = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
+# Kept off the model's tool list: a picture is ~1000 tokens and turns "where am
+# I" into a look-around. `_answer` pulls one over HTTP itself when a script asks
+# a question, so the tool stays on the wire; only the model cannot reach for it.
+HIDDEN_FROM_MODEL = {"screenshot"}
+
 # One question, one picture, one word -- the same bar the sidecar's `consult`
 # holds a script's `ask` to. A wrong guess picks a wrong branch.
 ASK_SYSTEM = (
@@ -256,6 +261,7 @@ def agent(state: Chat) -> dict:
             },
         }
         for tool in schemas
+        if tool["name"] not in HIDDEN_FROM_MODEL
     ]
     model = models.build_chat_model()
     if offered:

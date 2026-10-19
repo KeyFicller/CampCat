@@ -110,8 +110,9 @@ public:
     [[= js::doc{
         .text = js::str(
             "Answers which screen of this graph the device is on, in one line. "
-            "Use it only when you do not already know -- before a run to see "
-            "where it starts, or after one to see where it stopped. It taps "
+            "Use it only when you do not already know -- before a run whose "
+            "starting screen you cannot name. A run that succeeds names the "
+            "anchor it landed on, so it is never the way to check one. It taps "
             "nothing. For a question a script asked, use screenshot.")}]]
     [[= mcp::tool{.read_only = true, .destructive = false}]] std::string
     locate();
@@ -121,7 +122,8 @@ public:
         .text = js::str(
             "Runs a saved bundle on the device by name. The script may pause "
             "to ask a yes/no question about the screen; answer it and the call "
-            "resumes from where it stopped.")}]]
+            "resumes from where it stopped. A run that succeeds ends by naming "
+            "the anchor it landed on.")}]]
     [[= js::param_docs(
         js::str("Bundle name, as list_scripts shows it."))]] std::string
     run_bundle(std::string name);

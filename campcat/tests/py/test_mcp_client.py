@@ -139,6 +139,34 @@ def test_the_loop_ends_when_nothing_is_asked_for():
     assert mcp_client.route({"messages": [AIMessage(content="done")]}) == "__end__"
 
 
+def test_the_model_is_not_offered_screenshot(monkeypatch):
+    """A picture is the client's business: `_answer` pulls one when a script asks."""
+    bound = []
+
+    def post(method, params, name=None):
+        assert method == "tools/list"
+        return {
+            "tools": [
+                {"name": "locate", "description": "", "inputSchema": {}},
+                {"name": "screenshot", "description": "", "inputSchema": {}},
+            ]
+        }
+
+    class _Recording:
+        def bind_tools(self, tools, **kwargs):
+            bound.append(tools)
+            return self
+
+        def invoke(self, messages):
+            return AIMessage(content="ok")
+
+    monkeypatch.setattr(mcp_client, "post", post)
+    monkeypatch.setattr(mcp_client.models, "build_chat_model", lambda: _Recording())
+    mcp_client.agent({"messages": [HumanMessage(content="hi")]})
+
+    assert [tool["function"]["name"] for tool in bound[0]] == ["locate"]
+
+
 def test_a_second_turn_sees_the_first(monkeypatch):
     """The checkpointer, not a list of our own, is what makes it a conversation."""
     _replay(monkeypatch, {})

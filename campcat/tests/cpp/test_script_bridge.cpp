@@ -329,6 +329,13 @@ TEST_F(ScriptBridge, TheGuideServesOneGraph) {
     EXPECT_NE(guide.find("stzb"), std::string::npos) << guide;
     EXPECT_NE(guide.find("locate"), std::string::npos) << guide;
     EXPECT_EQ(guide.find("returns the source"), std::string::npos) << guide;
+    // A run reports where it landed, so nothing should send the client to
+    // locate afterwards -- that was one picture-sized round trip per run.
+    EXPECT_NE(guide.find("do not locate to confirm one"), std::string::npos)
+        << guide;
+    EXPECT_EQ(guide.find("after one to see where it stopped"),
+              std::string::npos)
+        << guide;
 
     const nlohmann::json tools =
         nlohmann::json::parse(server.tools_as_openai_json());
@@ -339,6 +346,9 @@ TEST_F(ScriptBridge, TheGuideServesOneGraph) {
         const std::string description =
             tool.at("function").at("description");
         EXPECT_NE(description.find("only when you do not already know"),
+                  std::string::npos)
+            << description;
+        EXPECT_EQ(description.find("after one to see where it stopped"),
                   std::string::npos)
             << description;
     }
@@ -495,6 +505,35 @@ TEST_F(ScriptBridge, ListScriptsHidesAnotherGraph) {
     EXPECT_NE(out.find("g.map"), std::string::npos) << out;
     EXPECT_EQ(out.find("other.map"), std::string::npos) << out;
     EXPECT_EQ(out.find("loose"), std::string::npos) << out;
+}
+
+TEST_F(ScriptBridge, ARunThatSucceedsNamesWhereItLanded) {
+    // The name already says where an edge ends, so the reply says it too and
+    // the client never has to screenshot or locate to find out.
+    const auto lib = write_library({{"g.entry", "return true\n"},
+                                    {"g.map", "return true\n"},
+                                    {"g.entry-map", "log(\"moved\")\n"},
+                                    {"g.map.claim", "log(\"claimed\")\n"},
+                                    {"plain", "log(\"x\")\n"}});
+    write_anchor(lib, "g.entry", "the start screen");
+    write_anchor(lib, "g.map", "the map");
+    script_bridge bridge;
+    use(lib, bridge);
+    const nlohmann::json params = capable();
+    elicit_scope scope(params);
+
+    const std::string edge = bridge.run("g.entry-map", params);
+    EXPECT_NE(edge.find("[now on g.map]"), std::string::npos) << edge;
+
+    const std::string action = bridge.run("g.map.claim", params);
+    EXPECT_NE(action.find("[now on g.map]"), std::string::npos) << action;
+
+    const std::string anchor = bridge.run("g.map", params);
+    EXPECT_NE(anchor.find("[now on g.map]"), std::string::npos) << anchor;
+
+    // A bundle that belongs to no graph lands nowhere it can name.
+    const std::string plain = bridge.run("plain", params);
+    EXPECT_EQ(plain.find("now on"), std::string::npos) << plain;
 }
 
 TEST_F(ScriptBridge, LocateAnswersInOneLine) {
