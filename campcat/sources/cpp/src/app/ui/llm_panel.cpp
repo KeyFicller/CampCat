@@ -110,6 +110,9 @@ struct handoff {
 std::vector<llm_turn> g_turns;
 std::string g_input;
 bool g_pin_bottom = true;
+/// Where the conversation sat at the end of the last frame. Its own snap lands
+/// after this is read, so a smaller value now means the user moved up.
+float g_last_scroll = 0.0F;
 bool g_thinking = false; ///< sidecar reports the model is reasoning
 
 /// True while an automation cycle or the scheduler owns adb. Tools must refuse
@@ -1710,6 +1713,13 @@ void draw_emulator_bubble() {
 bool draw_log(const ImVec2 &_size) {
     bool clear_requested = false;
     ImGui::BeginChild("llm_log", _size, ImGuiChildFlags_Borders);
+    // Any upward move is the reader asking for history, and it outranks
+    // following the tail. Checked before the snap below sets its target: the
+    // snap lands on the next frame and would otherwise undo a notch at a time,
+    // then read the bottom it restored as "the user is still following".
+    if (ImGui::GetScrollY() < g_last_scroll - 0.5F) {
+        g_pin_bottom = false;
+    }
     if (ImGui::BeginPopupContextWindow("llm_log_ctx",
                                        ImGuiPopupFlags_MouseButtonRight)) {
         // Greyed out while a turn is in flight, because clearing would have to
@@ -1769,13 +1779,16 @@ bool draw_log(const ImVec2 &_size) {
     }
     ImGui::PopFont();
 
-    // Follow new content only while the user is already at the bottom.
+    // Follow new content only while the user is already at the bottom. The
+    // comparison has no slack: a tolerance would keep re-arming inside the
+    // trackpad's per-frame distance, which is the jitter this used to have.
     if (g_pin_bottom) {
         ImGui::SetScrollHereY(1.0F);
     }
     const float max_scroll = ImGui::GetScrollMaxY();
     g_pin_bottom =
-        (max_scroll <= 0.0F) || (ImGui::GetScrollY() >= max_scroll - 4.0F);
+        (max_scroll <= 0.0F) || (ImGui::GetScrollY() >= max_scroll);
+    g_last_scroll = ImGui::GetScrollY();
     ImGui::EndChild();
     return clear_requested;
 }
