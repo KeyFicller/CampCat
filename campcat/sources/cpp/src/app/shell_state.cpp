@@ -4,6 +4,9 @@
 #include "core/adb_client.h"
 #include "core/automation/game_automation.h"
 #include "core/automation_log.h"
+#include "core/llm/llm_consult.h"
+#include "core/llm/llm_host.h"
+#include "core/mumu_launch.h"
 #include "core/script/ccat_parser.h"
 
 #include <chrono>
@@ -17,19 +20,7 @@
 #include <utility>
 #include <vector>
 
-#ifndef _WIN32
-#include <unistd.h>
-#endif
-
 namespace {
-
-/// How long the start button waits for the instance to leave its not-ready
-/// states before it gives up. Booting the VM is slow; this only bounds it.
-constexpr int k_mumu_ready_timeout_ms = 180000;
-
-/// How long the start button waits for MuMuPlayer's service to answer after the
-/// app is launched. Shorter than a VM boot: this is just an app coming up.
-constexpr int k_mumu_service_timeout_ms = 60000;
 
 /// Where the log file goes, relative to the working directory the app was
 /// started from (the same base `campcat/sources/cpp/assets/` is resolved against). One file per
@@ -69,70 +60,6 @@ constexpr int k_poll_slice_ms = 100;
 /// exit `stop_workers` joins this thread before the window goes down, so a hung
 /// `adb` would otherwise freeze the quit for its full 8s default.
 constexpr int k_poll_adb_timeout_ms = 1500;
-
-/**
- * @brief Wait until the device itself is usable, not merely booted.
- *
- * mumutool reports the instance `running` seconds after `open`; that is the
- * VM, not Android. Callers poll the screen the moment this returns, so
- * reporting early is exactly what makes them screenshot a black screen.
- *
- * @param[in,out] _adb Client to poll with.
- * @param[in] _deadline_ms Budget left, shared with the VM-ready wait.
- * @param[in] _should_stop Polled between attempts; true gives up early.
- * @param[out] _why Last observation, for the failure message.
- * @return True once `sys.boot_completed=1` and `init.svc.bootanim=stopped`.
- */
-bool wait_device_ready(campcat::adb_client &_adb, int _deadline_ms,
-                       const std::function<bool()> &_should_stop,
-                       std::string *_why) {
-    const auto deadline = std::chrono::steady_clock::now() +
-                          std::chrono::milliseconds(_deadline_ms);
-    std::string boot;
-    std::string anim;
-    std::string io_err;
-    const auto prop = [&](const char *_key, std::string *_out) {
-        std::string out;
-        std::string err;
-        if (!_adb.run({"shell", "getprop", _key}, &out, &err, 5000)) {
-            _out->clear();
-            io_err = err.empty() ? out : err;
-            return false;
-        }
-        // getprop answers with a trailing newline, and CRLF on some images. An
-        // unset key is an empty line -- that is "absent", not an error.
-        const auto first = out.find_first_not_of(" \t\r\n");
-        const auto last = out.find_last_not_of(" \t\r\n");
-        *_out = first == std::string::npos ? std::string{}
-                                           : out.substr(first, last - first + 1);
-        return !_out->empty();
-    };
-    while (true) {
-        if (_should_stop && _should_stop()) {
-            *_why = "stopped by the user";
-            return false;
-        }
-        const bool booted = prop("sys.boot_completed", &boot) && boot == "1";
-        // `init.svc.bootanim` does not exist on images that boot with the
-        // animation disabled (MuMu sets `debug.sf.nobootanimation`), so it is
-        // only consulted when it is there at all.
-        const bool anim_done =
-            !prop("init.svc.bootanim", &anim) || anim == "stopped";
-        if (booted && anim_done) {
-            return true;
-        }
-        if (std::chrono::steady_clock::now() >= deadline) {
-            *_why = "device not ready (boot_completed=" +
-                    (boot.empty() ? std::string("?") : boot) + ", bootanim=" +
-                    (anim.empty() ? std::string("?") : anim) + ")" +
-                    (io_err.empty() ? std::string{}
-                                    : ", adb said: " + io_err);
-            return false;
-        }
-        std::this_thread::sleep_for(
-            std::chrono::milliseconds(k_poll_interval_ms));
-    }
-}
 
 bool persist_config_to_disk(const campcat::app_config &_shell_written,
                             const std::filesystem::path &_shell_path,
@@ -291,8 +218,14 @@ void shell_state::run_automation_thread_body(
         if (!addr.empty() && !ok_c) {
             append_log("[adb connect] failed or timeout");
         }
-        auto automator =
-            campcat::make_game_automation(&adb, &_snap_shell, &_snap_ccat);
+        auto automator = campcat::make_game_automation(
+            &adb, &_snap_shell, &_snap_ccat,
+            campcat::make_consult_ask(
+                &adb, &campcat::consult_host(),
+                std::filesystem::path(_snap_shell.config_home)
+                    .parent_path(),
+                _snap_shell.llm.provider,
+                [this]() { return stop_requested.load(); }));
         const auto should_stop = [this]() { return stop_requested.load(); };
         const auto res = automator->run_cycle(should_stop);
         append_log(std::string("[fsm] ok=") + (res.ok ? "true" : "false") +
@@ -371,8 +304,12 @@ void shell_state::run_console_source_job(std::string _source) {
                 const auto should_stop = [this]() {
                     return stop_requested.load();
                 };
+                const auto ask = campcat::make_consult_ask(
+                    &adb, &campcat::consult_host(),
+                    std::filesystem::path(shell.config_home).parent_path(),
+                    shell.llm.provider, should_stop);
                 const auto res = campcat::run_ccat_program(
-                    &adb, &shell, images, script_abs, *prog, should_stop);
+                    &adb, &shell, images, script_abs, *prog, should_stop, ask);
                 append_log(std::string("[console] ok=") +
                            (res.ok ? "true" : "false") + " | " + res.message);
             } catch (const campcat::ccat_lang::parse_error &ex) {
@@ -407,112 +344,27 @@ shell_state::start_mumu_blocking(const std::function<bool()> &_should_stop) {
 }
 
 campcat::mumu_status
-shell_state::mumu_launch_sequence(const campcat::app_config &shell,
+shell_state::mumu_launch_sequence(const campcat::app_config &_shell,
                                   const std::function<bool()> &_should_stop) {
-    const std::string tool = shell.mumu.tool_path;
-    const std::string app = campcat::mumu_app_path(tool);
-    const int index = shell.mumu.device_index;
-    // The app this run launched, if any; feeds the watchdog and is what
-    // the shutdown path quits. Empty keeps somebody else's app alive.
-    std::string app_owned;
-    // `k_mumu_ready_timeout_ms` is one budget for the whole launch, so the
-    // device-ready wait that follows the VM wait gets what is left of it.
-    const auto launch_start = std::chrono::steady_clock::now();
-
-    campcat::mumu_status st = campcat::mumu_query_state(tool, index);
-    if (st.state == campcat::mumu_state::service_down) {
-        // mumutool is only a client of MuMuPlayer's service: with the app down
-        // it cannot answer `info` at all, so the app has to come first.
-        st = campcat::mumu_launch_app(app);
-        if (st.state != campcat::mumu_state::failed) {
-            app_owned = app;
-            {
+    // The sequence lives in `core` so the headless MCP entry point can run it
+    // too; what is the GUI's alone is the bookkeeping below.
+    return campcat::launch_and_wait(
+        _shell, _should_stop,
+        campcat::launch_sink{
+            .log = [this](std::string_view _line) {
+                append_log("[mumu] " + std::string(_line));
+            },
+            .app_launched = [this](const std::string &_app) {
                 std::lock_guard<std::mutex> lk(mumu_mu);
-                mumu_app_started = app;
-            }
-            st = campcat::mumu_wait_service(
-                tool, index, k_mumu_service_timeout_ms, _should_stop);
-        }
-    }
-    if (st.state == campcat::mumu_state::failed) {
-        return st;
-    }
-    if (st.state != campcat::mumu_state::stopped) {
-        // Somebody already had it up. Leave it alone and arm no watchdog:
-        // that would close an instance we did not start. An app we just
-        // launched is still ours to quit; `mumu_app_started` holds that.
-        st.message = "already up";
-        return st;
-    }
-
-    st = campcat::mumu_open(tool, index);
-    if (st.state == campcat::mumu_state::failed) {
-        return st;
-    }
-    st = campcat::mumu_wait_ready(tool, index, k_mumu_ready_timeout_ms,
-                                  _should_stop);
-    // A cancelled wait still leaves an instance we opened booting, so it stays
-    // ours to close on exit. A plain failure arms nothing.
-    const bool cancelled = _should_stop && _should_stop();
-    if (st.state == campcat::mumu_state::failed && !cancelled) {
-        return st;
-    }
-
-    // The emulator picks its adb port, not us, so read it off mumutool and use
-    // it from here on. 0 means this mumutool did not say; adb's default device
-    // is then the best guess.
-    if (!cancelled) {
-        // The VM being `running` says nothing about Android, and callers poll
-        // the screen the moment this returns.
-        const int spent_ms = static_cast<int>(
-            std::chrono::duration_cast<std::chrono::milliseconds>(
-                std::chrono::steady_clock::now() - launch_start)
-                .count());
-        // Asked of mumutool rather than remembered: the port changes with every
-        // launch, so the answer is only good for as long as it is used.
-        const std::string addr =
-            campcat::mumu_adb_address(tool, index);
-        const std::string target = addr.empty() ? shell.adb.serial : addr;
-        if (target.empty()) {
-            // With no `-s` the probes below read whatever device adb happens to
-            // have: a stale `offline` entry makes them fail forever, and a lone
-            // other device would have its boot state answer for ours.
-            st.state = campcat::mumu_state::failed;
-            st.message = "mumutool named no adb port and no serial is set, so "
-                         "the device could not be confirmed ready";
-            append_log("[mumu] " + st.message);
-            return st;
-        }
-        campcat::adb_client conn(shell.adb.path, target);
-        std::string co;
-        std::string ce;
-        conn.connect_remote(addr, 15000, &co, &ce);
-        std::string why;
-        if (!wait_device_ready(conn, k_mumu_ready_timeout_ms - spent_ms,
-                               _should_stop, &why)) {
-            st.state = campcat::mumu_state::failed;
-            st.message = why;
-            append_log("[mumu] launch failed: " + why);
-            return st;
-        }
-    }
-
-    // Spawn first: the watchdog then covers the gap before anything is
-    // recorded. Record either way, so an instance we started is still closed
-    // on a clean exit when no watchdog could be armed.
-    auto wd = campcat::mumu_spawn_watchdog(
-        tool, index, static_cast<long>(::getpid()), app_owned);
-    const bool armed = wd.has_value();
-    {
-        std::lock_guard<std::mutex> lk(mumu_mu);
-        mumu_launched_path = tool;
-        mumu_launched_index = index;
-        mumu_watchdog = std::move(wd);
-    }
-    if (!cancelled && !armed) {
-        st.message = "started, but no watchdog could be armed";
-    }
-    return st;
+                mumu_app_started = _app;
+            },
+            .opened = [this](const std::string &_tool, int _index,
+                             std::optional<campcat::process::child> _wd) {
+                std::lock_guard<std::mutex> lk(mumu_mu);
+                mumu_launched_path = _tool;
+                mumu_launched_index = _index;
+                mumu_watchdog = std::move(_wd);
+            }});
 }
 
 void shell_state::refresh_scheduler_locked(bool _immediate_first_tick) {

@@ -30,7 +30,8 @@ public:
 
 std::unique_ptr<game_automation>
 make_game_automation(adb_api *adb, const app_config *cfg,
-                     const ccat_script_profile *script_bundle) {
+                     const ccat_script_profile *script_bundle,
+                     ccat_lang::ask_handler ask) {
     if (!adb || !cfg) {
         return std::make_unique<unknown_automation_game>(
             "adb_client or app_config missing");
@@ -39,7 +40,8 @@ make_game_automation(adb_api *adb, const app_config *cfg,
         return std::make_unique<unknown_automation_game>(
             "missing ccat_script bundle JSON (load or save profile)");
     }
-    return std::make_unique<ccat_script_automation>(adb, cfg, script_bundle);
+    return std::make_unique<ccat_script_automation>(adb, cfg, script_bundle,
+                                                    std::move(ask));
 }
 
 } // namespace campcat

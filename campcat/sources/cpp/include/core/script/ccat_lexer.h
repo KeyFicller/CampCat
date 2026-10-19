@@ -29,6 +29,7 @@ enum class TokKind {
     KwHome,
     KwRun,
     KwHas,
+    KwAsk,
     KwGoto,
     KwAt,
     KwDefs,

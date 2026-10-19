@@ -4,6 +4,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -44,6 +45,11 @@ struct stmt_exec_outcome {
     /// Set only alongside `tag::error`: the device itself failed, so a condition
     /// must not swallow it.
     bool device = false;
+    /// Set only alongside `tag::error`: the failure is not an answer at all
+    /// (`ask` with nobody to answer, or an answer that was neither yes nor no),
+    /// so a condition must not read it as false either. `device` and this are
+    /// two reasons for the same rule.
+    bool fatal = false;
 
     bool is_ok() const { return kind == tag::ok; }
 
@@ -76,14 +82,16 @@ struct stmt_exec_outcome {
         return o;
     }
 
-    /// `_device` marks a failure of the device rather than of the screen, which
-    /// only a condition reads.
+    /// `_device` marks a failure of the device rather than of the screen, and
+    /// `_fatal` one that is not an answer at all; only a condition reads either.
     static stmt_exec_outcome make_error(std::string _msg,
-                                        bool _device = false) {
+                                        bool _device = false,
+                                        bool _fatal = false) {
         stmt_exec_outcome o;
         o.kind = tag::error;
         o.message = std::move(_msg);
         o.device = _device;
+        o.fatal = _fatal;
         return o;
     }
 };
@@ -110,6 +118,23 @@ struct Stmt {
     exec(CcatInterpreter &_interp,
          const std::function<bool()> &_should_stop) const = 0;
 };
+
+/**
+ * @brief The answer to one `ask()`.
+ *
+ * `value` empty means the question was not answered at all -- no model, no
+ * client, a reply that was neither yes nor no, or a cancel. `error` then says
+ * which, and the script stops: a branch picked by a guess is the one failure
+ * `ask` exists to avoid. An explicit refusal is an answer (`value` false).
+ */
+struct ask_result {
+    std::optional<bool> value;
+    std::string error;
+};
+
+/// Who answers `ask()`. The entry point decides: the local model on a GUI run,
+/// the MCP client on `campcat --mcp`. Null means nobody can.
+using ask_handler = std::function<ask_result(std::string_view)>;
 
 /**
  * @brief Sequence of statements inside `{ ... }`.
@@ -308,6 +333,21 @@ struct WaitUntilStmt final : Stmt {
  */
 struct HasStmt final : Stmt {
     std::string image_path;
+
+    stmt_exec_outcome
+    exec(CcatInterpreter &_interp,
+         const std::function<bool()> &_should_stop) const override;
+};
+
+/**
+ * @brief Ask a yes/no question through the injected handler (`ask("...")`).
+ *
+ * Condition-only, like `has`: an answer nobody gave is not a result the script
+ * can ignore, so it belongs in a branch rather than on its own line.
+ */
+struct AskStmt final : Stmt {
+    /** @brief The question, already decoded from DSL syntax (defs substituted). */
+    std::string message;
 
     stmt_exec_outcome
     exec(CcatInterpreter &_interp,

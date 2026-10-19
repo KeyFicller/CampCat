@@ -4,6 +4,7 @@ add_executable(test_campcat_core cpp/test_approval_gate.cpp
                                  cpp/test_automation_log.cpp
                                  cpp/test_box_snap.cpp
                                  cpp/test_ccat_anchor.cpp
+                                 cpp/test_ccat_ask.cpp
                                  cpp/test_ccat_cond_action.cpp
                                  cpp/test_ccat_condition_walks.cpp
                                  cpp/test_ccat_graph.cpp
@@ -12,8 +13,10 @@ add_executable(test_campcat_core cpp/test_approval_gate.cpp
                                  cpp/test_graph_tools.cpp
                                  cpp/test_llm_host.cpp
                                  cpp/test_llm_protocol.cpp
+                                 cpp/test_mumu_wait.cpp
                                  cpp/test_recents_packages.cpp
                                  cpp/test_region_record.cpp
+                                 cpp/test_script_bridge.cpp
                                  cpp/test_shapes.cpp)
 # `src` is on the path for `llm_tool_schema.h` alone: the tool schemas are what
 # the model is handed, so asserting on them means reading the header that builds

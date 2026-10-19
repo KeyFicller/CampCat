@@ -293,6 +293,42 @@ TEST(LlmProtocol, MemorizeNamesTheAgent) {
     EXPECT_EQ(j["memory"], "notes");
 }
 
+TEST(LlmProtocol, ConsultCarriesTheQuestionAndThePicture) {
+    // The id is the consult's own: the script that asks may have been started
+    // from the Run button, with no turn in flight.
+    const nlohmann::json j = nlohmann::json::parse(
+        campcat::llm_protocol::build_consult(9, "qwen", "is it?", "QUJD"));
+
+    EXPECT_EQ(j["type"], "consult");
+    EXPECT_EQ(j["id"], 9);
+    EXPECT_EQ(j["provider"], "qwen");
+    EXPECT_EQ(j["question"], "is it?");
+    EXPECT_EQ(j["image_b64"], "QUJD");
+}
+
+TEST(LlmProtocol, ConsultResultCarriesYesOrNo) {
+    campcat::llm_protocol::message msg;
+    ASSERT_TRUE(parse_line(
+        campcat::llm_protocol::build_consult_result(9, true, "no", ""), &msg));
+
+    EXPECT_EQ(msg.type, campcat::llm_protocol::message::kind::consult_result);
+    EXPECT_EQ(msg.id, 9);
+    EXPECT_TRUE(msg.ok);
+    EXPECT_EQ(msg.answer, "no");
+}
+
+TEST(LlmProtocol, ConsultResultCarriesTheFailureAndAnEmptyAnswer) {
+    campcat::llm_protocol::message msg;
+    ASSERT_TRUE(parse_line(campcat::llm_protocol::build_consult_result(
+                               3, false, "", "no model"),
+                           &msg));
+
+    EXPECT_EQ(msg.type, campcat::llm_protocol::message::kind::consult_result);
+    EXPECT_FALSE(msg.ok);
+    EXPECT_EQ(msg.answer, "");
+    EXPECT_EQ(msg.error, "no model");
+}
+
 TEST(LlmMemory, TheTwoFilesStayApart) {
     const std::filesystem::path dir =
         std::filesystem::temp_directory_path() / "campcat_memory_apart";

@@ -850,9 +850,11 @@ constexpr int k_default_swipe_ms = 300;
 [[= js::image_result]][[= js::doc{
     .text =
         js::str("Takes a fresh screenshot of the device screen and numbers it. "
-                "Use it before acting on a screen you have not seen since it "
-                "changed. Do not use it for an older frame -- view_shot does "
-                "that without replacing the current screen.")}]] std::string
+                "When a script stops to ask a question, use it to see the "
+                "screen the question is about. To find out which screen the "
+                "device is on, use locate: it answers in one line and returns "
+                "no picture. Do not use it for an older frame -- view_shot "
+                "does that without replacing the current screen.")}]] std::string
     screenshot() {
     adb_api &adb = require_adb();
     cv::Mat bgr;
@@ -1228,6 +1230,53 @@ CPP_REFLECT_TOOL(start_emulator)
 }
 CPP_REFLECT_TOOL(go_home)
 
+/// Run `_prog` and report what happened, with the script's own `log` lines
+/// attached. Shared by `run_script` (source from the model, already approved)
+/// and `run_bundle` (source from a saved bundle), so the two cannot drift on
+/// error wording. `_images_base` is where `tap("x.png")` looks for templates:
+/// a bundle's own directory, as the GUI's Run uses.
+std::string run_parsed(const ccat_lang::Program &_prog,
+                       const std::filesystem::path &_images_base) {
+    // Checked before adb so a refusal above is the reason reported, and so that
+    // path is testable without a device.
+    adb_api &adb = require_adb();
+    if (g_ctx.cfg == nullptr) {
+        throw js::bind_error("no shell config for the script tools");
+    }
+    script_run_guard guard;
+    // Declared before `capture` on purpose: locals die in reverse order, and
+    // this is what keeps the vector alive for the sink's last call.
+    std::vector<std::string> script_logs;
+    [[maybe_unused]] const automation_log::handle capture =
+        automation_log::add_sink([&script_logs](const std::string &_line) {
+            if (std::optional<std::string> text = script_log_text(_line)) {
+                script_logs.push_back(std::move(*text));
+            }
+        });
+    const auto res =
+        run_ccat_program(&adb, g_ctx.cfg, _images_base, {}, _prog,
+                         [] { return g_script_stop.load(); }, g_ctx.ask,
+                         g_ctx.graph);
+    if (!res.ok) {
+        std::string msg =
+            res.message.empty() ? std::string("script failed") : res.message;
+        // A statement that could not see the device is the one failure here the
+        // model can act on (see k_device_hint).
+        if (msg.find("screencap failed") != std::string::npos ||
+            msg.find("adb tap failed") != std::string::npos) {
+            msg += k_device_hint;
+        }
+        // The viewers this hint names do not exist on a play-only server, so
+        // the advice would only send the client looking for them.
+        if (!g_ctx.play_only && msg.find(".png") != std::string::npos) {
+            msg += k_template_hint;
+        }
+        throw js::bind_error(msg + script_log_suffix(script_logs));
+    }
+    return "script ran ok (" + std::to_string(_prog.stmts.size()) +
+           " statements)" + script_log_suffix(script_logs);
+}
+
 [[= js::quiet{.text = js::str("Ran script")}]][[= js::doc{
     .text = js::str(
         "Runs a .ccat script on the device and returns what happened; with "
@@ -1259,43 +1308,60 @@ CPP_REFLECT_TOOL(go_home)
                                            decision.guidance);
         }
     }
-    // Checked before adb so a refusal above is the reason reported, and so that
-    // path is testable without a device.
-    adb_api &adb = require_adb();
-    if (g_ctx.cfg == nullptr) {
-        throw js::bind_error("no shell config for the script tools");
-    }
-    script_run_guard guard;
-    // Declared before `capture` on purpose: locals die in reverse order, and
-    // this is what keeps the vector alive for the sink's last call.
-    std::vector<std::string> script_logs;
-    [[maybe_unused]] const automation_log::handle capture =
-        automation_log::add_sink([&script_logs](const std::string &_line) {
-            if (std::optional<std::string> text = script_log_text(_line)) {
-                script_logs.push_back(std::move(*text));
-            }
-        });
-    const auto res =
-        run_ccat_program(&adb, g_ctx.cfg, g_ctx.script_dir, {}, *prog,
-                         [] { return g_script_stop.load(); });
-    if (!res.ok) {
-        std::string msg =
-            res.message.empty() ? std::string("script failed") : res.message;
-        // A statement that could not see the device is the one failure here the
-        // model can act on (see k_device_hint).
-        if (msg.find("screencap failed") != std::string::npos ||
-            msg.find("adb tap failed") != std::string::npos) {
-            msg += k_device_hint;
-        }
-        if (msg.find(".png") != std::string::npos) {
-            msg += k_template_hint;
-        }
-        throw js::bind_error(msg + script_log_suffix(script_logs));
-    }
-    return "script ran ok (" + std::to_string(prog->stmts.size()) +
-           " statements)" + script_log_suffix(script_logs);
+    return run_parsed(*prog, g_ctx.script_dir);
 }
 CPP_REFLECT_TOOL(run_script)
+
+[[= js::quiet{.text = js::str("Ran bundle {name}")}]][[= js::doc{
+    .text = js::str(
+        "Runs a saved bundle by name, exactly as its main.ccat stands on disk. "
+        "Use it to play a whole skill; list_scripts has the names. With human "
+        "approval on, the run waits for it. To run a script that is not saved "
+        "yet, use run_script.")}]]
+    [[= js::param_docs(
+        js::str("Bundle name, as list_scripts shows it."))]] std::string
+        run_bundle(std::string name) {
+    if (!ccat_lang::safe_leaf_name(name)) {
+        throw js::bind_error("not a bundle name: \"" + name + "\"");
+    }
+    if (!g_ctx.graph.empty() && name.rfind(g_ctx.graph + ".", 0) != 0) {
+        throw js::bind_error("bundle \"" + name + "\" is not part of graph \"" +
+                             g_ctx.graph + "\" (this server serves " +
+                             g_ctx.graph + ")");
+    }
+    std::string source;
+    const std::filesystem::path main =
+        ccat_lang::bundle_main(g_ctx.script_dir, name);
+    {
+        std::ifstream in(main, std::ios::binary);
+        if (!in) {
+            throw js::bind_error("no bundle \"" + name + "\" under the library");
+        }
+        std::ostringstream oss;
+        oss << in.rdbuf();
+        source = oss.str();
+    }
+    if (needs_approval("run_bundle")) {
+        if (!g_ctx.request_approval) {
+            throw js::bind_error(
+                "no human available to approve running the bundle");
+        }
+        llm::approval_request req;
+        req.tool = "run_bundle";
+        req.summary =
+            "Run saved bundle \"" + name + "\":\n\n" + source;
+        const llm::approval_decision decision = g_ctx.request_approval(req);
+        if (!decision.approved) {
+            throw js::bind_error(decision.guidance.empty()
+                                     ? "user rejected running the bundle"
+                                     : "user rejected running the bundle: " +
+                                           decision.guidance);
+        }
+    }
+    const std::unique_ptr<ccat_lang::Program> prog = parse_or_throw(source);
+    return run_parsed(*prog, g_ctx.script_dir / name);
+}
+CPP_REFLECT_TOOL(run_bundle)
 
 /// What the graph `_graph` looks like after a write into it, for the reply:
 /// a broken graph is refused by `goto`, so the author hears about it now.
@@ -1530,6 +1596,12 @@ CPP_REFLECT_TOOL(ccat_help)
     }
     std::string out;
     for (const std::string &name : names) {
+        // One graph per server: another graph's bundles are not on offer, and
+        // naming them would only invite a run that gets refused.
+        if (!g_ctx.graph.empty() &&
+            name.rfind(g_ctx.graph + ".", 0) != 0) {
+            continue;
+        }
         const std::string description =
             ccat_lang::bundle_description(g_ctx.script_dir, name);
         if (!out.empty()) {
@@ -1562,7 +1634,7 @@ CPP_REFLECT_TOOL(ccat_help)
                                     : description) +
                suffix;
     }
-    return out;
+    return out.empty() ? std::string("none yet") : out;
 }
 CPP_REFLECT_TOOL(list_scripts)
 
@@ -2020,6 +2092,53 @@ CPP_REFLECT_TOOL(save_anchor)
 }
 CPP_REFLECT_TOOL(read_graph)
 
+[[= js::doc{
+    .text = js::str(
+        "Answers which screen of this graph the device is on, in one line: "
+        "\"<graph>.<anchor> (page)\", \"(transient)\", \"(popup)\", "
+        "\"unknown\" or \"ambiguous\". Use it only when you do not already "
+        "know which screen the device is on -- before a run to see where it "
+        "starts, or after one to see where it stopped. It taps nothing, and "
+        "it reads the current screenshot rather than taking one. For a "
+        "question a script asked, use screenshot: that is the only reason to "
+        "pull a picture.")}]]
+    [[= js::param_docs(
+        js::str("Graph name, the part before the dot (list_scripts marks it "
+                "<graph>.entry bundle [graph ...])."))]] std::string
+    locate(std::string graph) {
+    if (g_ctx.cfg == nullptr) {
+        throw js::bind_error("no shell config for the script tools");
+    }
+    cv::Mat frame;
+    std::string error;
+    if (!frame_mat(std::nullopt, &frame, &error)) {
+        throw js::bind_error(error);
+    }
+    const ccat_lang::locate_hit hit = locate_on_frame(
+        &require_adb(), g_ctx.cfg, graph, frame, &error);
+    using ccat_lang::locate_kind;
+    const std::string id = graph + "." + hit.id;
+    switch (hit.kind) {
+    case locate_kind::page:
+        return id + " (page)";
+    case locate_kind::transient:
+        return id + " (transient; still settling)";
+    case locate_kind::interrupt:
+        return id + " (popup)";
+    case locate_kind::unknown:
+        return "unknown: no anchor of " + graph + " matches this screen";
+    case locate_kind::ambiguous:
+        return hit.detail.empty()
+                   ? "ambiguous: " + graph +
+                         " has more than one anchor for this screen"
+                   : hit.detail;
+    case locate_kind::error:
+        break;
+    }
+    throw js::bind_error(hit.detail.empty() ? error : hit.detail);
+}
+CPP_REFLECT_TOOL(locate)
+
 [[= js::doc{.text = js::str("Deletes a bundle: its main.ccat and every "
                             "template, which cannot be undone; with human "
                             "approval on, nothing is removed without it. Use "
@@ -2163,6 +2282,11 @@ bool approval_gate_required(const approval_config &_gates,
         return _gates.gates.tap;
     }
     if (_tool == "run_script") {
+        return _gates.gates.run_script;
+    }
+    if (_tool == "run_bundle") {
+        // Reuses the script gate rather than adding a config field: running a
+        // saved bundle moves the device exactly as running source does.
         return _gates.gates.run_script;
     }
     if (_tool == "save_script" || _tool == "save_anchor") {

@@ -75,10 +75,13 @@ cooperative_sleep_ms(int _ms, const std::function<bool()> &_should_stop) {
 CcatInterpreter::CcatInterpreter(adb_api *_adb, const app_config *_cfg,
                                  template_matcher _matcher,
                                  std::filesystem::path _images_base,
-                                 std::filesystem::path _script_path)
+                                 std::filesystem::path _script_path,
+                                 ask_handler _ask,
+                                 std::string _graph_limit)
     : m_adb(_adb), m_cfg(_cfg), m_matcher(std::move(_matcher)),
       m_images_base(std::move(_images_base)),
-      m_script_path(std::move(_script_path)),
+      m_script_path(std::move(_script_path)), m_ask(std::move(_ask)),
+      m_graph_limit(std::move(_graph_limit)),
       m_match_debug_enabled(_cfg && _cfg->match.debug) {
     if (!m_adb || !m_cfg) {
         throw std::invalid_argument("CcatInterpreter requires adb and cfg");
@@ -141,6 +144,13 @@ bool CcatInterpreter::image_matches(const std::string &_rel_path,
     }
     *_found = opt->found;
     return true;
+}
+
+ask_result CcatInterpreter::ask(std::string_view _question) const {
+    if (!m_ask) {
+        return ask_result{std::nullopt, "ask: nobody can answer here"};
+    }
+    return m_ask(_question);
 }
 
 void CcatInterpreter::dump_match_debug(const char *_op,
@@ -589,6 +599,10 @@ RunStmt::exec(CcatInterpreter &_interp,
     if (!ec && abs.filename() == "main.ccat" &&
         abs.parent_path().parent_path() == home) {
         const std::string bundle = abs.parent_path().filename().string();
+        if (const auto why = graph_blocked(_interp.m_graph_limit, bundle)) {
+            return stmt_exec_outcome::make_error(
+                "run " + bundle + ": " + *why, false, true);
+        }
         const bundle_tag tag = bundle_tags(home, bundle);
         if (!tag.edge_of.empty()) {
             const loaded_graph loaded = load_graph(
@@ -683,7 +697,7 @@ IfStmt::exec(CcatInterpreter &_interp,
     }
     // A device failure is not a screen state: let it stop the script rather than
     // read it as `false` and take `else`.
-    if (o.kind == stmt_exec_outcome::tag::error && o.device) {
+    if (o.kind == stmt_exec_outcome::tag::error && (o.device || o.fatal)) {
         return o;
     }
     // `o.value` is what a `run` that answered false -- or a `has` that did not
@@ -710,6 +724,24 @@ HasStmt::exec(CcatInterpreter &_interp,
     // A missing or unreadable template is a plain `false` -- exactly what the old
     // bare-string condition meant.
     return stmt_exec_outcome::make_ok(found);
+}
+
+stmt_exec_outcome
+AskStmt::exec(CcatInterpreter &_interp,
+              const std::function<bool()> &_should_stop) const {
+    if (_should_stop()) {
+        return stmt_exec_outcome::make_stopped();
+    }
+    const ask_result answer = _interp.ask(message);
+    if (!answer.value) {
+        // Fatal, not false: a question nobody answered is not a screen state,
+        // and guessing a branch here is the one mistake this statement exists
+        // to prevent.
+        return stmt_exec_outcome::make_error(
+            answer.error.empty() ? "ask: no answer" : answer.error,
+            /*_device=*/false, /*_fatal=*/true);
+    }
+    return stmt_exec_outcome::make_ok(*answer.value);
 }
 
 stmt_exec_outcome
@@ -779,8 +811,10 @@ DoWhileStmt::exec(CcatInterpreter &_interp,
                 return o;
             }
             // Same device check as `if`: a broken device is not a screen state,
-            // so the loop stops instead of quietly ending.
-            if (o.kind == stmt_exec_outcome::tag::error && o.device) {
+            // so the loop stops instead of quietly ending. `fatal` rides the
+            // same rule for `ask` that nobody answered.
+            if (o.kind == stmt_exec_outcome::tag::error &&
+                (o.device || o.fatal)) {
                 return o;
             }
             again = o.is_ok() && o.value;
@@ -968,6 +1002,10 @@ GotoStmt::exec(CcatInterpreter &_interp,
         return stmt_exec_outcome::make_error(
             "goto target must be \"graph:anchor\"");
     }
+    if (const auto why = graph_blocked(_interp.m_graph_limit, graph_name)) {
+        // Fatal: an `if` must not read a refusal as "not here" and carry on.
+        return stmt_exec_outcome::make_error("goto: " + *why, false, true);
+    }
     const loaded_graph loaded = load_graph(
         std::filesystem::path(_interp.m_cfg->config_home), graph_name);
     if (!loaded.ok) {
@@ -992,6 +1030,9 @@ AtStmt::exec(CcatInterpreter &_interp,
     if (!split_anchor_ref(target, &graph_name, &anchor)) {
         return stmt_exec_outcome::make_error(
             "at target must be \"graph:anchor\"");
+    }
+    if (const auto why = graph_blocked(_interp.m_graph_limit, graph_name)) {
+        return stmt_exec_outcome::make_error("at: " + *why, false, true);
     }
     const loaded_graph loaded = load_graph(
         std::filesystem::path(_interp.m_cfg->config_home), graph_name);

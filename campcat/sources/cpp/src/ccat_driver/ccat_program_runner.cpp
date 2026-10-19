@@ -12,7 +12,9 @@ run_ccat_program(adb_api *_adb, const app_config *_cfg,
                  const std::filesystem::path &_images_base,
                  const std::filesystem::path &_script_path,
                  const ccat_lang::Program &_program,
-                 const std::function<bool()> &_should_stop) {
+                 const std::function<bool()> &_should_stop,
+                 ccat_lang::ask_handler _ask,
+                 std::string _graph_limit) {
     if (!_adb || !_cfg) {
         automation_cycle_result r{};
         r.ok = false;
@@ -23,7 +25,8 @@ run_ccat_program(adb_api *_adb, const app_config *_cfg,
                              _cfg->match.circle_threshold,
                              _cfg->match.multiscale);
     ccat_lang::CcatInterpreter interp(_adb, _cfg, std::move(matcher),
-                                      _images_base, _script_path);
+                                      _images_base, _script_path,
+                                      std::move(_ask), std::move(_graph_limit));
     return interp.run(_program, _should_stop);
 }
 

@@ -18,6 +18,7 @@ import traceback
 from typing import Iterator
 
 import agent.memorier as memorier
+import consult
 import graph
 import models
 import observability
@@ -49,6 +50,11 @@ def handle_request(req: dict) -> Iterator[dict]:
     # Both branches left build a model, so the provider is settled once here.
     # Empty means the host did not say, and models falls back to `.env`.
     models.set_provider(req.get("provider") or "")
+    if rtype == "consult":
+        # A script's `ask()`. Answered without touching the session, because a
+        # turn may be the very thing waiting on it.
+        yield consult.answer(req)
+        return
     if rtype == "memorize":
         # The conversation is already here, so only the current notes cross the
         # wire; the reply carries the rewritten ones back for the host to write.

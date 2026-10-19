@@ -16,7 +16,9 @@
 #include <functional>
 #include <map>
 #include <memory>
+#include <optional>
 #include <string>
+#include <utility>
 
 namespace {
 
@@ -28,6 +30,7 @@ using campcat::ccat_lang::bundle_run;
 using campcat::ccat_lang::bundle_tags;
 using campcat::ccat_lang::create_action_bundle;
 using campcat::ccat_lang::graph_action;
+using campcat::ccat_lang::graph_blocked;
 using campcat::ccat_lang::graph_edge;
 using campcat::ccat_lang::graph_names;
 using campcat::ccat_lang::graph_summary;
@@ -536,10 +539,12 @@ struct device {
     campcat::app_config cfg;
     std::unique_ptr<campcat::ccat_lang::CcatInterpreter> interp;
 
-    explicit device(const toy &_g) {
+    /// `_limit` is the one graph the interpreter may reach; empty for any.
+    explicit device(const toy &_g, std::string _limit = {}) {
         cfg.config_home = _g.dir.string();
         interp = std::make_unique<campcat::ccat_lang::CcatInterpreter>(
-            &adb, &cfg, matcher(), _g.dir, std::filesystem::path{});
+            &adb, &cfg, matcher(), _g.dir, std::filesystem::path{},
+            campcat::ccat_lang::ask_handler{}, std::move(_limit));
     }
     campcat::automation_cycle_result run(const std::string &_source) {
         return interp->run(*parse_program(_source), [] { return false; });
@@ -623,6 +628,55 @@ TEST(CcatGraph, RunPublishesTheBundleWhileItRuns) {
     EXPECT_TRUE(d.run("goto(\"g:b\")").ok);
     EXPECT_EQ(seen, "g.a-b");
     EXPECT_TRUE(running_graph_bundle().empty());
+}
+
+TEST(CcatGraph, GraphBlockedComparesThePrefix) {
+    EXPECT_FALSE(graph_blocked("g", "g").has_value());
+    EXPECT_FALSE(graph_blocked("g", "g.city").has_value());
+    EXPECT_FALSE(graph_blocked("", "other").has_value()) << "no limit, no refusal";
+    const std::optional<std::string> other = graph_blocked("g", "other");
+    ASSERT_TRUE(other.has_value());
+    EXPECT_EQ(*other, "graph \"other\" is outside this server's graph \"g\"");
+    EXPECT_TRUE(graph_blocked("g", "g2.city").has_value())
+        << "a longer name is a different graph";
+}
+
+TEST(CcatGraph, ALimitedServerRefusesAnotherGraphsGoto) {
+    toy g("limit_goto");
+    device d(g, "g");
+    const auto out = d.run("goto(\"other:a\")");
+    EXPECT_FALSE(out.ok);
+    EXPECT_NE(out.message.find("graph \"other\" is outside this server's graph \"g\""),
+              std::string::npos)
+        << out.message;
+}
+
+TEST(CcatGraph, ALimitedServerRefusesAnotherGraphsAt) {
+    toy g("limit_at");
+    device d(g, "g");
+    const auto out = d.run("if (at(\"other:a\")) { log(\"there\") }\n");
+    EXPECT_FALSE(out.ok);
+    EXPECT_NE(out.message.find("outside this server's graph"), std::string::npos)
+        << out.message;
+}
+
+TEST(CcatGraph, ALimitedServerRefusesAnotherGraphsBundle) {
+    toy g("limit_run");
+    write_file(g.dir / "other.x" / "main.ccat", "home\n");
+    device d(g, "g");
+    const auto out = d.run("run(\"other.x/main.ccat\")");
+    EXPECT_FALSE(out.ok);
+    EXPECT_NE(out.message.find("outside this server's graph"), std::string::npos)
+        << out.message;
+}
+
+TEST(CcatGraph, ALimitedServerStillRunsItsOwnGraph) {
+    toy g("limit_own");
+    device d(g, "g");
+    d.adb.frames = {g.frame_a, g.frame_b};
+    EXPECT_TRUE(d.run("run(\"g.a-b/main.ccat\")").ok);
+    d.adb.at = 0;
+    EXPECT_TRUE(d.run("goto(\"g:b\")").ok);
 }
 
 TEST(CcatGraph, RunOnPlainBundleUnchanged) {

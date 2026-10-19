@@ -121,15 +121,15 @@ FetchContent_MakeAvailable(json)
 # business. nlohmann is already provided above, so the library keeps quiet.
 set(CPPREF_WITH_UI     OFF CACHE BOOL "" FORCE)
 set(CPPREF_BUILD_TESTS OFF CACHE BOOL "" FORCE)
-# Its mcp target pulls cpp-httplib and cppcodec, which CampCat does not link. It
-# keeps CPPREF_WITH_LLM on all the same, because cppreflect::json -- the target
-# CampCat does link -- hangs off that option. Upstream fetches both deps itself
-# from github.com; it used to expose CPPREF_HTTPLIB_URL / CPPREF_CPPCODEC_URL to
-# redirect them, and dropped that when it dropped its mirrors.
+# CPPREF_WITH_LLM stays on: `cppreflect::json` (schema + binding) and
+# `cppreflect::mcp` (the `campcat --mcp` server) both hang off it. The mcp target
+# pulls cpp-httplib and cppcodec; upstream fetches both itself from github.com.
+# It used to expose CPPREF_HTTPLIB_URL / CPPREF_CPPCODEC_URL to redirect them,
+# and dropped that when it dropped its mirrors.
 FetchContent_Declare(
   cppreflect26
   GIT_REPOSITORY "https://github.com/KeyFicller/CppReflectKit.git"
-  GIT_TAG        1ac4c8b21624b401862cdde703e8478e86f9159d
+  GIT_TAG        d9ef3c3038d42c77d17ff2d2d7618c223693d853
   GIT_PROGRESS   TRUE
 )
 # No GIT_SHALLOW: a pinned commit is not on a branch tip, and a shallow fetch of
@@ -236,6 +236,7 @@ target_link_libraries(imgui_grapheditor_lib PUBLIC imgui_lib)
 add_library(campcat_core STATIC
   campcat/sources/cpp/src/core/adb/adb_client.cpp
   campcat/sources/cpp/src/core/mumu/mumu_launcher.cpp
+  campcat/sources/cpp/src/core/mumu/mumu_launch.cpp
   campcat/sources/cpp/src/core/vision/template_matcher.cpp
   campcat/sources/cpp/src/core/vision/screen_template_ops.cpp
   campcat/sources/cpp/src/core/vision/box_snap.cpp
@@ -255,7 +256,9 @@ add_library(campcat_core STATIC
   campcat/sources/cpp/src/core/llm/llm_protocol.cpp
   campcat/sources/cpp/src/core/llm/llm_memory.cpp
   campcat/sources/cpp/src/core/llm/llm_tools.cpp
+  campcat/sources/cpp/src/core/llm/llm_consult.cpp
   campcat/sources/cpp/src/core/llm/llm_host.cpp
+  campcat/sources/cpp/src/core/mcp/script_server.cpp
   campcat/sources/cpp/src/ccat_driver/ccat_script_profile.cpp
   campcat/sources/cpp/src/ccat_driver/ccat_script_automation.cpp
   campcat/sources/cpp/src/ccat_driver/ccat_program_runner.cpp
@@ -268,6 +271,9 @@ target_link_libraries(campcat_core PUBLIC
   ${OpenCV_LIBS}
   nlohmann_json::nlohmann_json
   cppreflect::json
+  # PUBLIC: `core/mcp/script_server.h` names `mcp::Server` in the class it
+  # declares, so whoever includes it needs the kit's header and its deps.
+  cppreflect::mcp
 )
 
 # The IME candidate-window fix is Objective-C++, so it stays Apple-only.

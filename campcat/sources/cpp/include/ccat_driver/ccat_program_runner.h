@@ -16,13 +16,18 @@ struct app_config;
 /**
  * @brief Run an already-parsed Program with the same interpreter wiring as file
  * cycles.
+ *
+ * `_ask` answers any `ask(...)` in the program; empty means the entry point has
+ * nobody to ask, which stops the script at the first one.
  */
 automation_cycle_result
 run_ccat_program(adb_api *_adb, const app_config *_cfg,
                  const std::filesystem::path &_images_base,
                  const std::filesystem::path &_script_path,
                  const ccat_lang::Program &_program,
-                 const std::function<bool()> &_should_stop);
+                 const std::function<bool()> &_should_stop,
+                 ccat_lang::ask_handler _ask = {},
+                 std::string _graph_limit = {});
 
 /// Which anchor of `_graph` `_frame` is, with the interpreter wiring above.
 ccat_lang::locate_hit locate_on_frame(adb_api *_adb, const app_config *_cfg,

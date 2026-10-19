@@ -56,6 +56,7 @@ if (has(claim)) { tap(claim) } else { log("no claim") }
 | `run("other.ccat")` | another script, relative to this file | unreadable; cyclic; deeper than 16; callee error |
 | `goto("g:a")` | walk graph `g` to anchor `a` | graph invalid; `a` is not a page; an anchor script fails or two match; three failed hops; adb failure |
 | `at("g:a")` | condition only: one screenshot, true when the screen locates as `a` | not a statement; an invalid graph, a failing anchor script or two matching anchors is an error, not `false` |
+| `ask("question")` | condition only: one screenshot, a yes/no answer about it from the model | not a statement; no answer (no model, non-yes/no, client cannot answer) stops the script |
 
 **A named file that is missing fails the statement**, which is why `tap`, `tap_offset`, `swipe`, `wait_until` and
 `run` need their files to exist first. `has(...)` is the exception (below): a template that is not there is exactly
@@ -181,6 +182,30 @@ until the next button is gone:
 ```ccat
 do { tap("swipe_left.png") } while (has("next_page.png"))
 ```
+
+### Asking the model: `ask`
+
+`ask("question")` is a condition of a different kind: it takes one screenshot and hands it, with the question, to
+the language model, which answers **yes** or **no**. Reach for it only where a template cannot express the test --
+"is this the battle result screen", "does this dialog mean the account is banned". A template is exact,
+millisecond-fast and free; `ask` costs a model call and can be wrong, so `has(...)` wins wherever it can answer.
+
+```ccat
+if (ask("Does the top bar say 维护中 (under maintenance)?")) {
+    log("server maintenance")
+} else {
+    tap("enter.png")
+}
+```
+
+- One question per `ask`, and a script may ask as often as it needs: each `if`, each loop round, each `run` callee.
+- A question the answerer cannot settle **stops the script**; it never becomes a quiet `false`. A wrong guess at a
+  branch is worse than not guessing, which is why this one condition does not follow the "failure is false" rule.
+- A definite "no" is the else branch, so `ask` reads like any other condition.
+- Under `campcat --mcp` a client answers it; in the GUI the local model does. Either way the script waits at the
+  question and resumes where it stopped -- taps and swipes before it are not replayed.
+- Anchors, edges and action scripts cannot use `ask`: a graph is built from what the screen shows, not from an
+  opinion about it.
 
 `while (true)` repeats until a `break` in the body, so it is how you write a loop that ends on a condition of your
 own; it still errors if it reaches 50000 iterations. `while (false)` runs the body once. Nothing is logged for you

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from uuid import uuid4
 
+import consult
 import protocol
 import session
 import transport
@@ -55,6 +56,13 @@ def call_cpp(name: str, args: dict) -> dict:
             raise TurnInterrupted()
         if msg.get("type") == "tool_result" and msg.get("call_id") == call_id:
             return msg
+        # A script this call is running stopped at an `ask()`. Answering it here
+        # is what keeps the round trip nested: the host is blocked on *this*
+        # tool call, so pushing the consult back to the request loop (which is
+        # waiting on us) would deadlock both.
+        if msg.get("type") == "consult":
+            transport.emit(consult.answer(msg))
+            continue
         # `log` lines are the host narrating to itself. An `interrupt` for
         # another request, and anything else, belongs to the request loop,
         # which is blocked inside this very call.

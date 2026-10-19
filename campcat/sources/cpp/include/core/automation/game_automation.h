@@ -4,6 +4,8 @@
 #include <memory>
 #include <string>
 
+#include "core/script/ccat_ast.h"
+
 // Logging uses campcat::automation_log::emit from worker code paths.
 
 namespace campcat {
@@ -45,10 +47,12 @@ public:
  * @param[in] adb Live adb facade (must outlive automation instance usage).
  * @param[in] cfg Loaded shell persistence snapshot.
  * @param[in] script_bundle Concrete profile type; nullable.
+ * @param[in] ask Answers the script's `ask(...)`; empty means nobody can.
  * @return Unique owning pointer, or one that reports the reason it cannot run.
  */
 std::unique_ptr<game_automation>
 make_game_automation(adb_api *adb, const app_config *cfg,
-                     const ccat_script_profile *script_bundle);
+                     const ccat_script_profile *script_bundle,
+                     ccat_lang::ask_handler ask = {});
 
 } // namespace campcat

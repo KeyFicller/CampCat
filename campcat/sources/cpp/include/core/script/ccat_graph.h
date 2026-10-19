@@ -139,6 +139,12 @@ std::vector<std::string> graph_names(const std::filesystem::path &_library);
 bool split_anchor_ref(std::string_view _ref, std::string *_graph,
                       std::string *_anchor);
 
+/// Why the graph `_name` belongs to is outside `_limit`, or nullopt when it is
+/// allowed. `_name` is a graph name or a bundle name: the graph is the part
+/// before the first dot. An empty `_limit` allows everything.
+std::optional<std::string> graph_blocked(std::string_view _limit,
+                                         std::string_view _name);
+
 enum class locate_kind {
     page,       ///< a stable anchor
     transient,  ///< a loading / transition anchor

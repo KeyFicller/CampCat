@@ -126,7 +126,8 @@ const TextEditor::LanguageDefinition &ccat_language() {
             "if",    "else",   "elif",       "tap",      "wait",       "log",
             "swipe", "tap_at", "tap_offset", "swipe_at", "wait_until", "do",
             "while", "loop",   "break",      "return",   "home",       "run",
-            "has",   "goto",   "at",         "defs",     "true",       "false"};
+            "has",   "ask",    "goto",     "at",         "defs",     "true",
+            "false"};
         for (const char *word : keywords) {
             def.mKeywords.insert(word);
         }

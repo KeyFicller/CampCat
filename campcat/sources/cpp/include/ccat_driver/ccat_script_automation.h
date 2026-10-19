@@ -22,9 +22,12 @@ public:
      * (thresholds/pacing).
      * @param[in] _profile Loaded bundle describing `.ccat` location plus PNG
      * roots.
+     * @param[in] _ask Answers the script's `ask(...)`; empty means nobody can,
+     * which stops the script there.
      */
     explicit ccat_script_automation(adb_api *_adb, const app_config *_cfg,
-                                    const ccat_script_profile *_profile);
+                                    const ccat_script_profile *_profile,
+                                    ccat_lang::ask_handler _ask = {});
 
     /**
      * @brief Reload `.ccat` bytes from disk, parse once, interpret until
@@ -40,6 +43,7 @@ private:
     adb_api *m_adb;
     const app_config *m_cfg;
     const ccat_script_profile *m_profile;
+    ccat_lang::ask_handler m_ask;
 };
 
 } // namespace campcat

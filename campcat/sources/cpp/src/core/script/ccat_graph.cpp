@@ -142,6 +142,9 @@ const char *statement_word(const Stmt &_s) {
     if (dynamic_cast<const AtStmt *>(&_s) != nullptr) {
         return "at";
     }
+    if (dynamic_cast<const AskStmt *>(&_s) != nullptr) {
+        return "ask";
+    }
     if (dynamic_cast<const BreakStmt *>(&_s) != nullptr) {
         return "break";
     }
@@ -700,6 +703,19 @@ bool split_anchor_ref(std::string_view _ref, std::string *_graph,
     *_graph = std::string(g);
     *_anchor = std::string(a);
     return true;
+}
+
+std::optional<std::string> graph_blocked(std::string_view _limit,
+                                         std::string_view _name) {
+    if (_limit.empty()) {
+        return std::nullopt;
+    }
+    const std::string_view graph = _name.substr(0, _name.find('.'));
+    if (graph == _limit) {
+        return std::nullopt;
+    }
+    return "graph \"" + std::string(graph) +
+           "\" is outside this server's graph \"" + std::string(_limit) + "\"";
 }
 
 scanned_graph scan_graph(const std::filesystem::path &_library,

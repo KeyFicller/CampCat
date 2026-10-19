@@ -58,6 +58,7 @@ bool is_simple_def_name(const std::string &_name) {
 bool is_cond_action(TokKind _k) {
     switch (_k) {
     case TokKind::KwHas:
+    case TokKind::KwAsk:
     case TokKind::KwGoto:
     case TokKind::KwAt:
     case TokKind::KwTap:
@@ -315,12 +316,15 @@ private:
         return neg ? -v : v;
     }
 
-    std::string parse_log_operand() {
+    /// A message argument: `log`'s payload and `ask`'s question read the same
+    /// way (escaped string, string def, bare word).
+    std::string parse_message(const char *_ctx) {
         Token t = m_lex.peek();
         if (t.kind == TokKind::Ident) {
             if (const DefValue *def = find_def(t.text)) {
                 if (def->kind != DefKind::string) {
-                    fail("log(...): def `" + t.text + "` is not a string");
+                    fail(std::string(_ctx) + ": def `" + t.text +
+                         "` is not a string");
                 }
                 (void)m_lex.next();
                 return def->str;
@@ -328,6 +332,8 @@ private:
         }
         return parse_image_ref();
     }
+
+    std::string parse_log_operand() { return parse_message("log(...)"); }
 
     std::unique_ptr<Stmt> parse_stmt() {
         Token t = m_lex.peek();
@@ -358,6 +364,9 @@ private:
         case TokKind::KwAt:
             fail("at(\"graph:anchor\") is a condition: write it inside if "
                  "(...) or while (...)");
+        case TokKind::KwAsk:
+            fail("ask(\"...\") is a condition: write it inside if (...) or "
+                 "while (...)");
         case TokKind::KwGoto:
             return parse_goto();
         case TokKind::KwDo:
@@ -681,6 +690,8 @@ private:
         switch (m_lex.peek().kind) {
         case TokKind::KwHas:
             return parse_has();
+        case TokKind::KwAsk:
+            return parse_ask();
         case TokKind::KwAt:
             return parse_at();
         case TokKind::KwGoto:
@@ -716,6 +727,18 @@ private:
         auto node = std::make_unique<HasStmt>();
         node->image_path = parse_image_ref();
         expect(TokKind::RParen, "expected ')' after has template");
+        return node;
+    }
+
+    /// `ask("...")`: a yes/no question for the model or the MCP client. Same
+    /// operand rules as `log`, and condition-only like `has` -- an answer that
+    /// never came has to stop the script, which needs a branch to see.
+    std::unique_ptr<AskStmt> parse_ask() {
+        expect(TokKind::KwAsk, "expected ask");
+        expect(TokKind::LParen, "expected '(' after ask");
+        auto node = std::make_unique<AskStmt>();
+        node->message = parse_message("ask(...)");
+        expect(TokKind::RParen, "expected ')' after ask question");
         return node;
     }
 

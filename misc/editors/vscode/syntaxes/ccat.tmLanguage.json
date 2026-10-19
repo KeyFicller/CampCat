@@ -47,7 +47,7 @@
       "name": "keyword.control.ccat"
     },
     "statement": {
-      "match": "(?<![\\w.-])(tap_offset|wait_until|swipe_at|tap_at|swipe|wait|home|tap|log|run|goto|has|at)(?![\\w.-])",
+      "match": "(?<![\\w.-])(tap_offset|wait_until|swipe_at|tap_at|swipe|wait|home|tap|log|run|goto|has|ask|at)(?![\\w.-])",
       "name": "support.function.ccat"
     },
     "defs": {

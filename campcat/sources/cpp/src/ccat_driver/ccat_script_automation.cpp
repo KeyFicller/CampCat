@@ -39,8 +39,8 @@ std::string load_ccat_source(const app_config &_cfg,
 
 ccat_script_automation::ccat_script_automation(
     adb_api *_adb, const app_config *_cfg,
-    const ccat_script_profile *_profile)
-    : m_adb(_adb), m_cfg(_cfg), m_profile(_profile) {
+    const ccat_script_profile *_profile, ccat_lang::ask_handler _ask)
+    : m_adb(_adb), m_cfg(_cfg), m_profile(_profile), m_ask(std::move(_ask)) {
     if (!m_adb || !m_cfg || !m_profile) {
         throw std::invalid_argument(
             "ccat_script_automation requires adb, cfg, ccat_script_profile");
@@ -86,7 +86,7 @@ ccat_script_automation::run_cycle(const std::function<bool()> &_should_stop) {
 
     return run_ccat_program(m_adb, m_cfg,
                             m_profile->images_base(m_cfg->config_home),
-                            script_abs, *prog, _should_stop);
+                            script_abs, *prog, _should_stop, m_ask);
 }
 
 } // namespace campcat

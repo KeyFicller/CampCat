@@ -63,7 +63,7 @@ tag_clone glfw       glfw/glfw.git         3.4
 tag_clone imgui      ocornut/imgui.git     v1.91.8
 tag_clone json       nlohmann/json.git     v3.11.3
 tag_clone googletest google/googletest.git v1.15.2
-sha_clone cppreflect26 KeyFicller/CppReflectKit.git        1ac4c8b21624b401862cdde703e8478e86f9159d
+sha_clone cppreflect26 KeyFicller/CppReflectKit.git        d9ef3c3038d42c77d17ff2d2d7618c223693d853
 tag_clone cpp_httplib  yhirose/cpp-httplib.git v0.60.1
 tag_clone cppcodec     tplgy/cppcodec.git      v0.2
 sha_clone portable_file_dialogs samhocevar/portable-file-dialogs.git c12ea8c9a727f5320a2b4570aee863bbede2a204

@@ -123,6 +123,29 @@ std::string build_memorize_request(long _id, std::string_view _memory,
     return j.dump();
 }
 
+std::string build_consult(long _id, std::string_view _provider,
+                          std::string_view _question,
+                          std::string_view _image_b64) {
+    nlohmann::json j;
+    j["type"] = "consult";
+    j["id"] = _id;
+    j["provider"] = std::string(_provider);
+    j["question"] = std::string(_question);
+    j["image_b64"] = std::string(_image_b64);
+    return j.dump();
+}
+
+std::string build_consult_result(long _id, bool _ok, std::string_view _answer,
+                                 std::string_view _error) {
+    nlohmann::json j;
+    j["type"] = "consult_result";
+    j["id"] = _id;
+    j["ok"] = _ok;
+    j["answer"] = std::string(_answer);
+    j["error"] = std::string(_error);
+    return j.dump();
+}
+
 namespace {
 
 void read_usage(const nlohmann::json &_j, message *_out) {
@@ -211,6 +234,15 @@ bool parse_line(std::string_view _line, message *_out) {
         _out->tool_args_json =
             j.contains("args") ? j["args"].dump() : std::string("{}");
         read_usage(j, _out);
+        return true;
+    }
+
+    if (type == "consult_result") {
+        _out->type = message::kind::consult_result;
+        _out->id = j.value("id", 0L);
+        _out->ok = j.value("ok", false);
+        _out->answer = j.value("answer", std::string());
+        _out->error = j.value("error", std::string());
         return true;
     }
 

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 
-PROTOCOL_VERSION = 9
+PROTOCOL_VERSION = 10
 
 
 def encode(obj: dict) -> str:
@@ -90,3 +90,11 @@ def build_tool_call(rid: object, call_id: str, name: str, args: dict,
     if context is not None:
         msg["context"] = context
     return msg
+
+
+def build_consult_result(rid: object, ok: bool, answer: str = "",
+                         error: str = "") -> dict:
+    """Answer one `consult`. `answer` is "yes" / "no", or empty when the model
+    said neither -- the host turns that into a script error, not a branch."""
+    return {"type": "consult_result", "id": rid, "ok": ok, "answer": answer,
+            "error": error}

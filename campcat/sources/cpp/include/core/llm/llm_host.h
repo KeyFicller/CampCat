@@ -18,6 +18,7 @@
 #include "core/llm/llm_protocol.h"
 #include "core/llm/llm_tools.h"
 #include "core/process.h"
+#include "core/script/ccat_ast.h"
 
 namespace campcat {
 
@@ -136,6 +137,31 @@ public:
     llm_result memorize(const std::filesystem::path &_config_home,
                         const std::string &_provider, llm::memory_kind _kind,
                         int _timeout_ms);
+
+    /**
+     * @brief Ask this host's model one yes/no question about a picture.
+     *
+     * What a `.ccat` `ask(...)` is answered with when a script runs in the GUI.
+     * Deliberately outside the conversation: a script stopping to ask must not
+     * disturb the turn that may be running, so this writes its own `consult`
+     * line and waits on its own slot rather than joining `m_pending_id`'s.
+     *
+     * Blocks the calling thread. Starts the sidecar if it is not running (the
+     * Run button can be the first thing a session does).
+     *
+     * @param[in] _repo_root Repo root the sidecar is found under -- the same
+     * `config_home.parent_path()` a turn takes.
+     * @param[in] _provider Which model provider to ask, as a turn does.
+     * @param[in] _image_b64 PNG of the screen, already base64.
+     * @param[in] _should_stop Polled while waiting, so Stop does not have to
+     * wait out a slow model. An empty function never stops early.
+     * @return The answer, or why there is none. Never throws.
+     */
+    ccat_lang::ask_result consult(const std::filesystem::path &_repo_root,
+                                  std::string_view _provider,
+                                  std::string_view _question,
+                                  std::string_view _image_b64,
+                                  const std::function<bool()> &_should_stop = {});
 
     /**
      * @brief Clear the sidecar's conversation history.
@@ -318,6 +344,20 @@ private:
     llm_protocol::message m_tool_call;
     bool m_has_tool = false;
 
+    /// The one `ask` a script is waiting on, guarded by `m_mu`. A second slot
+    /// rather than fields shared with a turn: on the Run path there is no turn,
+    /// and inside a turn the exchange is not waiting while a tool runs.
+    long m_next_consult_id = 1;
+    long m_consult_pending_id = 0;
+    bool m_has_consult = false;
+    bool m_consult_ok = false;
+    std::string m_consult_answer;
+    std::string m_consult_error;
+    /// Serialises whole lines onto the child's stdin: the Run path's consult
+    /// and the worker's turn are two threads that can write at once, and half a
+    /// line each corrupts the stream.
+    std::mutex m_write_mu;
+
     /// Tool activity for the turn in flight, read by the UI thread.
     int m_tool_calls = 0;
     /// How many `view_crop` calls landed in a row. Worker thread only, same
@@ -361,6 +401,14 @@ private:
     /// Total time spent waiting on humans. Worker-thread only, hence no lock.
     std::chrono::nanoseconds m_approval_wait{0};
 };
+
+/**
+ * @brief The host a GUI script run asks through.
+ *
+ * One instance per process: the conversation page and the Run button have to
+ * reach the same sidecar, or a script's `ask` would start a second one.
+ */
+llm_host &consult_host();
 
 /**
  * @brief One entry of the turn's timeline that is not the model's own words,

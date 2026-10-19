@@ -617,15 +617,19 @@ TEST_F(FrameTools, UnknownShotIsRefusedWithFrameForWording) {
         << reply.error;
 }
 
-TEST(FrameToolsSchema, MarkShotIsOptional) {
+TEST(FrameToolsSchema, ShotIsNullableForTheCurrentScreen) {
+    // The kit marks every parameter required and spells an optional as
+    // `anyOf[T, null]` until it can recover C++ defaults at dispatch time, so
+    // "omit it" survives in the binder (see CropReadsTheNamedFrame) but not in
+    // the schema text: what the model is offered is `null`. Asserting the shape
+    // is what makes a future kit change show up here.
     const campcat::llm::js::tool_entry *entry = tool_named("mark");
     ASSERT_NE(entry, nullptr);
     const auto schema = nlohmann::json::parse(std::string(entry->schema));
-    const auto &params = schema.at("function").at("parameters");
-    EXPECT_TRUE(params.at("properties").contains("shot"));
-    for (const auto &name : params.at("required")) {
-        EXPECT_NE(name.get<std::string>(), "shot");
-    }
+    const auto &shot = schema.at("function").at("parameters").at("properties").at(
+        "shot");
+    ASSERT_TRUE(shot.contains("anyOf")) << shot.dump();
+    EXPECT_EQ(shot.at("anyOf").back().at("type"), "null");
 }
 
 // --- scoring a disc ---------------------------------------------------------

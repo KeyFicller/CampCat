@@ -38,6 +38,7 @@ class CcatInterpreter {
     friend struct SwipeAtStmt;
     friend struct WaitUntilStmt;
     friend struct HasStmt;
+    friend struct AskStmt;
     friend struct GotoStmt;
     friend struct AtStmt;
     friend struct DoWhileStmt;
@@ -58,11 +59,18 @@ public:
      * @param[in] _images_base Directory resolving relative PNG / `run` paths.
      * @param[in] _script_path Absolute path of the entry `.ccat` (for `run`
      * cycle detection).
+     * @param[in] _ask Answers `ask(...)`; empty means nobody can, which makes
+     * an `ask` stop the script rather than pick a branch. Nested `run` shares
+     * it, so a callee asks whoever the caller's entry point chose.
+     * @param[in] _graph_limit Empty allows any graph; otherwise `goto`, `at`
+     * and `run` refuse every graph but this one (see `graph_blocked`).
      */
     CcatInterpreter(adb_api *_adb, const app_config *_cfg,
                     template_matcher _matcher,
                     std::filesystem::path _images_base,
-                    std::filesystem::path _script_path = {});
+                    std::filesystem::path _script_path = {},
+                    ask_handler _ask = {},
+                    std::string _graph_limit = {});
 
     /**
      * @brief Interpret successive statements until completion or first abnormal
@@ -207,6 +215,10 @@ private:
     exec_program_stmts(const Program &_program,
                        const std::function<bool()> &_should_stop);
 
+    /// Ask whoever this interpreter was built with. No handler is not an
+    /// answer: the result says nobody could answer, and `ask` stops the script.
+    ask_result ask(std::string_view _question) const;
+
     void dump_match_debug(const char *_op, const std::filesystem::path &_templ,
                           const cv::Mat &_screen, const match_result &_r);
 
@@ -215,6 +227,9 @@ private:
     template_matcher m_matcher;
     std::filesystem::path m_images_base;
     std::filesystem::path m_script_path;
+    ask_handler m_ask;
+    /// See the constructor: empty allows any graph.
+    std::string m_graph_limit;
     std::vector<std::filesystem::path> m_run_stack;
     int m_match_debug_seq = 0;
     bool m_match_debug_enabled = false;

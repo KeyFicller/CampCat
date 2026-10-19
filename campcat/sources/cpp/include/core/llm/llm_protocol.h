@@ -18,7 +18,9 @@ namespace campcat::llm_protocol {
 /// 8: the host may send `interrupt` in place of a `tool_result` to stop the
 ///    turn, and `result` may carry `interrupted`.
 /// 9: `turn` carries `scripter_memory`, and `memorize` carries `agent`.
-constexpr int k_protocol_version = 9;
+/// 10: `consult` asks the sidecar's model a yes/no about a picture while a
+///     script waits, and `consult_result` answers it.
+constexpr int k_protocol_version = 10;
 
 /**
  * @brief One decoded line from the sidecar's stdout.
@@ -27,7 +29,16 @@ constexpr int k_protocol_version = 9;
  * callers can ignore stray lines instead of treating them as fatal.
  */
 struct message {
-    enum class kind { ready, log, note, result, chunk, tool_call, unknown };
+    enum class kind {
+        ready,
+        log,
+        note,
+        result,
+        chunk,
+        tool_call,
+        consult_result,
+        unknown
+    };
 
     kind type = kind::unknown;
     long id = 0;
@@ -45,6 +56,10 @@ struct message {
     std::string call_id; ///< echoed back in the answering tool_result
     std::string tool_name;
     std::string tool_args_json; ///< the model's raw arguments object, unparsed
+
+    // consult_result: `text` is unused; `ok` and `answer` are the reply
+    /// "yes" / "no", or empty when the model did not answer one of those.
+    std::string answer;
 
     // log
     std::string level;
@@ -173,6 +188,30 @@ std::string build_interrupt_request(long _id);
 std::string build_memorize_request(long _id, std::string_view _memory,
                                    std::string_view _provider,
                                    std::string_view _agent);
+
+/**
+ * @brief Build one `consult` line: a question for the sidecar's model to
+ * answer from the picture, with no conversation state involved.
+ *
+ * Carries its own `id` rather than riding a turn: the script that asks may
+ * have been started from the Run button, with no turn in flight at all.
+ *
+ * @param[in] _repo_root The directory the sidecar is found under; the same one
+ * `run_turn` takes.
+ * @param[in] _provider Which model provider to build, as `turn` does.
+ * @param[in] _question The script's `ask(...)` text, verbatim.
+ * @param[in] _image_b64 PNG bytes of the screen, already base64.
+ */
+std::string build_consult(long _id, std::string_view _provider,
+                          std::string_view _question,
+                          std::string_view _image_b64);
+
+/**
+ * @brief Build one `consult_result` line answering a `consult`.
+ * @param[in] _answer "yes" / "no", or empty when the model did not say either.
+ */
+std::string build_consult_result(long _id, bool _ok, std::string_view _answer,
+                                 std::string_view _error);
 
 /**
  * @brief Parse one sidecar line. Never throws.

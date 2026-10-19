@@ -133,6 +133,17 @@ void llm_host::handle_line(const std::string &_line) {
             m_thinking = m_thinking || msg.thinking;
         }
     } break;
+    case llm_protocol::message::kind::consult_result: {
+        std::lock_guard<std::mutex> lk(m_mu);
+        if (msg.id == m_consult_pending_id) {
+            m_consult_ok = msg.ok;
+            m_consult_answer = msg.answer;
+            m_consult_error = msg.error;
+            m_has_consult = true;
+        }
+    }
+        m_cv.notify_all();
+        break;
     case llm_protocol::message::kind::tool_call: {
         // Queued, not executed: this is the reader thread, and running the tool
         // here would block the very pipe that delivers its result. The waiter
@@ -243,6 +254,9 @@ void llm_host::pump(int _fd, bool _is_stderr) {
 }
 
 bool llm_host::write_all(const std::string &_data, std::string *_error_out) {
+    // One whole line at a time: a script's `ask` and a turn can write from two
+    // threads, and interleaved halves of two lines break the stream for both.
+    std::lock_guard<std::mutex> write_lk(m_write_mu);
     const int fd = m_child.in();
     if (fd < 0) {
         if (_error_out) {
@@ -634,6 +648,87 @@ llm_result llm_host::memorize(const std::filesystem::path &_config_home,
     return r;
 }
 
+ccat_lang::ask_result
+llm_host::consult(const std::filesystem::path &_repo_root,
+                  std::string_view _provider, std::string_view _question,
+                  std::string_view _image_b64,
+                  const std::function<bool()> &_should_stop) {
+    ccat_lang::ask_result answer;
+    std::string err;
+    // The Run button can be the first thing a session does, so this starts the
+    // sidecar exactly as a turn would.
+    if (!ensure_running(_repo_root, &err)) {
+        answer.error = "ask: no model to ask (" + err + ")";
+        return answer;
+    }
+
+    long id = 0;
+    {
+        std::lock_guard<std::mutex> lk(m_mu);
+        id = m_next_consult_id++;
+        m_consult_pending_id = id;
+        m_has_consult = false;
+        m_consult_ok = false;
+        m_consult_answer.clear();
+        m_consult_error.clear();
+    }
+    if (!write_all(llm_protocol::build_consult(id, _provider, _question,
+                                               _image_b64) +
+                       "\n",
+                   &err)) {
+        teardown();
+        answer.error = "ask: no model to ask (" + err + ")";
+        return answer;
+    }
+
+    std::unique_lock<std::mutex> lk(m_mu);
+    // Polled rather than waited on once: a model can take a while, and Stop has
+    // to be able to say so before the reply lands.
+    while (!m_has_consult && !m_broken &&
+           !(_should_stop && _should_stop())) {
+        m_cv.wait_for(lk, std::chrono::milliseconds(k_poll_slice_ms));
+    }
+    if (!m_has_consult) {
+        const bool broken = m_broken;
+        m_consult_pending_id = 0;
+        lk.unlock();
+        if (broken) {
+            teardown();
+            answer.error = "ask: the sidecar exited before answering";
+        } else {
+            answer.error = "ask: stopped";
+        }
+        return answer;
+    }
+    const bool ok = m_consult_ok;
+    const std::string said = m_consult_answer;
+    const std::string why = m_consult_error;
+    m_consult_pending_id = 0;
+    lk.unlock();
+
+    if (!ok) {
+        answer.error = "ask: " + (why.empty() ? std::string("the model did "
+                                                           "not answer")
+                                              : why);
+        return answer;
+    }
+    // Only the two words count. Anything else is `ask` refusing to guess,
+    // which is the whole reason the model is told to say "unsure".
+    if (said == "yes") {
+        answer.value = true;
+    } else if (said == "no") {
+        answer.value = false;
+    } else {
+        answer.error = "ask: the answer was not yes or no";
+    }
+    return answer;
+}
+
+llm_host &consult_host() {
+    static llm_host host;
+    return host;
+}
+
 llm_result llm_host::reset(const std::filesystem::path &_repo_root) {
     llm_result r;
     // The session is over: the screenshot goes with it, and so do the numbered
@@ -688,6 +783,8 @@ void llm_host::teardown() {
     m_stopping = false;
     m_has_result = false;
     m_has_tool = false;
+    m_has_consult = false;
+    m_consult_pending_id = 0;
     m_protocol_mismatch.clear();
     m_events.clear();
     m_event_images.clear();
@@ -752,6 +849,20 @@ llm_result llm_host::memorize(const std::filesystem::path &,
     llm_result r;
     r.error = "the LLM sidecar is not supported on Windows";
     return r;
+}
+
+ccat_lang::ask_result llm_host::consult(const std::filesystem::path &,
+                                        std::string_view, std::string_view,
+                                        std::string_view,
+                                        const std::function<bool()> &) {
+    ccat_lang::ask_result r;
+    r.error = "ask: the LLM sidecar is not supported on Windows";
+    return r;
+}
+
+llm_host &consult_host() {
+    static llm_host host;
+    return host;
 }
 
 llm_result llm_host::reset(const std::filesystem::path &) {

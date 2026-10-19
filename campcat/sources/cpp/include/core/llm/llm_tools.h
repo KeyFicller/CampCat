@@ -10,6 +10,7 @@
 
 #include "core/app_config.h"
 #include "core/mumu_launcher.h"
+#include "core/script/ccat_ast.h"
 
 namespace campcat {
 class adb_api;
@@ -149,6 +150,16 @@ struct tool_context {
     std::function<campcat::mumu_status(
         const std::function<bool()> &_should_stop)>
         start_emulator;
+    /// Answers the script's `ask(...)`. Empty means nobody can, and the script
+    /// stops there rather than picking a branch: the shell supplies the local
+    /// model's answerer, `campcat --mcp` supplies the MCP client's.
+    ccat_lang::ask_handler ask;
+    /// Empty = the whole library; otherwise the tools and the scripts may only
+    /// touch bundles named "<graph>.".
+    std::string graph;
+    /// This process only plays: a template failure must not point at the
+    /// writing tools or the viewer tools, which it does not have.
+    bool play_only = false;
 };
 
 /// Outcome of one tool call. `image_png` is set only by image-returning tools

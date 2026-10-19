@@ -1,6 +1,7 @@
 #include <algorithm>
 #include <csignal>
 #include <cstdio>
+#include <cstdlib>
 #include <filesystem>
 #include <string>
 #include <utility>
@@ -32,6 +33,7 @@
 #include "core/app_config.h"
 #include "core/automation_log.h"
 #include "core/llm/llm_tools.h"
+#include "core/mcp/script_server.h"
 
 namespace {
 
@@ -41,6 +43,9 @@ using campcat::app::font_role;
 using campcat::app::fonts_get;
 
 constexpr char k_default_config_relative[] = "config.json";
+
+/// The port `--mcp-http` listens on when none is named.
+constexpr int k_default_mcp_http_port = 8787;
 
 /// The dot diameter and the gap after it, in ems of the current font. The dot
 /// sits on the text's midline, so it reads as a bullet rather than a stray dot.
@@ -76,6 +81,34 @@ void draw_chip(const campcat::activity_status &_status) {
     ImGui::TextColored(col, "%s", _status.label);
 }
 
+/// The MCP faces take `--graph <name>` anywhere after the mode token. The other
+/// tokens keep their old positions, so `--mcp-http 8787 config.json` and
+/// `--mcp-http --graph stzb 8787 config.json` mean the same thing.
+/// @return false when `--graph` is missing or has no value.
+bool take_graph(int _argc, char **_argv, int _from, std::string *_graph,
+                std::vector<std::string> *_rest) {
+    for (int i = _from; i < _argc; ++i) {
+        if (std::string(_argv[i]) == "--graph") {
+            if (i + 1 >= _argc) {
+                return false;
+            }
+            *_graph = _argv[++i];
+            continue;
+        }
+        _rest->push_back(_argv[i]);
+    }
+    return !_graph->empty();
+}
+
+/// Two lines, printed when `--graph` is missing: the one thing a client author
+/// has to add, and where it goes.
+void print_mcp_usage() {
+    std::fprintf(stderr,
+                 "campcat: --graph <name> is required for --mcp and --mcp-http\n"
+                 "usage: campcat --mcp --graph <name> [config.json]\n"
+                 "       campcat --mcp-http [port] --graph <name> [config.json]\n");
+}
+
 } // namespace
 
 int main(int argc, char **argv) {
@@ -86,6 +119,37 @@ int main(int argc, char **argv) {
 #ifndef _WIN32
     std::signal(SIGPIPE, SIG_IGN);
 #endif
+
+    // The MCP face: run saved bundles for another agent, over stdio. No window,
+    // no device poll, no scheduler -- and nothing that writes to the library.
+    if (argc >= 2 && std::string(argv[1]) == "--mcp") {
+        std::string graph;
+        std::vector<std::string> rest;
+        if (!take_graph(argc, argv, 2, &graph, &rest)) {
+            print_mcp_usage();
+            return 2;
+        }
+        return campcat::serve_script_mcp(
+            std::filesystem::path(rest.empty() ? k_default_config_relative
+                                               : rest[0]),
+            std::move(graph));
+    }
+    // The same face over Streamable HTTP, on the loopback address only: this
+    // machine, or a reverse proxy in front of it that terminates TLS.
+    if (argc >= 2 && std::string(argv[1]) == "--mcp-http") {
+        std::string graph;
+        std::vector<std::string> rest;
+        if (!take_graph(argc, argv, 2, &graph, &rest)) {
+            print_mcp_usage();
+            return 2;
+        }
+        const int port = rest.size() >= 1 ? std::atoi(rest[0].c_str())
+                                          : k_default_mcp_http_port;
+        return campcat::serve_script_mcp(
+            std::filesystem::path(rest.size() >= 2 ? rest[1]
+                                                   : k_default_config_relative),
+            std::move(graph), port);
+    }
 
     const std::filesystem::path cfg_path =
         std::filesystem::path(argc >= 2 ? argv[1] : k_default_config_relative);

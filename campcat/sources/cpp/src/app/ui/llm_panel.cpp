@@ -173,7 +173,7 @@ std::thread g_thread;
 /// The last consolidation, run at shutdown. A thread of its own because it is
 /// deliberately not joined where `g_thread` is: the window has to close first.
 std::thread g_shutdown_thread;
-campcat::llm_host g_host;
+campcat::llm_host &g_host = campcat::consult_host();
 std::mutex g_done_mu;
 /// More than one job can finish before the UI draws: a turn that ended on its
 /// own, then the message that was queued behind it. A single slot would drop
