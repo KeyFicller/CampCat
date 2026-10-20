@@ -48,6 +48,5 @@
   "scheduler": {
     "interval_seconds": 300,
     "jitter_seconds": 7
-  },
-  "script_bundle": "stzb.recruit.coin_once"
+  }
 }

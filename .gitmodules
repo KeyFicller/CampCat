@@ -16,4 +16,5 @@
 [submodule "ccat_library"]
 	path = ccat_library
 	url = https://github.com/KeyFicller/CampCat-Packs.git
+	branch = demo
 	update = none
