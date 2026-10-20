@@ -20,3 +20,4 @@ imgui.ini
 /training_data/
 /.worktrees/
 /logs/
+.backup
