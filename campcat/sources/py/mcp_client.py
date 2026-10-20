@@ -4,7 +4,8 @@
     START -> agent -> act -> agent -> ... -> END
 
 `agent` is the model with the server's own tools bound; `act` runs whatever it
-asked for over `POST /mcp`. The message list lives in a checkpointer, so a second
+asked for through the official MCP client, which also carries a script's
+questions back to `answer`. The message list lives in a checkpointer, so a second
 line typed at the prompt continues the same conversation.
 
 Nothing here restates the library: the tool schemas come from `tools/list` and
@@ -21,14 +22,16 @@ through `models.py`, the same ones the sidecar uses.
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import json
 import os
 import time
-import urllib.error
-import urllib.request
+from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Annotated, Any, TypedDict
 
+import httpx2
 from langchain_core.messages import (
     BaseMessage,
     HumanMessage,
@@ -38,24 +41,26 @@ from langchain_core.messages import (
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import add_messages
+from mcp import Client, types
+from mcp.client import ClientRequestContext
+from mcp.client.streamable_http import streamable_http_client
 
 import models
 
 URL = os.environ.get("CAMPCAT_MCP_URL", "http://127.0.0.1:8787/mcp")
-# Must match the kit's `kProtocolVersion`; it bumps with CppReflectKit.
-PROTOCOL = "2026-07-28"
-# The server is started by hand or by a launch config, so the first request may
+# The server is started by hand or by a launch config, so the first connect may
 # arrive before it is listening.
 WAIT_SECONDS = 60.0
-# Loopback only, so the system proxy is never right here: a Clash-style proxy
-# answers a local port it cannot reach with 502, which reads as the server
-# rejecting the request.
-_OPEN = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
 # Kept off the model's tool list: a picture is ~1000 tokens and turns "where am
-# I" into a look-around. `_answer` pulls one over HTTP itself when a script asks
-# a question, so the tool stays on the wire; only the model cannot reach for it.
+# I" into a look-around. `answer` pulls one when a script asks a question, so the
+# tool stays on the wire; only the model cannot reach for it.
 HIDDEN_FROM_MODEL = {"screenshot"}
+
+# A bundle runs as long as its script does, so one request spans it. httpx's
+# own default is a 5-second read, and a timeout there surfaces as a bare
+# `CancelledError` from the transport's task group, not as `ReadTimeout`.
+TIMEOUT = httpx2.Timeout(30.0, read=600.0)
 
 # One question, one picture, one word -- the same bar the sidecar's `consult`
 # holds a script's `ask` to. A wrong guess picks a wrong branch.
@@ -66,58 +71,49 @@ ASK_SYSTEM = (
 )
 
 
-def post(method: str, params: dict, name: str | None = None) -> dict:
-    """Sends one JSON-RPC request to the server and returns its `result`."""
-    headers = {
-        "Content-Type": "application/json",
-        "Accept": "application/json, text/event-stream",
-        "Mcp-Method": method,
-        "MCP-Protocol-Version": PROTOCOL,
-    }
-    if name is not None:
-        # The server refuses a body whose name disagrees with this header.
-        headers["Mcp-Name"] = name
-    body = {
-        "jsonrpc": "2.0",
-        "id": 1,
-        "method": method,
-        "params": {
-            **params,
-            "_meta": {
-                "io.modelcontextprotocol/protocolVersion": PROTOCOL,
-                # Without this the server tells the script nobody can answer
-                # its `ask`, rather than asking us.
-                "io.modelcontextprotocol/clientCapabilities": {
-                    "elicitation": {"form": {}}
-                },
-            },
-        },
-    }
+def _refused(error: BaseException) -> bool:
+    """A port nobody is listening on yet, however the transport wrapped it.
+
+    The SDK raises from inside a task group, so the useful exception arrives
+    inside an `ExceptionGroup` rather than on its own.
+    """
+    if isinstance(error, (httpx2.ConnectError, httpx2.ConnectTimeout)):
+        return True
+    return isinstance(error, BaseExceptionGroup) and all(
+        _refused(inner) for inner in error.exceptions
+    )
+
+
+def _cause(error: BaseException) -> BaseException:
+    """The first leaf of an `ExceptionGroup`, which is the one worth printing."""
+    while isinstance(error, BaseExceptionGroup) and error.exceptions:
+        error = error.exceptions[0]
+    return error
+
+
+@contextlib.asynccontextmanager
+async def connect() -> AsyncIterator[Client]:
+    """A client for the server, waiting for it to start listening."""
     deadline = time.monotonic() + WAIT_SECONDS
     told = False
     while True:
-        request = urllib.request.Request(
-            URL, data=json.dumps(body).encode(), headers=headers
-        )
         try:
-            # A bundle runs as long as its script does, so one request spans it.
-            with _OPEN.open(request, timeout=600) as reply:
-                document = json.loads(reply.read())
-            break
-        except urllib.error.HTTPError as error:
-            detail = json.loads(error.read() or b"{}").get("error", {})
-            raise SystemExit(f"{detail.get('code')}: {detail.get('message')}") from None
-        except urllib.error.URLError as error:
+            # Loopback only, so the system proxy is never right here: a
+            # Clash-style proxy answers a local port it cannot reach with 502.
+            async with httpx2.AsyncClient(timeout=TIMEOUT, trust_env=False) as http:
+                transport = streamable_http_client(URL, http_client=http)
+                async with Client(transport, elicitation_callback=answer) as client:
+                    yield client
+                    return
+        except Exception as error:  # noqa: BLE001 - only a refused port is retried
+            if not _refused(error):
+                raise
             if time.monotonic() >= deadline:
-                raise SystemExit(f"{URL}: {error.reason}") from None
+                raise SystemExit(f"{URL}: {_cause(error)}") from None
             if not told:
                 print(f"waiting for {URL}", flush=True)
                 told = True
-            time.sleep(0.2)
-    if "error" in document:
-        error = document["error"]
-        raise RuntimeError(f"{error.get('code')}: {error.get('message')}")
-    return document["result"]
+            await asyncio.sleep(0.2)
 
 
 def message_text(content: Any) -> str:
@@ -133,21 +129,27 @@ def message_text(content: Any) -> str:
     return "\n".join(written)
 
 
-def _blocks(result: dict) -> list[dict]:
-    return [block for block in result.get("content", []) if isinstance(block, dict)]
-
-
-def _written(blocks: list[dict]) -> str:
+def _written(blocks: list[types.ContentBlock]) -> str:
     written = []
     for block in blocks:
-        if block.get("type") == "text":
-            written.append(block.get("text", ""))
+        if block.type == "text":
+            written.append(block.text)
         else:
-            written.append(f"[{block.get('type')} {block.get('mimeType', '')}]")
+            written.append(f"[{block.type} {getattr(block, 'mime_type', '')}]")
     return "\n".join(written)
 
 
-def _pictures(blocks: list[dict]) -> list[BaseMessage]:
+def _picture(block: types.ImageContent) -> dict:
+    """One image block as the message content LangChain sends to the model."""
+    return {
+        "type": "image_url",
+        "image_url": {
+            "url": f"data:{block.mime_type};base64,{block.data}",
+        },
+    }
+
+
+def _pictures(blocks: list[types.ContentBlock]) -> list[BaseMessage]:
     """Image blocks as picture messages, which follow every tool result.
 
     LangChain refuses a request that puts anything between an assistant's tool
@@ -155,7 +157,7 @@ def _pictures(blocks: list[dict]) -> list[BaseMessage]:
     """
     pictures: list[BaseMessage] = []
     for block in blocks:
-        if block.get("type") != "image" or not block.get("data"):
+        if block.type != "image":
             pictures.append(
                 HumanMessage(content=[{"type": "text", "text": "no picture came back"}])
             )
@@ -164,112 +166,68 @@ def _pictures(blocks: list[dict]) -> list[BaseMessage]:
             HumanMessage(
                 content=[
                     {"type": "text", "text": "the screen as it is now"},
-                    {
-                        "type": "image_url",
-                        "image_url": {
-                            "url": "data:"
-                            + block.get("mimeType", "image/png")
-                            + ";base64,"
-                            + block["data"]
-                        },
-                    },
+                    _picture(block),
                 ]
             )
         )
     return pictures
 
 
-def _answer(question: str) -> bool | None:
-    """The model's yes/no about the screen now; None when it cannot tell."""
-    screen = post("tools/call", {"name": "screenshot", "arguments": {}}, "screenshot")
-    content: list[dict] = [{"type": "text", "text": question}]
-    for block in _blocks(screen):
-        if block.get("type") == "image" and block.get("data"):
-            content.insert(
-                0,
-                {
-                    "type": "image_url",
-                    "image_url": {
-                        "url": "data:"
-                        + block.get("mimeType", "image/png")
-                        + ";base64,"
-                        + block["data"]
-                    },
-                },
-            )
-    reply = models.build_chat_model().invoke(
+async def answer(
+    context: ClientRequestContext, params: types.ElicitRequestParams
+) -> types.ElicitResult:
+    """The model's yes/no about the screen now; a cancel when it cannot tell."""
+    screen = await context.session.call_tool("screenshot", {})
+    content: list[dict] = [{"type": "text", "text": params.message}]
+    for block in screen.content:
+        if block.type == "image":
+            content.insert(0, _picture(block))
+    reply = await models.build_chat_model().ainvoke(
         [SystemMessage(content=ASK_SYSTEM), HumanMessage(content=content)]
     )
     word = message_text(reply.content).strip().strip(".").lower()
-    return {"yes": True, "no": False}.get(word)
+    if word not in ("yes", "no"):
+        # A guess picks a branch the user may not want; a cancelled run says the
+        # screen did not show enough, which is what happened.
+        print(f"  ask: {params.message} -> unsure, cancelling", flush=True)
+        return types.ElicitResult(action="cancel")
+    print(f"  ask: {params.message} -> {word}", flush=True)
+    return types.ElicitResult(action="accept", content={"answer": word == "yes"})
 
 
-def run_bundle(name: str) -> tuple[str, list[dict]]:
-    """Plays a bundle, answering its questions from the screen until it ends."""
-    carry: dict = {}
-    while True:
-        result = post(
-            "tools/call",
-            {"name": "run_bundle", "arguments": {"name": name}, **carry},
-            "run_bundle",
-        )
-        blocks = _blocks(result)
-        if result.get("resultType") != "input_required":
-            return _written(blocks), blocks
-        question = result["inputRequests"]["elicit"]["params"]["message"]
-        answer = _answer(question)
-        if answer is None:
-            # A guess picks a branch the user may not want; a cancelled run says
-            # the screen did not show enough, which is what happened.
-            print(f"  ask: {question} -> unsure, cancelling", flush=True)
-            carry = {"inputResponses": {"elicit": {"action": "cancel"}}}
-        else:
-            print(f"  ask: {question} -> {'yes' if answer else 'no'}", flush=True)
-            carry = {
-                "inputResponses": {
-                    "elicit": {"action": "accept", "content": {"answer": answer}}
-                }
-            }
+async def tool_specs(client: Client) -> list[dict]:
+    """The server's tools as LangChain function schemas, minus the screenshot."""
+    listed = await client.list_tools()
+    return [
+        {
+            "type": "function",
+            "function": {
+                "name": tool.name,
+                "description": tool.description or "",
+                "parameters": tool.input_schema or {"type": "object"},
+            },
+        }
+        for tool in listed.tools
+        if tool.name not in HIDDEN_FROM_MODEL
+    ]
 
 
-def execute(name: str, args: dict) -> tuple[str, list[dict]]:
+async def execute(
+    client: Client, name: str, args: dict
+) -> tuple[str, list[types.ContentBlock]]:
     """One tool call on the server. A failure comes back as the tool's result."""
-    if name == "run_bundle":
-        return run_bundle(str(args.get("name", "")))
-    result = post("tools/call", {"name": name, "arguments": args}, name)
-    blocks = _blocks(result)
-    text = _written(blocks)
-    if result.get("isError"):
+    result = await client.call_tool(name, args)
+    text = _written(result.content)
+    if result.is_error:
         text = "error: " + text
-    return text, blocks
+    return text, result.content
 
 
 class Chat(TypedDict, total=False):
     messages: Annotated[list, add_messages]
 
 
-def agent(state: Chat) -> dict:
-    """One model round, with the server's tools on offer."""
-    schemas = post("tools/list", {})["tools"]
-    offered = [
-        {
-            "type": "function",
-            "function": {
-                "name": tool["name"],
-                "description": tool.get("description", ""),
-                "parameters": tool.get("inputSchema") or {"type": "object"},
-            },
-        }
-        for tool in schemas
-        if tool["name"] not in HIDDEN_FROM_MODEL
-    ]
-    model = models.build_chat_model()
-    if offered:
-        model = model.bind_tools(offered)
-    return {"messages": [model.invoke(state["messages"])]}
-
-
-def act(state: Chat) -> dict:
+async def act(client: Client, state: Chat) -> dict:
     """Every tool call on the last message, then the pictures they returned."""
     calls = getattr(state["messages"][-1], "tool_calls", None) or []
     results: list[BaseMessage] = []
@@ -279,7 +237,7 @@ def act(state: Chat) -> dict:
         args = call.get("args") or {}
         print(f"  tool: {name} {json.dumps(args, ensure_ascii=False)}", flush=True)
         try:
-            text, blocks = execute(name, args)
+            text, blocks = await execute(client, name, args)
         except Exception as exc:  # noqa: BLE001 - the model gets to correct it
             text, blocks = f"error: {exc}", []
         results.append(ToolMessage(content=text, tool_call_id=call.get("id", "")))
@@ -291,42 +249,52 @@ def route(state: Chat) -> str:
     return "act" if getattr(state["messages"][-1], "tool_calls", None) else END
 
 
-def build_graph():
+def build_graph(client: Client, offered: list[dict]):
+    async def agent(state: Chat) -> dict:
+        """One model round, with the server's tools on offer."""
+        model = models.build_chat_model()
+        if offered:
+            model = model.bind_tools(offered)
+        return {"messages": [await model.ainvoke(state["messages"])]}
+
+    async def act_node(state: Chat) -> dict:
+        return await act(client, state)
+
     graph = StateGraph(Chat)
     graph.add_node("agent", agent)
-    graph.add_node("act", act)
+    graph.add_node("act", act_node)
     graph.add_edge(START, "agent")
     graph.add_conditional_edges("agent", route, {"act": "act", END: END})
     graph.add_edge("act", "agent")
     return graph.compile(checkpointer=MemorySaver())
 
 
-def system_prompt() -> str:
-    """The server's own guide, so this client never has to restate it."""
-    return post("server/discover", {}).get("instructions", "")
-
-
-def main() -> int:
+async def main() -> int:
     models.load_env_file(Path(__file__).resolve().parents[3] / ".env")
-    graph = build_graph()
-    config = {"configurable": {"thread_id": "cli"}}
-    graph.update_state(
-        config, {"messages": [SystemMessage(content=system_prompt())]}
-    )
-    print("CampCat MCP agent. 'exit' or Ctrl-D leaves.")
-    while True:
-        try:
-            line = input("\n> ").strip()
-        except EOFError:
-            print()
-            return 0
-        if line in ("exit", "quit"):
-            return 0
-        if not line:
-            continue
-        state = graph.invoke({"messages": [HumanMessage(content=line)]}, config)
-        print("\n" + (message_text(state["messages"][-1].content) or "(no answer)"))
+    async with connect() as client:
+        graph = build_graph(client, await tool_specs(client))
+        config = {"configurable": {"thread_id": "cli"}}
+        # The server's own guide, so this client never has to restate it.
+        graph.update_state(
+            config, {"messages": [SystemMessage(content=client.instructions or "")]}
+        )
+        print("CampCat MCP agent. 'exit' or Ctrl-D leaves.")
+        while True:
+            try:
+                # Off the loop: the MCP session keeps running while a human types.
+                line = (await asyncio.to_thread(input, "\n> ")).strip()
+            except EOFError:
+                print()
+                return 0
+            if line in ("exit", "quit"):
+                return 0
+            if not line:
+                continue
+            state = await graph.ainvoke(
+                {"messages": [HumanMessage(content=line)]}, config
+            )
+            print("\n" + (message_text(state["messages"][-1].content) or "(no answer)"))
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(asyncio.run(main()))

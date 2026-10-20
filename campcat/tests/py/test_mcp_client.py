@@ -1,136 +1,138 @@
 """`mcp_client`: the LangGraph loop and what it does with a script's question.
 
-The transport is four headers and a JSON body, and the server rejects a wrong one
-loudly, so it is not what breaks here. Two things are: an answer has to reach the
-server as `inputResponses.elicit` on a retry of the same call, and the tool
-results have to reach the model in the one order LangChain accepts.
+The wire is the MCP SDK's now, so what is left to check here is ours: an answer
+has to reach the server as an `ElicitResult`, and the tool results have to reach
+the model in the one order LangChain accepts.
 """
 
-import mcp_client
+import pytest
 from conftest import ScriptedModel
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+from mcp import types
+
+import mcp_client
 
 _PNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8AAAwAB/AF+pA7d"
 
 
-def _asked(message="Is it?"):
-    return {
-        "resultType": "input_required",
-        "inputRequests": {"elicit": {"params": {"message": message}}},
-    }
+class _Client:
+    """Stands in for `mcp.Client`: records calls, answers from `by_name`."""
+
+    def __init__(self, by_name=None, tools=()):
+        self.by_name = {
+            name: list(replies) for name, replies in (by_name or {}).items()
+        }
+        self.tools = list(tools)
+        self.calls = []
+
+    async def list_tools(self):
+        return types.ListToolsResult(tools=self.tools)
+
+    async def call_tool(self, name, arguments=None):
+        self.calls.append((name, arguments))
+        return self.by_name[name].pop(0)
 
 
-def _completed(text="ran"):
-    return {"content": [{"type": "text", "text": text}], "isError": False}
+class _Context:
+    """What `answer` reaches through the request context."""
 
-
-def _screen():
-    return {"content": [{"type": "image", "mimeType": "image/png", "data": _PNG}]}
-
-
-def _replay(monkeypatch, by_name):
-    """Each `tools/call` answered from `by_name[name]`, one reply per call."""
-    calls = []
-
-    def post(method, params, name=None):
-        calls.append((name, params))
-        if method == "tools/list":
-            return {"tools": []}
-        return by_name[name].pop(0)
-
-    monkeypatch.setattr(mcp_client, "post", post)
-    return calls
-
-
-def _model(monkeypatch, words):
-    """A stand-in model whose answers are `words`, one per invoke."""
-    said = iter(words)
-    monkeypatch.setattr(
-        mcp_client.models,
-        "build_chat_model",
-        lambda: _OneWord(next(said)),
-    )
+    def __init__(self, client):
+        self.session = client
 
 
 class _OneWord:
-    """Answers every invoke with the one word it was built with."""
+    """Answers every model round with the one word it was built with."""
 
     def __init__(self, word):
         self.word = word
 
-    def invoke(self, messages):
+    async def ainvoke(self, messages):
         return AIMessage(content=self.word)
 
 
-def test_a_yes_is_carried_as_the_answer(monkeypatch):
-    calls = _replay(
-        monkeypatch, {"run_bundle": [_asked(), _completed()], "screenshot": [_screen()]}
+def _asked(message="Is it?"):
+    return types.ElicitRequestFormParams(
+        message=message, requested_schema={"type": "object"}
     )
-    _model(monkeypatch, ["yes"])
-
-    text, _ = mcp_client.run_bundle("b")
-    assert text == "ran"
-    retry = calls[-1][1]["inputResponses"]["elicit"]
-    assert retry == {"action": "accept", "content": {"answer": True}}
 
 
-def test_a_no_is_carried_as_the_answer(monkeypatch):
-    calls = _replay(
-        monkeypatch, {"run_bundle": [_asked(), _completed()], "screenshot": [_screen()]}
+def _completed(text="ran"):
+    return types.CallToolResult(content=[types.TextContent(text=text)])
+
+
+def _screen():
+    return types.CallToolResult(
+        content=[types.ImageContent(data=_PNG, mime_type="image/png")]
     )
-    _model(monkeypatch, ["No."])
-
-    mcp_client.run_bundle("b")
-    retry = calls[-1][1]["inputResponses"]["elicit"]
-    assert retry["content"]["answer"] is False
 
 
-def test_an_unsure_answer_cancels_the_run(monkeypatch):
-    calls = _replay(
-        monkeypatch,
-        {
-            "run_bundle": [_asked(), _completed("ask: cancelled")],
-            "screenshot": [_screen()],
-        },
+def _model(monkeypatch, *words):
+    said = iter(words)
+    monkeypatch.setattr(
+        mcp_client.models, "build_chat_model", lambda: _OneWord(next(said))
     )
-    _model(monkeypatch, ["unsure"])
-
-    mcp_client.run_bundle("b")
-    assert calls[-1][1]["inputResponses"]["elicit"] == {"action": "cancel"}
 
 
-def test_two_questions_take_two_answers(monkeypatch):
-    calls = _replay(
-        monkeypatch,
-        {
-            "run_bundle": [_asked("First?"), _asked("Second?"), _completed()],
-            "screenshot": [_screen(), _screen()],
-        },
-    )
-    _model(monkeypatch, ["yes", "no"])
+@pytest.mark.anyio
+async def test_a_yes_is_carried_as_the_answer(monkeypatch):
+    client = _Client({"screenshot": [_screen()]})
+    _model(monkeypatch, "yes")
 
-    mcp_client.run_bundle("b")
-    assert calls[-1][1]["inputResponses"]["elicit"]["content"]["answer"] is False
+    result = await mcp_client.answer(_Context(client), _asked())
+
+    assert result.action == "accept"
+    assert result.content == {"answer": True}
 
 
-def test_a_tool_result_precedes_its_picture(monkeypatch):
+@pytest.mark.anyio
+async def test_a_no_is_carried_as_the_answer(monkeypatch):
+    client = _Client({"screenshot": [_screen()]})
+    _model(monkeypatch, "No.")
+
+    result = await mcp_client.answer(_Context(client), _asked())
+
+    assert result.content == {"answer": False}
+
+
+@pytest.mark.anyio
+async def test_an_unsure_answer_cancels_the_run(monkeypatch):
+    client = _Client({"screenshot": [_screen()]})
+    _model(monkeypatch, "unsure")
+
+    result = await mcp_client.answer(_Context(client), _asked())
+
+    assert result.action == "cancel"
+
+
+@pytest.mark.anyio
+async def test_a_tool_result_precedes_its_picture(monkeypatch):
     """LangChain refuses anything wedged between tool calls and their results."""
-    _replay(monkeypatch, {"screenshot": [_screen()]})
+    client = _Client({"screenshot": [_screen()]})
     call = {"name": "screenshot", "args": {}, "id": "1", "type": "tool_call"}
-    out = mcp_client.act({"messages": [AIMessage(content="", tool_calls=[call])]})
+
+    state = {"messages": [AIMessage(content="", tool_calls=[call])]}
+    out = await mcp_client.act(client, state)
 
     kinds = [type(message) for message in out["messages"]]
     assert kinds[0] is ToolMessage
     assert all(kind is HumanMessage for kind in kinds[1:])
 
 
-def test_a_failed_tool_is_reported_as_its_result(monkeypatch):
-    _replay(
-        monkeypatch,
-        {"read_graph": [{"content": [{"type": "text", "text": "no graph"}], "isError": True}]},
+@pytest.mark.anyio
+async def test_a_failed_tool_is_reported_as_its_result(monkeypatch):
+    client = _Client(
+        {
+            "read_graph": [
+                types.CallToolResult(
+                    content=[types.TextContent(text="no graph")], is_error=True
+                )
+            ]
+        }
     )
     call = {"name": "read_graph", "args": {"name": "x"}, "id": "1", "type": "tool_call"}
-    out = mcp_client.act({"messages": [AIMessage(content="", tool_calls=[call])]})
+
+    state = {"messages": [AIMessage(content="", tool_calls=[call])]}
+    out = await mcp_client.act(client, state)
 
     assert out["messages"][0].content == "error: no graph"
 
@@ -139,44 +141,38 @@ def test_the_loop_ends_when_nothing_is_asked_for():
     assert mcp_client.route({"messages": [AIMessage(content="done")]}) == "__end__"
 
 
-def test_the_model_is_not_offered_screenshot(monkeypatch):
-    """A picture is the client's business: `_answer` pulls one when a script asks."""
-    bound = []
+@pytest.mark.anyio
+async def test_the_model_is_not_offered_screenshot():
+    """A picture is the client's business: `answer` pulls one when a script asks."""
+    client = _Client(
+        tools=[
+            types.Tool(name="locate", input_schema={}),
+            types.Tool(name="screenshot", input_schema={}),
+        ]
+    )
 
-    def post(method, params, name=None):
-        assert method == "tools/list"
-        return {
-            "tools": [
-                {"name": "locate", "description": "", "inputSchema": {}},
-                {"name": "screenshot", "description": "", "inputSchema": {}},
-            ]
-        }
+    offered = await mcp_client.tool_specs(client)
 
-    class _Recording:
-        def bind_tools(self, tools, **kwargs):
-            bound.append(tools)
-            return self
-
-        def invoke(self, messages):
-            return AIMessage(content="ok")
-
-    monkeypatch.setattr(mcp_client, "post", post)
-    monkeypatch.setattr(mcp_client.models, "build_chat_model", lambda: _Recording())
-    mcp_client.agent({"messages": [HumanMessage(content="hi")]})
-
-    assert [tool["function"]["name"] for tool in bound[0]] == ["locate"]
+    assert [tool["function"]["name"] for tool in offered] == ["locate"]
 
 
-def test_a_second_turn_sees_the_first(monkeypatch):
+@pytest.mark.anyio
+async def test_a_result_without_a_picture_says_so():
+    pictures = mcp_client._pictures([types.TextContent(text="map")])
+
+    assert pictures[0].content[0]["text"] == "no picture came back"
+
+
+@pytest.mark.anyio
+async def test_a_second_turn_sees_the_first(monkeypatch):
     """The checkpointer, not a list of our own, is what makes it a conversation."""
-    _replay(monkeypatch, {})
     model = ScriptedModel(responses=[AIMessage("first"), AIMessage("second")])
     monkeypatch.setattr(mcp_client.models, "build_chat_model", lambda: model)
 
-    graph = mcp_client.build_graph()
+    graph = mcp_client.build_graph(_Client(), [])
     config = {"configurable": {"thread_id": "t"}}
-    graph.invoke({"messages": [HumanMessage(content="one")]}, config)
-    state = graph.invoke({"messages": [HumanMessage(content="two")]}, config)
+    await graph.ainvoke({"messages": [HumanMessage(content="one")]}, config)
+    state = await graph.ainvoke({"messages": [HumanMessage(content="two")]}, config)
 
     assert [message.content for message in state["messages"]] == [
         "one",
