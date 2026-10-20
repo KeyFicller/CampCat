@@ -59,3 +59,5 @@ git submodule update --init --checkout ccat_library
 ```
 
 `--graph` 必填：一个服务只服务一张图，缺了就以 2 退出，图名不合法也是 2，库里没有这张图是 1。
+
+![mcp-injection](campcat/sources/cpp/assets/images/mcp-injection.gif)
