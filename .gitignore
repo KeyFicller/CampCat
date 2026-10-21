@@ -20,4 +20,5 @@ imgui.ini
 /training_data/
 /.worktrees/
 /logs/
+/smoke
 .backup

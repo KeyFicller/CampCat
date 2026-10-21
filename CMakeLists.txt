@@ -258,6 +258,7 @@ add_library(campcat_core STATIC
   campcat/sources/cpp/src/core/llm/llm_tools.cpp
   campcat/sources/cpp/src/core/llm/llm_consult.cpp
   campcat/sources/cpp/src/core/llm/llm_host.cpp
+  campcat/sources/cpp/src/core/smoke/smoke_run.cpp
   campcat/sources/cpp/src/core/mcp/script_server.cpp
   campcat/sources/cpp/src/ccat_driver/ccat_script_profile.cpp
   campcat/sources/cpp/src/ccat_driver/ccat_script_automation.cpp

@@ -41,6 +41,7 @@ PROVIDERS = {
         "base_url": "https://api.deepseek.com",
         "model": "deepseek:deepseek-flash",
         "extra_body": {"thinking": {"type": "enabled"}},
+        "thinking_off": {"thinking": {"type": "disabled"}},
     },
     "qwen": {
         # The `openai:` prefix is what tells init_chat_model which client to
@@ -52,6 +53,7 @@ PROVIDERS = {
         "base_url": "https://token-plan.maas.qianwenaiapi.com/compatible-mode/v1",
         "model": "openai:qwen3.8-max",
         "extra_body": {"enable_thinking": True},
+        "thinking_off": {"enable_thinking": False},
     },
 }
 DEFAULT_PROVIDER = "deepseek"
@@ -159,12 +161,15 @@ def _chat_model(name: str, max_tokens: int, *, context: bool = False):
     api_key = _env(provider["key_env"])
     if not api_key:
         raise RuntimeError(f"{provider['key_env']} is not set (put it in .env)")
+    # `CAMPCAT_LLM_THINKING=off` asks for a faster, dumber run: a smoke test
+    # cares about the tool calls, and nobody is reading the reasoning.
+    quiet = _env("CAMPCAT_LLM_THINKING").lower() in {"off", "0", "false"}
     model = init_chat_model(
         name,
         api_key=api_key,
         base_url=_setting(provider["base_url_env"], provider["base_url"]),
         max_tokens=max_tokens,
-        extra_body=provider["extra_body"],
+        extra_body=provider["thinking_off"] if quiet else provider["extra_body"],
     )
     # The provider tests stand in a non-model for init_chat_model. A real chat
     # model has this attribute; without it there is nothing to count.

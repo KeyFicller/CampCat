@@ -12,6 +12,7 @@ import models
 
 CLEARED = ("CAMPCAT_LLM_PROVIDER", "CAMPCAT_LLM_MODEL",
            "DEEPSEEK_BASE_URL", "QWEN_BASE_URL", "CAMPCAT_LLM_MEMORY_MODEL",
+           "CAMPCAT_LLM_THINKING",
            # Cleared too: a developer with real keys exported must not change
            # what a missing-key case observes.
            "DEEPSEEK_API_KEY", "QWEN_API_KEY")
@@ -76,6 +77,23 @@ def test_the_request_picks_qwen_and_its_thinking_parameter(monkeypatch):
     # Not DeepSeek's shape: Qwen3.7 thinks by default too, and its own switch is
     # the only one it understands.
     assert seen["extra_body"] == {"enable_thinking": True}
+
+
+def test_thinking_can_be_turned_off_with_each_providers_own_switch(monkeypatch):
+    """The shapes differ, so the off switch has to as well: sending one
+    provider's off token to the other is not a no-op, it is a 400."""
+    for provider, off in (("deepseek", {"thinking": {"type": "disabled"}}),
+                          ("qwen", {"enable_thinking": False})):
+        _clear(monkeypatch)
+        preset = models.PROVIDERS[provider]
+        monkeypatch.setenv(preset["key_env"], "sk-test")
+        monkeypatch.setenv("CAMPCAT_LLM_THINKING", "off")
+        models.set_provider(provider)
+        seen = _capture(monkeypatch)
+
+        models.build_chat_model()
+
+        assert seen["extra_body"] == off, provider
 
 
 def test_a_base_url_env_var_overrides_the_default(monkeypatch):

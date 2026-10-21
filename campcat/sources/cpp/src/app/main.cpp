@@ -34,6 +34,7 @@
 #include "core/automation_log.h"
 #include "core/llm/llm_tools.h"
 #include "core/mcp/script_server.h"
+#include "core/smoke/smoke_run.h"
 
 namespace {
 
@@ -149,6 +150,21 @@ int main(int argc, char **argv) {
             std::filesystem::path(rest.size() >= 2 ? rest[1]
                                                    : k_default_config_relative),
             std::move(graph), port);
+    }
+
+    // The smoke face: build one graph on the demo app with no window and print
+    // what it took. Same sidecar, prompts and tools as the conversation page,
+    // so the number is what a person in the GUI would have paid.
+    if (argc >= 2 && std::string(argv[1]) == "--smoke") {
+        if (argc < 3) {
+            std::fprintf(stderr,
+                         "usage: campcat --smoke <prompts.txt> [config.json]\n");
+            return 2;
+        }
+        return campcat::run_smoke(
+            std::filesystem::path(argv[2]),
+            std::filesystem::path(argc >= 4 ? argv[3]
+                                            : k_default_config_relative));
     }
 
     const std::filesystem::path cfg_path =

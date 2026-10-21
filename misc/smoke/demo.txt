@@ -1,0 +1,18 @@
+# 烟测清单：一行一条指令，# 开头与空行跳过。
+#
+# 跑法：
+#   ./build/campcat --smoke misc/smoke/demo.txt config.json
+#
+# 每次运行都新建 smoke/<时间戳>/ 当图目录，碰不到 ccat_library。
+# 计时含开模拟器、连 adb、sidecar 冷启动，以及下面每一条。
+# 清单跑到最后一条就是「图建完了」——框架不猜完整，你写全它。
+#
+# 第一条自己打开 App：「桌面 → Demo 首页」也算图上的一步，不走捷径。
+# 目标应用：com.campcat.demoidle.debug（CampCat Idle Demo），桌面图标标签是
+# “CampCat Idle Demo”。烟测不认包名，只认你第一句写的那个标签。
+#
+# 示例（按 demo 的实际界面改，前面的 # 去掉才生效）：
+# 回到桌面，点开 CampCat Idle Demo，看看首页有哪些东西
+# 在首页点一下“采集”，看到数字变了就停下
+
+打开CampCat Idel Demo，自由探索，并把图建好。

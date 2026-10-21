@@ -14,7 +14,7 @@
       "tap": true,
       "update_script": true
     },
-    "require": true
+    "require": false
   },
   "box_snap": {
     "strategy": "none"
@@ -48,5 +48,6 @@
   "scheduler": {
     "interval_seconds": 300,
     "jitter_seconds": 7
-  }
+  },
+  "script_bundle": ""
 }
