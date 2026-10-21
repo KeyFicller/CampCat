@@ -112,11 +112,16 @@ public:
      * @param[in] _operator_only Only the operator drives, and only with the
      * tools a training sample needs (see `build_turn_request`). The settings
      * that decide it are read live by the caller, like the approval gate.
+     * @param[in] _repo_root Where `.venv` and the sidecar script live. Empty
+     * takes `_config_home.parent_path()`, which is right whenever the library
+     * sits in the checkout; a run with its own `config_home` elsewhere names
+     * the checkout here.
      */
     llm_result run_turn(const std::filesystem::path &_config_home,
                         const std::string &_provider,
                         const std::string &_prompt, int _max_dispatches,
-                        int _max_model_rounds, bool _operator_only);
+                        int _max_model_rounds, bool _operator_only,
+                        const std::filesystem::path &_repo_root = {});
 
     /// The latest usage the sidecar reported. Safe to call from the UI thread.
     llm_protocol::usage_stats usage() const;

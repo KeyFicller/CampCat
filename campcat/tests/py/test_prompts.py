@@ -55,6 +55,21 @@ def test_scripter_prompt_uses_an_action_for_same_screen_work():
     assert text.index("{graph}.{anchor}.{action}") < text.index("## script_workflow")
 
 
+def test_operator_hands_off_at_a_new_screen_and_at_a_finished_task():
+    # The cadence is the point: an operator that walks the whole flow first
+    # has already left the screen whose anchor it was supposed to add.
+    text = operator.operator_prompt()
+    assert "not at the end of the run" in text
+    assert "answers `unknown` for is a new anchor" in text
+    assert "two new anchors in a row" in text
+    # An action is the graph's third part, named as the scanner names it: a
+    # handoff that does not say so leaves `actions: 0` and nobody notices.
+    assert "<graph>.<anchor>.<action>" in text
+    assert "spends something" in text
+    assert "may leave the page in between" in text
+    assert "`actions: 0`" in text
+
+
 def test_prompts_freeze_existing_bundles():
     assert "fix: true" in operator.operator_prompt()
     text = scripter.scripter_prompt()

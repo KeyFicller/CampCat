@@ -533,7 +533,8 @@ llm_protocol::usage_stats llm_host::usage() const {
 llm_result llm_host::run_turn(const std::filesystem::path &_config_home,
                               const std::string &_provider,
                               const std::string &_prompt, int _max_dispatches,
-                              int _max_model_rounds, bool _operator_only) {
+                              int _max_model_rounds, bool _operator_only,
+                              const std::filesystem::path &_repo_root) {
     llm_result r;
     m_turn_max_dispatches =
         _max_dispatches >= 1 ? _max_dispatches : llm::k_default_max_dispatches;
@@ -558,7 +559,9 @@ llm_result llm_host::run_turn(const std::filesystem::path &_config_home,
     llm::set_context(ctx);
 
     std::string err;
-    if (!ensure_running(_config_home.parent_path(), &err)) {
+    if (!ensure_running(_repo_root.empty() ? _config_home.parent_path()
+                                           : _repo_root,
+                        &err)) {
         r.error = err;
         return r;
     }
@@ -838,7 +841,7 @@ llm_protocol::usage_stats llm_host::usage() const { return {}; }
 
 llm_result llm_host::run_turn(const std::filesystem::path &,
                               const std::string &, const std::string &, int,
-                              int, bool) {
+                              int, bool, const std::filesystem::path &) {
     llm_result r;
     r.error = "the LLM sidecar is not supported on Windows";
     return r;

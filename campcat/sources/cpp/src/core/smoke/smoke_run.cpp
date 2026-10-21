@@ -43,6 +43,17 @@ std::string stamp() {
     return out;
 }
 
+/// `_to` gets `_from`'s bytes when there are any: a run needs the checkout's
+/// `CCAT.md` and the notes the real home had, but must not write back into it.
+void copy_if_present(const std::filesystem::path &_from,
+                     const std::filesystem::path &_to) {
+    std::error_code ec;
+    if (std::filesystem::is_regular_file(_from, ec)) {
+        std::filesystem::copy_file(
+            _from, _to, std::filesystem::copy_options::overwrite_existing, ec);
+    }
+}
+
 /// What the run built, one line per graph. Reported rather than judged: a graph
 /// with problems is still the thing whose cost was measured.
 void report_graphs(const std::filesystem::path &_library) {
@@ -138,14 +149,24 @@ int run_smoke(const std::filesystem::path &_prompts,
 
     // A fresh directory per run: nothing written here can reach the real
     // library, and no run inherits a screen from the last one.
+    const std::filesystem::path real_home = cfg.config_home;
     const std::filesystem::path library =
-        std::filesystem::path(cfg.config_home).parent_path() / "smoke" /
-        stamp();
+        real_home.parent_path() / "smoke" / stamp();
     std::error_code ec;
     std::filesystem::create_directories(library, ec);
     if (ec) {
         say("cannot create " + library.string() + ": " + ec.message());
         return 1;
+    }
+    // The fresh directory is also `config_home` for the turn: `locate`, `goto`
+    // and the interpreter's graph loads read that field directly instead of
+    // going through the tool context, so a real home would answer every new
+    // screen with one of its own anchors and refuse the save as a duplicate.
+    cfg.config_home = library.string();
+    copy_if_present(real_home.parent_path() / "CCAT.md",
+                    library.parent_path() / "CCAT.md");
+    for (const char *notes : {"operator.md", "scripter.md"}) {
+        copy_if_present(real_home / notes, library / notes);
     }
     say("library " + library.string());
 
@@ -167,7 +188,7 @@ int run_smoke(const std::filesystem::path &_prompts,
         const llm_result res =
             host.run_turn(cfg.config_home, cfg.llm.provider, prompts[i],
                           cfg.llm.max_dispatches, cfg.llm.max_model_rounds,
-                          false);
+                          false, real_home.parent_path());
         std::string line = "turn " + std::to_string(i + 1) + "/" +
                            std::to_string(prompts.size()) + " " +
                            seconds_since(started) + (res.ok ? " ok" : " FAILED");

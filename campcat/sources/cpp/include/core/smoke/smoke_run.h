@@ -24,8 +24,9 @@ std::vector<std::string> smoke_prompts(std::string_view _text);
  *
  * Boots the emulator, connects adb, then runs every prompt of `_prompts`
  * through the same sidecar, prompts and tools the conversation page uses. The
- * graph lands in a fresh `smoke/<timestamp>/` directory, so the real library is
- * never written to.
+ * graph lands in a fresh `smoke/<timestamp>/` directory, which also becomes the
+ * turn's `config_home`: the interpreter reads anchors from that field, so the
+ * real library's screens never leak into the run.
  *
  * Timing starts at the first line of this function and covers everything up to
  * the last turn: boot, adb, sidecar start-up, every model call. It is printed
@@ -33,7 +34,7 @@ std::vector<std::string> smoke_prompts(std::string_view _text);
  *
  * @param[in] _prompts List file (see `smoke_prompts`).
  * @param[in] _config `config.json`; its `config_home` names the real library,
- * read for memory only.
+ * copied from for `CCAT.md` and the notes, and used for the checkout root.
  * @return 0 when every turn succeeded, 1 otherwise.
  */
 int run_smoke(const std::filesystem::path &_prompts,
