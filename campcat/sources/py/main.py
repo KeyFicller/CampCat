@@ -92,9 +92,13 @@ def handle_request(req: dict) -> Iterator[dict]:
             out,
         ):
             if not is_answer:
-                # Sent at once rather than batched, or the hint would arrive
-                # only after the thinking it is meant to announce.
-                if not thinking_sent:
+                # Sent at once rather than batched: a reasoning delta is the
+                # only sign of progress while the model thinks, and delaying it
+                # is what it would look like as a stall.
+                if text:
+                    thinking_sent = True
+                    yield protocol.build_chunk(rid, text, thinking=True)
+                elif not thinking_sent:
                     thinking_sent = True
                     yield protocol.build_chunk(rid, thinking=True)
                 continue
@@ -137,19 +141,20 @@ def main(argv: list[str]) -> int:
         print(f"[sidecar] loaded {applied} var(s) from .env", file=sys.stderr)
     # After the env file, or Langfuse builds its client without credentials.
     observability.start()
+    # One thread owns stdin from here on: a model call blocks for tens of
+    # seconds, and a stop has to be seen while it does.
+    transport.start_reader()
 
     if not once:
         emit(protocol.build_ready())
 
-    # readline() rather than `for line in sys.stdin`: the iterator reads ahead,
-    # which would swallow the host's answer to a tool call made mid-request.
+    # Through `transport`, so the reader thread is the only thing touching
+    # stdin: an iterator here would read ahead and swallow the host's answer to
+    # a tool call made mid-request.
     while True:
-        line = sys.stdin.readline()
-        if not line:
-            break
-        req = protocol.decode(line)
+        req = transport.read_message()
         if req is None:
-            continue
+            break
         for msg in handle_request(req):
             emit(msg)
         if once:

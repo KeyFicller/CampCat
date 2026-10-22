@@ -7,6 +7,7 @@ namespace {
 
 using campcat::llm_event;
 using campcat::llm_events_append_text;
+using campcat::llm_events_append_thinking;
 using campcat::tool_note;
 
 TEST(ToolNote, StatusAndBodyAreSeparateParagraphs) {
@@ -98,6 +99,32 @@ TEST(LlmEvents, AnImageStepStartsANewTextStep) {
     EXPECT_EQ(events[1].type, llm_event::kind::image);
     EXPECT_EQ(events[1].image_id, 7);
     EXPECT_EQ(events[2].type, llm_event::kind::text);
+}
+
+TEST(LlmEvents, ReasoningGetsAStepOfItsOwn) {
+    // It must not fold into the answer: the UI draws the two differently and
+    // collapses the reasoning once the step ends.
+    std::vector<llm_event> events;
+    llm_events_append_thinking(events, "the button is ");
+    llm_events_append_thinking(events, "bottom right");
+    llm_events_append_text(events, "Tapping it.");
+
+    ASSERT_EQ(events.size(), 2U);
+    EXPECT_EQ(events[0].type, llm_event::kind::thinking);
+    EXPECT_EQ(events[0].text, "the button is bottom right");
+    EXPECT_EQ(events[1].type, llm_event::kind::text);
+    EXPECT_EQ(events[1].text, "Tapping it.");
+}
+
+TEST(LlmEvents, ReasoningAfterAToolStartsANewStep) {
+    std::vector<llm_event> events;
+    llm_events_append_thinking(events, "first");
+    events.push_back(llm_event{llm_event::kind::tool, "**tap** ok"});
+    llm_events_append_thinking(events, "second");
+
+    ASSERT_EQ(events.size(), 3U);
+    EXPECT_EQ(events[2].type, llm_event::kind::thinking);
+    EXPECT_EQ(events[2].text, "second");
 }
 
 } // namespace

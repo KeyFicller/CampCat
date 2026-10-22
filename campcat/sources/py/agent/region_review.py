@@ -475,7 +475,7 @@ def review_judge(state: ReviewState) -> dict:
         text += "\n" + _ALTERNATIVE
     try:
         model = models.build_chat_model()
-        response = model.invoke([
+        response = models.streamed(model, [
             SystemMessage(content=_review_system(state["kind"])),
             HumanMessage(content=[
                 {"type": "text", "text": text},
@@ -592,7 +592,7 @@ def review_pick(state: ReviewState) -> dict:
         model = models.build_chat_model()
         prompt = (TEMPLATE_PICK_PROMPT if state.get("kind") == "template"
                   else PICK_PROMPT)
-        response = model.invoke([
+        response = models.streamed(model, [
             SystemMessage(content=prompt),
             HumanMessage(content=[
                 {"type": "text", "text": "\n".join(lines)}, *pictures]),

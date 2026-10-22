@@ -50,7 +50,7 @@ struct message {
     std::string error;
 
     // chunk (shares `text` as the delta)
-    bool thinking = false; ///< reasoning heartbeat, `text` is empty
+    bool thinking = false; ///< reasoning: `text` is its delta, empty = heartbeat
 
     // tool_call (the sidecar is asking us to run a tool)
     std::string call_id; ///< echoed back in the answering tool_result

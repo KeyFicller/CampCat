@@ -22,8 +22,9 @@ import transport
 INTERRUPTED_TEXT = "interrupted by the user"
 
 
-class TurnInterrupted(Exception):
-    """The host stopped this turn. The in-flight call has no tool_result."""
+# Defined in `transport` so the model call can raise it too; kept under this
+# name because every call site already says `tools.TurnInterrupted`.
+TurnInterrupted = transport.TurnInterrupted
 
 
 def note(text: str) -> None:
@@ -48,23 +49,30 @@ def call_cpp(name: str, args: dict) -> dict:
         protocol.build_tool_call(transport.get_current_rid(), call_id, name, args,
                                  **session.usage_fields())
     )
-    while True:
-        msg = transport.read_message()
-        if msg is None:
-            raise RuntimeError("host closed the stream during a tool call")
-        if msg.get("type") == "interrupt" and msg.get("id") == transport.get_current_rid():
-            raise TurnInterrupted()
-        if msg.get("type") == "tool_result" and msg.get("call_id") == call_id:
-            return msg
-        # A script this call is running stopped at an `ask()`. Answering it here
-        # is what keeps the round trip nested: the host is blocked on *this*
-        # tool call, so pushing the consult back to the request loop (which is
-        # waiting on us) would deadlock both.
-        if msg.get("type") == "consult":
-            transport.emit(consult.answer(msg))
-            continue
-        # `log` lines are the host narrating to itself. An `interrupt` for
-        # another request, and anything else, belongs to the request loop,
-        # which is blocked inside this very call.
-        if msg.get("type") != "log":
-            transport.push_back(msg)
+    # An interrupt that arrives now is this call's stop: the reader thread
+    # queues it here instead of recording it for a generation that is not
+    # running.
+    transport.set_tool_wait(True)
+    try:
+        while True:
+            msg = transport.read_message()
+            if msg is None:
+                raise RuntimeError("host closed the stream during a tool call")
+            if msg.get("type") == "interrupt" and msg.get("id") == transport.get_current_rid():
+                raise TurnInterrupted()
+            if msg.get("type") == "tool_result" and msg.get("call_id") == call_id:
+                return msg
+            # A script this call is running stopped at an `ask()`. Answering it here
+            # is what keeps the round trip nested: the host is blocked on *this*
+            # tool call, so pushing the consult back to the request loop (which is
+            # waiting on us) would deadlock both.
+            if msg.get("type") == "consult":
+                transport.emit(consult.answer(msg))
+                continue
+            # `log` lines are the host narrating to itself. An `interrupt` for
+            # another request, and anything else, belongs to the request loop,
+            # which is blocked inside this very call.
+            if msg.get("type") != "log":
+                transport.push_back(msg)
+    finally:
+        transport.set_tool_wait(False)

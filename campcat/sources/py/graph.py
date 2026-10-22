@@ -122,7 +122,11 @@ def _invoke(state: TurnState, offered: list) -> dict:
         model_input.append(HumanMessage(content=NO_TOOLS_NOTE))
 
     try:
-        response = model.invoke(model_input)
+        response = models.streamed(model, model_input)
+    except tools.TurnInterrupted:
+        # Not an error: the host has the next message already. The turn commits
+        # what finished and stops, like a stop inside the tool batch.
+        return {"interrupted": True}
     except Exception as exc:  # noqa: BLE001 - surfaced to the caller as a result
         return {"error": str(exc)}
 
@@ -303,7 +307,7 @@ def route_after_tools(state: TurnState) -> str:
 
 
 def route_after_invoke(state: TurnState) -> str:
-    if state.get("error"):
+    if state.get("error") or state.get("interrupted"):
         return "commit"
     messages = state.get("messages") or []
     calls = getattr(messages[-1], "tool_calls", None) if messages else None
@@ -369,10 +373,11 @@ def stream_turn(state: TurnState,
                 out_state: dict) -> Iterator[tuple[bool, str]]:
     """Run the graph, yielding (is_answer, text) and copying the final state.
 
-    (True, delta) is answer text to display; (False, "") is a reasoning
-    heartbeat, meaning the model is thinking and has no answer yet. The final
-    state lands in `out_state` for `error` and `turns`, which only exist once
-    the run is over.
+    (True, delta) is answer text to display. (False, delta) is reasoning text:
+    the model is thinking, and the step it belongs to has not answered yet.
+    (False, "") is a bare heartbeat -- a chunk with neither. The final state
+    lands in `out_state` for `error` and `turns`, which only exist once the run
+    is over.
     """
     global _GRAPH
     if _GRAPH is None:
@@ -403,6 +408,10 @@ def stream_turn(state: TurnState,
             if step != last_step:
                 last_step = step
                 gap_pending = emitted
+            reasoning = session.reasoning_text(chunk)
+            if reasoning:
+                yield (False, reasoning)
+                continue
             text = session.content_text(getattr(chunk, "content", ""))
             if not text:
                 yield (False, "")

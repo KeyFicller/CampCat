@@ -188,7 +188,7 @@ def diagnose_judge(state: DiagnoseState) -> dict:
             "image_url": {"url": f"data:{session.MIME};base64,{image}"},
         })
     try:
-        reply = models.build_chat_model().invoke([
+        reply = models.streamed(models.build_chat_model(), [
             SystemMessage(content=JUDGE_PROMPT),
             HumanMessage(content=content),
         ])

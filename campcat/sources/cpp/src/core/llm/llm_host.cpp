@@ -129,7 +129,11 @@ void llm_host::handle_line(const std::string &_line) {
         // on every delta would only churn.
         std::lock_guard<std::mutex> lk(m_mu);
         if (msg.id == m_pending_id) {
-            llm_events_append_text(m_events, msg.text);
+            if (msg.thinking && !msg.text.empty()) {
+                llm_events_append_thinking(m_events, msg.text);
+            } else {
+                llm_events_append_text(m_events, msg.text);
+            }
             m_thinking = m_thinking || msg.thinking;
         }
     } break;
@@ -163,17 +167,33 @@ void llm_host::handle_line(const std::string &_line) {
     }
 }
 
-void llm_events_append_text(std::vector<llm_event> &_events,
-                            std::string_view _delta) {
+namespace {
+
+/// Grow the trailing step of `_kind`, or start one when the step before it is
+/// something else. An empty delta adds nothing.
+void append_delta(std::vector<llm_event> &_events, llm_event::kind _kind,
+                  std::string_view _delta) {
     if (_delta.empty()) {
         return;
     }
-    if (_events.empty() || _events.back().type != llm_event::kind::text) {
+    if (_events.empty() || _events.back().type != _kind) {
         llm_event e;
-        e.type = llm_event::kind::text;
+        e.type = _kind;
         _events.push_back(std::move(e));
     }
     _events.back().text.append(_delta);
+}
+
+} // namespace
+
+void llm_events_append_text(std::vector<llm_event> &_events,
+                            std::string_view _delta) {
+    append_delta(_events, llm_event::kind::text, _delta);
+}
+
+void llm_events_append_thinking(std::vector<llm_event> &_events,
+                                std::string_view _delta) {
+    append_delta(_events, llm_event::kind::thinking, _delta);
 }
 
 std::vector<llm_event> llm_host::events() const {
@@ -456,7 +476,7 @@ std::string llm_host::run_tool(const llm_protocol::message &_call) {
 }
 
 llm_result llm_host::exchange(const std::string &_request_line,
-                              int _timeout_ms) {
+                              int _timeout_ms, long _id) {
     llm_result r;
     std::string err;
     if (!write_all(_request_line, &err)) {
@@ -469,10 +489,14 @@ llm_result llm_host::exchange(const std::string &_request_line,
     // keeps tapping must not extend its own budget indefinitely.
     auto deadline = std::chrono::steady_clock::now() +
                     std::chrono::milliseconds(_timeout_ms);
+    // One stop line per request. Without this a latched interrupt would wake
+    // the wait again and again and the loop would spin until the deadline.
+    bool stop_sent = false;
     std::unique_lock<std::mutex> lk(m_mu);
     while (true) {
-        const bool signalled = m_cv.wait_until(lk, deadline, [this]() {
-            return m_has_result || m_broken || m_has_tool;
+        const bool signalled = m_cv.wait_until(lk, deadline, [this, &stop_sent]() {
+            return m_has_result || m_broken || m_has_tool ||
+                   (m_interrupt.load() && !stop_sent);
         });
         if (!signalled) {
             lk.unlock();
@@ -489,6 +513,24 @@ llm_result llm_host::exchange(const std::string &_request_line,
             teardown();
             r.error = "sidecar exited before answering";
             return r;
+        }
+
+        // A stop with no tool call in hand: the sidecar is in the middle of a
+        // model reply, so the only way to reach it is to say so on the wire.
+        // It drops that reply and answers with an interrupted result.
+        if (!m_has_tool) {
+            stop_sent = true;
+            lk.unlock();
+            const bool wrote = write_all(
+                llm_protocol::build_interrupt_request(_id) + "\n", &err);
+            lk.lock();
+            if (!wrote) {
+                lk.unlock();
+                teardown();
+                r.error = err;
+                return r;
+            }
+            continue;
         }
 
         const llm_protocol::message call = m_tool_call;
@@ -588,7 +630,7 @@ llm_result llm_host::run_turn(const std::filesystem::path &_config_home,
         id, _prompt, llm::tools_json(), memory, scripter_memory, _provider,
         _max_model_rounds, _operator_only);
     request.push_back('\n');
-    const llm_result turn = exchange(request, k_request_timeout_ms);
+    const llm_result turn = exchange(request, k_request_timeout_ms, id);
     // This turn may have replaced the screenshot; take it back for the next one
     // to inject. A turn that never called `screenshot` hands back what it was
     // given, so this cannot blank the session's picture.
@@ -618,7 +660,7 @@ llm_result llm_host::memorize(const std::filesystem::path &_config_home,
     std::string request = llm_protocol::build_memorize_request(
         id, current, _provider, llm::memory_agent_name(_kind));
     request.push_back('\n');
-    const llm_result out = exchange(request, _timeout_ms);
+    const llm_result out = exchange(request, _timeout_ms, id);
     if (!out.ok) {
         return out;
     }
@@ -755,7 +797,7 @@ llm_result llm_host::reset(const std::filesystem::path &_repo_root) {
     const long id = next_request_id();
     std::string request = llm_protocol::build_reset_request(id);
     request.push_back('\n');
-    llm_result out = exchange(request, k_request_timeout_ms);
+    llm_result out = exchange(request, k_request_timeout_ms, id);
     if (out.ok) {
         std::lock_guard<std::mutex> lk(m_mu);
         m_usage = {};
@@ -816,7 +858,7 @@ void llm_host::set_tool_context(const llm::tool_context &) {}
 
 void llm_host::record_note(const std::string &) {}
 
-llm_result llm_host::exchange(const std::string &, int) {
+llm_result llm_host::exchange(const std::string &, int, long) {
     llm_result r;
     r.error = "the LLM sidecar is not supported on Windows";
     return r;
@@ -884,7 +926,13 @@ void llm_host::teardown() {}
 
 void llm_host::stop() { teardown(); }
 
-void llm_host::request_interrupt() { m_interrupt.store(true); }
+void llm_host::request_interrupt() {
+    m_interrupt.store(true);
+    // Wakes `exchange` out of its wait. The sidecar is told to drop the reply
+    // it is generating; without this the stop would only be seen by the tool
+    // call at the end of a generation that can run for minutes.
+    m_cv.notify_all();
+}
 
 void llm_host::clear_interrupt() { m_interrupt.store(false); }
 

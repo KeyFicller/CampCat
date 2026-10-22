@@ -12,8 +12,10 @@ from pathlib import Path
 
 from langchain.chat_models import init_chat_model
 from langchain_core.callbacks import BaseCallbackHandler
+from langchain_openai import ChatOpenAI
 
 import session
+import transport
 
 
 # Room for the answer plus the reasoning that precedes it: DeepSeek bills its
@@ -146,6 +148,26 @@ class _UsageHandler(BaseCallbackHandler):
         session.note_llm(msg, context=self._context)
 
 
+class _ReasoningChatOpenAI(ChatOpenAI):
+    """Keeps the provider's reasoning deltas, which `ChatOpenAI` drops.
+
+    `reasoning_content` is not part of the OpenAI schema, so the base class
+    strips it on purpose. Qwen sends it, and during a call that thinks for a
+    minute it is the only sign of progress.
+    """
+
+    def _convert_chunk_to_generation_chunk(self, chunk, default_chunk_class,
+                                           base_generation_info):
+        out = super()._convert_chunk_to_generation_chunk(
+            chunk, default_chunk_class, base_generation_info)
+        choices = chunk.get("choices") or []
+        if out is not None and choices:
+            text = (choices[0].get("delta") or {}).get("reasoning_content")
+            if text:
+                out.message.additional_kwargs["reasoning_content"] = text
+        return out
+
+
 def _chat_model(name: str, max_tokens: int, *, context: bool = False):
     """Build a chat model for the selected provider.
 
@@ -164,13 +186,23 @@ def _chat_model(name: str, max_tokens: int, *, context: bool = False):
     # `CAMPCAT_LLM_THINKING=off` asks for a faster, dumber run: a smoke test
     # cares about the tool calls, and nobody is reading the reasoning.
     quiet = _env("CAMPCAT_LLM_THINKING").lower() in {"off", "0", "false"}
-    model = init_chat_model(
-        name,
-        api_key=api_key,
-        base_url=_setting(provider["base_url_env"], provider["base_url"]),
-        max_tokens=max_tokens,
-        extra_body=provider["thinking_off"] if quiet else provider["extra_body"],
-    )
+    base_url = _setting(provider["base_url_env"], provider["base_url"])
+    extra_body = provider["thinking_off"] if quiet else provider["extra_body"]
+    prefix, _, bare = name.partition(":")
+    if prefix == "openai":
+        # Built here rather than through `init_chat_model` so the reasoning
+        # deltas survive; the prefix only told `init_chat_model` which client.
+        model = _ReasoningChatOpenAI(model=bare, api_key=api_key,
+                                     base_url=base_url, max_tokens=max_tokens,
+                                     extra_body=extra_body)
+    else:
+        model = init_chat_model(
+            name,
+            api_key=api_key,
+            base_url=base_url,
+            max_tokens=max_tokens,
+            extra_body=extra_body,
+        )
     # The provider tests stand in a non-model for init_chat_model. A real chat
     # model has this attribute; without it there is nothing to count.
     if hasattr(model, "callbacks"):
@@ -193,6 +225,41 @@ def build_chat_model(*, context: bool = False):
         int(_env("CAMPCAT_LLM_MAX_TOKENS") or DEFAULT_MAX_TOKENS),
         context=context,
     )
+
+
+def streamed(model, messages):
+    """One model call, abandoned as soon as the host stops the turn.
+
+    `invoke` blocks until the provider has finished thinking, and with a
+    reasoning model that is tens of seconds during which a stop could only be
+    noticed afterwards. Streaming gives the loop a point to look between
+    chunks, so a stop costs one chunk instead of one reply.
+
+    A model that cannot stream still works: LangChain's own `stream` falls back
+    to a single `invoke` and yields one chunk, so there is simply nothing to
+    stop early in that case.
+    """
+    if transport.stop_requested():
+        raise transport.TurnInterrupted()
+    if not hasattr(model, "stream"):
+        # Only a stand-in handed in by a test has no `stream` at all; a real
+        # LangChain model always has one and falls back to a single `invoke`
+        # inside it.
+        return model.invoke(messages)
+    chunks = []
+    for chunk in model.stream(messages):
+        if transport.stop_requested():
+            raise transport.TurnInterrupted()
+        chunks.append(chunk)
+    if not chunks:
+        raise RuntimeError("model stream ended without a reply")
+    reply = chunks[0]
+    for chunk in chunks[1:]:
+        reply = reply + chunk
+    # Reasoning belongs to this call's display, not to the conversation: some
+    # providers reject it on the way back, and the next turn does not need it.
+    reply.additional_kwargs.pop("reasoning_content", None)
+    return reply
 
 
 def build_memory_model():

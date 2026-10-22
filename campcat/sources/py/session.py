@@ -554,6 +554,16 @@ def content_text(content: object) -> str:
     return str(content)
 
 
+def reasoning_text(chunk: object) -> str:
+    """The reasoning a streamed chunk carries, or "" when it has none.
+
+    DeepSeek and Qwen both name the field `reasoning_content`; the difference
+    is that `ChatOpenAI` drops it and `ChatDeepSeek` keeps it.
+    """
+    extra = getattr(chunk, "additional_kwargs", None) or {}
+    return str(extra.get("reasoning_content") or "")
+
+
 def strip_tool_markup(text: str) -> str:
     """Drop leaked tool-call markup, keeping whatever answer surrounds it."""
     cleaned = _DSML_TAG.sub("", _DSML_BLOCK.sub("", text))

@@ -36,15 +36,27 @@ def _clear(monkeypatch):
 
 
 def _capture(monkeypatch):
-    """Record what `_chat_model` would have built, without building it."""
+    """Record what `_chat_model` would have built, without building it.
+
+    Both construction paths are stubbed: the `openai:` prefix builds the client
+    directly so reasoning deltas survive, and everything else goes through
+    `init_chat_model`. The fake re-adds the prefix the real call strips, so the
+    `name` assertions below read the same whichever path was taken.
+    """
     seen = {}
 
-    def fake(name, **kwargs):
+    def fake_init(name, **kwargs):
         seen["name"] = name
         seen.update(kwargs)
         return "model"
 
-    monkeypatch.setattr(models, "init_chat_model", fake)
+    def fake_openai(*, model, **kwargs):
+        seen["name"] = "openai:" + model
+        seen.update(kwargs)
+        return "model"
+
+    monkeypatch.setattr(models, "init_chat_model", fake_init)
+    monkeypatch.setattr(models, "_ReasoningChatOpenAI", fake_openai)
     return seen
 
 
@@ -141,6 +153,18 @@ def test_an_empty_request_falls_back_to_the_environment(monkeypatch):
     models.build_chat_model()
 
     assert seen["name"] == "openai:qwen3.8-max"
+
+
+def test_qwen_is_built_with_the_client_that_keeps_reasoning(monkeypatch):
+    """`ChatOpenAI` drops `reasoning_content`, so the prefix builds ours."""
+    _clear(monkeypatch)
+    models.set_provider("qwen")
+    monkeypatch.setenv("QWEN_API_KEY", "sk-qwen")
+
+    model = models.build_chat_model()
+
+    assert isinstance(model, models._ReasoningChatOpenAI)
+    assert model.model_name == "qwen3.8-max"
 
 
 def test_an_unknown_provider_is_refused_rather_than_falling_back(monkeypatch):

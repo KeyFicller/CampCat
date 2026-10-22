@@ -70,9 +70,11 @@ constexpr float k_stat_indent = 12.0F;
 /// One step of a turn's timeline, mirrored from the host while the turn runs.
 struct llm_item {
     campcat::llm_event::kind type = campcat::llm_event::kind::text;
-    std::string text;  ///< text: the model's words; tool: the dimmed note
+    std::string text;  ///< text/thinking: the words so far; tool: the note
     bool ok = true;    ///< tool
     long image_id = 0; ///< image: host key, and this item's identity
+    /// thinking: the reader opened the folded step to read it again.
+    bool expanded = false;
     /// Bytes until the texture is uploaded, freed right after: a conversation
     /// of screenshots does not fit in memory, let alone in VRAM.
     std::string png;
@@ -196,7 +198,8 @@ std::filesystem::path g_config_home;
 std::string g_provider = "deepseek";
 
 /// The page the memory window is showing.
-campcat::llm::memory_kind g_mem_kind = campcat::llm::memory_kind::operator_notes;
+campcat::llm::memory_kind g_mem_kind =
+    campcat::llm::memory_kind::operator_notes;
 /// The Long-term memory window, and the copy it displays.
 bool g_mem_open = false;
 std::string g_mem_buf;
@@ -239,9 +242,8 @@ void refresh_memory_chars() {
     }
     g_memory_read_at = now;
     std::string text;
-    if (campcat::llm::read_memory(g_config_home,
-                                  campcat::llm::memory_kind::operator_notes,
-                                  &text)) {
+    if (campcat::llm::read_memory(
+            g_config_home, campcat::llm::memory_kind::operator_notes, &text)) {
         g_memory_chars = static_cast<int>(text.size());
     }
 }
@@ -446,6 +448,12 @@ void drop_all_turns() {
     g_tex_order.clear();
 }
 
+/// Steps whose text grows while they stream; the rest are complete on arrival.
+bool grows_in_place(campcat::llm_event::kind _kind) {
+    return _kind == campcat::llm_event::kind::text ||
+           _kind == campcat::llm_event::kind::thinking;
+}
+
 /// Mirror the host's timeline into the waiting turn: a text step grows in
 /// place, a new step appends, and an image's bytes are taken the moment it
 /// appears -- the host drops them when the next request starts.
@@ -454,8 +462,7 @@ void sync_items(llm_turn &_t) {
     for (size_t i = 0; i < events.size(); ++i) {
         const campcat::llm_event &e = events[i];
         if (i < _t.items.size()) {
-            if (e.type == campcat::llm_event::kind::text &&
-                _t.items[i].text != e.text) {
+            if (grows_in_place(e.type) && _t.items[i].text != e.text) {
                 _t.items[i].text = e.text;
             }
             continue;
@@ -482,6 +489,31 @@ ImVec2 fit_image(int _w, int _h, float _max_w) {
         w = _max_w;
     }
     return ImVec2(w, h);
+}
+
+/// A reasoning step: open while it is the live one, one clickable line after.
+/// Plain wrapped text rather than Markdown -- it can run to thousands of
+/// characters, and re-parsing it every frame while it grows is the cost this
+/// avoids.
+void draw_thinking(llm_item &_it, bool _streaming) {
+    ImGui::PushStyleColor(ImGuiCol_Text,
+                          ImGui::GetStyle().Colors[ImGuiCol_TextDisabled]);
+    if (_streaming) {
+        ImGui::TextUnformatted("Thinking");
+        ImGui::TextWrapped("%s", _it.text.c_str());
+    } else {
+        // Several folded steps carry the same label; the item is what makes
+        // each one a different widget.
+        ImGui::PushID(&_it);
+        if (ImGui::Selectable(_it.expanded ? "v Thinking" : "> Thinking")) {
+            _it.expanded = !_it.expanded;
+        }
+        ImGui::PopID();
+        if (_it.expanded) {
+            ImGui::TextWrapped("%s", _it.text.c_str());
+        }
+    }
+    ImGui::PopStyleColor();
 }
 
 bool is_blank(std::string_view _s) {
@@ -544,8 +576,7 @@ void apply_snap(llm_turn &_t, const campcat::llm_host::timeline &_tl) {
     for (size_t i = 0; i < _tl.events.size(); ++i) {
         const campcat::llm_event &e = _tl.events[i];
         if (i < _t.items.size()) {
-            if (e.type == campcat::llm_event::kind::text &&
-                _t.items[i].text != e.text) {
+            if (grows_in_place(e.type) && _t.items[i].text != e.text) {
                 _t.items[i].text = e.text;
             }
             continue;
@@ -642,8 +673,8 @@ std::optional<std::string> take_queued() {
 /// `_promote` is false for the turn the UI just started itself.
 void run_prompt_loop(campcat::shell_state *_st, const campcat::app_config &_cfg,
                      std::string _prompt, bool _promote) {
-    const std::string addr = campcat::mumu_adb_address(
-        _cfg.mumu.tool_path, _cfg.mumu.device_index);
+    const std::string addr =
+        campcat::mumu_adb_address(_cfg.mumu.tool_path, _cfg.mumu.device_index);
     campcat::adb_client adb(_cfg.adb.path,
                             addr.empty() ? _cfg.adb.serial : addr);
     adb.connect_remote(addr);
@@ -701,25 +732,28 @@ void start_turn(campcat::shell_state &_st, const campcat::app_config &_cfg,
     // caller's frame, so a pointer to it would dangle the moment the frame
     // ends. `_st` outlives the thread (it is a `main` local, and this thread
     // is joined by `llm_panel_shutdown_gl`).
-    g_thread = std::thread([st = &_st, cfg_snapshot = _cfg,
-                            prompt = std::move(_prompt)]() {
-        run_prompt_loop(st, cfg_snapshot, prompt, false);
-    });
+    g_thread = std::thread(
+        [st = &_st, cfg_snapshot = _cfg, prompt = std::move(_prompt)]() {
+            run_prompt_loop(st, cfg_snapshot, prompt, false);
+        });
 }
 
 /// Operator first, then scripter. A failed operator pass still writes scripter.
 /// A message queued during the first pass skips the second. `*_operator_out`
 /// is the operator pass, which is what the status line counts.
-void memorize_both(const std::filesystem::path &_home, const std::string &_provider,
-                   int _timeout_ms, campcat::llm_result *_operator_out) {
-    *_operator_out = g_host.memorize(
-        _home, _provider, campcat::llm::memory_kind::operator_notes, _timeout_ms);
+void memorize_both(const std::filesystem::path &_home,
+                   const std::string &_provider, int _timeout_ms,
+                   campcat::llm_result *_operator_out) {
+    *_operator_out =
+        g_host.memorize(_home, _provider,
+                        campcat::llm::memory_kind::operator_notes, _timeout_ms);
     // operator 失败也要写 scripter。只有用户已经发来新消息才停。
     if (g_host.interrupt_pending()) {
         return;
     }
-    campcat::llm_result scripter = g_host.memorize(
-        _home, _provider, campcat::llm::memory_kind::scripter_notes, _timeout_ms);
+    campcat::llm_result scripter =
+        g_host.memorize(_home, _provider,
+                        campcat::llm::memory_kind::scripter_notes, _timeout_ms);
     if (!scripter.ok) {
         campcat::automation_log::emit("[llm] scripter memory not saved: " +
                                       scripter.error);
@@ -728,7 +762,8 @@ void memorize_both(const std::filesystem::path &_home, const std::string &_provi
 
 /// Consolidate the session into the long-term notes, on the worker.
 /// A message sent while this runs discards the notes and becomes the next turn.
-void start_memorize(campcat::shell_state &_st, const campcat::app_config &_cfg) {
+void start_memorize(campcat::shell_state &_st,
+                    const campcat::app_config &_cfg) {
     if (g_thread.joinable()) {
         g_thread.join();
     }
@@ -772,7 +807,8 @@ void start_reset(std::filesystem::path _config_home, std::string _provider) {
         // user asked for.
         g_memorizing.store(true);
         campcat::llm_result kept;
-        memorize_both(config_home, provider, campcat::k_memorize_timeout_ms, &kept);
+        memorize_both(config_home, provider, campcat::k_memorize_timeout_ms,
+                      &kept);
         g_memorizing.store(false);
         if (!kept.ok) {
             campcat::automation_log::emit("[llm] memory not saved: " +
@@ -987,14 +1023,17 @@ void draw_turn(llm_turn &_t, int _index) {
             ImGui::PopStyleColor();
             continue;
         }
+        if (it.type == campcat::llm_event::kind::thinking) {
+            draw_thinking(it, _t.pending && &it == &_t.items.back());
+            continue;
+        }
         ImGui::Markdown(it.text.c_str(), it.text.size(), md_config());
     }
     // Only while the reply is still to come: a growing text step is its own
     // sign that the model is working, and a label under it would just be a
-    // second one.
+    // second one. A reasoning step counts for the same reason.
     const bool has_text =
-        !_t.items.empty() &&
-        _t.items.back().type == campcat::llm_event::kind::text;
+        !_t.items.empty() && (grows_in_place(_t.items.back().type));
     if (_t.pending && !has_text) {
         ImGui::TextDisabled("%s", waiting_label().c_str());
     } else if (_t.interrupted) {
@@ -1121,8 +1160,8 @@ void draw_fuse_settings(campcat::app_config &_c) {
     int rounds = 0;
     const bool calls_ok =
         parse_cap(calls_buf, campcat::llm::k_default_max_dispatches, &calls);
-    const bool rounds_ok =
-        parse_cap(rounds_buf, campcat::llm::k_default_max_model_rounds, &rounds);
+    const bool rounds_ok = parse_cap(
+        rounds_buf, campcat::llm::k_default_max_model_rounds, &rounds);
     if (calls_ok && rounds_ok && campcat::llm::fuse_pair_ok(calls, rounds)) {
         _c.llm.max_dispatches = calls;
         _c.llm.max_model_rounds = rounds;
@@ -1509,12 +1548,12 @@ void draw_annotation_window() {
                                     g_annot_y1 - g_annot_y0 + 1);
             }
         } else {
-            ImGui::TextDisabled(
-                g_annot_shape == edit_shape::circle
-                    ? "drag from the centre to set the radius"
-                : g_annot_shape == edit_shape::diamond
-                    ? "drag from the centre; horizontal sets rx, vertical sets ry"
-                    : "drag on the image to pick a box");
+            ImGui::TextDisabled(g_annot_shape == edit_shape::circle
+                                    ? "drag from the centre to set the radius"
+                                : g_annot_shape == edit_shape::diamond
+                                    ? "drag from the centre; horizontal sets "
+                                      "rx, vertical sets ry"
+                                    : "drag on the image to pick a box");
         }
         // Switching shape drops the committed region: a box must not ride along
         // as a circle (or the other way round) just because it was drawn first.
@@ -1786,8 +1825,7 @@ bool draw_log(const ImVec2 &_size) {
         ImGui::SetScrollHereY(1.0F);
     }
     const float max_scroll = ImGui::GetScrollMaxY();
-    g_pin_bottom =
-        (max_scroll <= 0.0F) || (ImGui::GetScrollY() >= max_scroll);
+    g_pin_bottom = (max_scroll <= 0.0F) || (ImGui::GetScrollY() >= max_scroll);
     g_last_scroll = ImGui::GetScrollY();
     ImGui::EndChild();
     return clear_requested;
@@ -2059,8 +2097,8 @@ void llm_panel_draw_panel(campcat::shell_state &_st, campcat::app_config &_cfg,
                  std::to_string(usage.tool_calls) + "/" +
                      campcat::llm::format_fuse(_cfg.llm.max_dispatches));
             cell("Context", usage.context_tokens < 0
-                               ? std::string("\xE2\x80\x94")
-                               : std::to_string(usage.context_tokens));
+                                ? std::string("\xE2\x80\x94")
+                                : std::to_string(usage.context_tokens));
             ImGui::EndTable();
         }
         if (open_fuse) {

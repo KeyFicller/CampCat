@@ -37,7 +37,11 @@ def build_note(text: str) -> dict:
 
 
 def build_chunk(rid: object, text: str = "", thinking: bool = False) -> dict:
-    """One streaming delta, or a reasoning heartbeat when `thinking`."""
+    """One streaming delta: answer text, reasoning text, or a bare heartbeat.
+
+    `thinking` with text is the model's reasoning; `thinking` alone says the
+    model is working and has nothing to show yet.
+    """
     msg = {"type": "chunk", "id": rid}
     if text:
         msg["text"] = text

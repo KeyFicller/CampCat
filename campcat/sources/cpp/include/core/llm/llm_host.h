@@ -35,10 +35,12 @@ struct llm_result {
 
 /// @brief One step of the turn in flight, in the order it happened.
 struct llm_event {
-    enum class kind { text, tool, image };
+    enum class kind { text, thinking, tool, image };
     kind type = kind::text;
-    /// `text`: the model's words so far. `tool`: its Markdown note, which is
-    /// also where the host puts a line of its own that belongs in the timeline.
+    /// `text`: the model's words so far. `thinking`: its reasoning so far, kept
+    /// in its own step so the UI can show it while it streams and fold it away
+    /// afterwards. `tool`: its Markdown note, which is also where the host puts
+    /// a line of its own that belongs in the timeline.
     std::string text;
     bool ok = true;    ///< `tool`: whether the call succeeded
     long image_id = 0; ///< `image`: key for `event_image_png`
@@ -53,6 +55,11 @@ struct llm_event {
  */
 void llm_events_append_text(std::vector<llm_event> &_events,
                             std::string_view _delta);
+
+/// Same rules for reasoning, in a step of its own: it never folds into the
+/// answer, because the UI shows them apart and collapses this one when it ends.
+void llm_events_append_thinking(std::vector<llm_event> &_events,
+                                std::string_view _delta);
 
 /// One question waiting on the human, as the UI needs to see it. Deliberately
 /// without the screenshot: the UI polls this every frame and the image is a
@@ -301,8 +308,11 @@ private:
     long next_request_id();
     /// Write one request line and block until its result arrives, serving any
     /// tool calls the sidecar raises in between. `_timeout_ms` bounds the whole
-    /// exchange, tool calls included -- not just the model's first reply.
-    llm_result exchange(const std::string &_request_line, int _timeout_ms);
+    /// exchange, tool calls included -- not just the model's first reply. `_id`
+    /// is the request id, which a stop has to name so the sidecar drops the
+    /// reply it is writing rather than the one after it.
+    llm_result exchange(const std::string &_request_line, int _timeout_ms,
+                        long _id);
     /// Run one tool call and build its `tool_result` line.
     std::string run_tool(const llm_protocol::message &_call);
     void record_note(const std::string &_note);
