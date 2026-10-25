@@ -14,6 +14,7 @@ from langgraph.graph import END, StateGraph
 
 import models
 import session
+import subagent
 import tools
 
 DIAGNOSE_TEMPLATE_NAME = "diagnose_template"
@@ -191,7 +192,7 @@ def diagnose_judge(state: DiagnoseState) -> dict:
         reply = models.streamed(models.build_chat_model(), [
             SystemMessage(content=JUDGE_PROMPT),
             HumanMessage(content=content),
-        ])
+        ], subagent.chunk_sink)
     except tools.TurnInterrupted:
         raise
     except Exception as exc:  # noqa: BLE001 - reported as inconclusive, not a failed turn

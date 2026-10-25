@@ -20,6 +20,7 @@ import agent.scripter as scripter
 import models
 import observability
 import session
+import subagent
 import tools
 
 # Model rounds allowed in one request. The C++ host caps dispatches on its
@@ -96,12 +97,13 @@ def build_messages(state: TurnState) -> dict:
     return {"messages": messages, "input_len": len(messages)}
 
 
-def _invoke(state: TurnState, offered: list) -> dict:
+def _invoke(state: TurnState, offered: list, on_chunk=None) -> dict:
     """One model turn against `offered`.
 
     The schemas are passed to bind_tools with `expect` added on region tools;
     the check strips it before the host sees the call. The operator and the
-    scripter share this; each passes its own table.
+    scripter share this; each passes its own table and its own `on_chunk` -- the
+    operator's stream is the parent graph's, a subagent's goes to its window.
     """
     offered = region_review.with_expect(offered)
     cap = state.get("max_model_rounds", MAX_MODEL_ROUNDS)
@@ -122,7 +124,7 @@ def _invoke(state: TurnState, offered: list) -> dict:
         model_input.append(HumanMessage(content=NO_TOOLS_NOTE))
 
     try:
-        response = models.streamed(model, model_input)
+        response = models.streamed(model, model_input, on_chunk)
     except tools.TurnInterrupted:
         # Not an error: the host has the next message already. The turn commits
         # what finished and stops, like a stop inside the tool batch.
@@ -281,8 +283,12 @@ def run_tools(state: TurnState) -> dict:
             # propagates, and the calls after this one are filled in by
             # `_run_calls`.
             before = session._LATEST_NUM
-            content = scripter.run_scripter(
-                args, host_tools, state.get("max_model_rounds", MAX_MODEL_ROUNDS))
+            with subagent.working("scripter",
+                                  args.get("goal") or "") as run:
+                content = scripter.run_scripter(
+                    args, host_tools,
+                    state.get("max_model_rounds", MAX_MODEL_ROUNDS))
+                run.settle(content)
             pics: list = []
             if session._LATEST_NUM != before:
                 frame = session.latest_frame()

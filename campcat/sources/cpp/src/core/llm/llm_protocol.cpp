@@ -237,6 +237,16 @@ bool parse_line(std::string_view _line, message *_out) {
         return true;
     }
 
+    if (type == "subagent") {
+        _out->type = message::kind::subagent;
+        _out->id = j.value("id", 0L);
+        _out->agent = j.value("agent", std::string());
+        _out->subagent_event = j.value("event", std::string());
+        _out->text = j.value("text", std::string());
+        _out->ok = j.value("ok", true);
+        return true;
+    }
+
     if (type == "consult_result") {
         _out->type = message::kind::consult_result;
         _out->id = j.value("id", 0L);

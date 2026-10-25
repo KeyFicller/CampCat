@@ -20,7 +20,9 @@ namespace campcat::llm_protocol {
 /// 9: `turn` carries `scripter_memory`, and `memorize` carries `agent`.
 /// 10: `consult` asks the sidecar's model a yes/no about a picture while a
 ///     script waits, and `consult_result` answers it.
-constexpr int k_protocol_version = 10;
+/// 11: `subagent` reports what a scripter, diagnoser or region check is doing,
+///     for the window that shows it while it works.
+constexpr int k_protocol_version = 11;
 
 /**
  * @brief One decoded line from the sidecar's stdout.
@@ -37,6 +39,7 @@ struct message {
         chunk,
         tool_call,
         consult_result,
+        subagent,
         unknown
     };
 
@@ -60,6 +63,12 @@ struct message {
     // consult_result: `text` is unused; `ok` and `answer` are the reply
     /// "yes" / "no", or empty when the model did not answer one of those.
     std::string answer;
+
+    // subagent: `text` is the line, `ok` the tool's or run's result.
+    /// `scripter` / `diagnoser` / `region`.
+    std::string agent;
+    /// `start` / `text` / `thinking` / `tool` / `tool_end` / `end`.
+    std::string subagent_event;
 
     // log
     std::string level;

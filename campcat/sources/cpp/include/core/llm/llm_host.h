@@ -205,6 +205,35 @@ public:
     std::vector<llm_event> events() const;
 
     /**
+     * @brief What the innermost subagent is doing, for its own window.
+     *
+     * Polled by the UI every frame. `runs` rises on every `start`, so the UI
+     * can reopen the window once per run without tracking state of its own.
+     * `seen` is false until the first event: a turn that never hands off
+     * leaves no window behind.
+     */
+    struct subagent_state {
+        bool seen = false;
+        bool active = false;
+        bool ok = true;
+        unsigned long runs = 0;
+        std::string agent; ///< scripter / diagnoser / region
+        std::string goal;  ///< the run's own line, from `start`
+        std::vector<llm_event> lines;
+    };
+    subagent_state subagent() const;
+
+    /**
+     * @brief Raw PNG of one image in the subagent window, or empty once dropped.
+     *
+     * The host keeps these itself: it already holds the bytes of every tool
+     * result, so a screenshot never has to cross the wire twice.
+     *
+     * @param[in] _image_id `llm_event::image_id` of the line to fetch.
+     */
+    std::string subagent_image_png(long _image_id) const;
+
+    /**
      * @brief Raw PNG of one image event, or empty once the host dropped it.
      *
      * Only the newest screenshots of a turn keep their bytes; a turn can take
@@ -316,6 +345,8 @@ private:
     /// Run one tool call and build its `tool_result` line.
     std::string run_tool(const llm_protocol::message &_call);
     void record_note(const std::string &_note);
+    /// Append one `subagent` event to the window's state, guarded by `m_mu`.
+    void record_subagent(const llm_protocol::message &_msg);
     void teardown();
     /// Entered through the tool context's approval callback; blocks until the
     /// human answers or the question is cancelled. The return value carries the
@@ -387,6 +418,12 @@ private:
     /// PNG bytes of the newest image events, oldest first. Bounded: a turn can
     /// take hundreds of screenshots and nobody may be watching the page.
     std::deque<std::pair<long, std::string>> m_event_images;
+    /// What the innermost subagent is doing, guarded by `m_mu`.
+    subagent_state m_subagent;
+    /// PNG bytes of the subagent window's newest images, oldest first. Its own
+    /// queue: sharing the bubble's would let a run of screenshots push the
+    /// conversation's pictures out.
+    std::deque<std::pair<long, std::string>> m_subagent_images;
     /// Bumped once per image a tool returns; the UI uses it as the image's key.
     long m_tool_image_id = 0;
 

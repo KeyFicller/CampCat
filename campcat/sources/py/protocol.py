@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 
-PROTOCOL_VERSION = 10
+PROTOCOL_VERSION = 11
 
 
 def encode(obj: dict) -> str:

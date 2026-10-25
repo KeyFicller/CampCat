@@ -8,6 +8,7 @@ import graph
 import models
 import session
 import tools
+import transport
 from conftest import ScriptedModel
 from langchain_core.messages import AIMessage, ToolMessage
 from PIL import Image
@@ -271,6 +272,21 @@ def test_call_without_a_region_is_forwarded_untouched(monkeypatch):
     ], None)
     assert calls == [("tap", {})]
     assert _reviews(model) == []
+
+
+def test_the_operator_own_check_reports_a_window(monkeypatch):
+    """No handoff in this turn: the check still says what it is doing."""
+    sent = []
+    monkeypatch.setattr(transport, "emit", sent.append)
+    _drive(monkeypatch, [
+        _call("tap", {"region": dict(BOX), "expect": "btn"}),
+        _say("verdict: ok\nreason: fine"),
+        _say("Done."),
+    ], None)
+    events = [(m["event"], m["agent"]) for m in sent if m["type"] == "subagent"]
+    assert events[0] == ("start", "region")
+    assert events[-1] == ("end", "region")
+    assert sent[0]["text"] == "btn"
 
 
 def test_tap_review_sends_the_neighbourhood(monkeypatch):

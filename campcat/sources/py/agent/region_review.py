@@ -19,6 +19,7 @@ from langgraph.graph import END, StateGraph
 
 import models
 import session
+import subagent
 import tools
 
 MAX_ROUNDS = 3
@@ -482,7 +483,7 @@ def review_judge(state: ReviewState) -> dict:
                 _picture(state.get("crop_b64") or ""),
                 _picture(state.get("context_b64") or ""),
             ]),
-        ])
+        ], subagent.chunk_sink)
     except tools.TurnInterrupted:
         raise
     except Exception as exc:  # noqa: BLE001 - a failed check lets the call through
@@ -596,7 +597,7 @@ def review_pick(state: ReviewState) -> dict:
             SystemMessage(content=prompt),
             HumanMessage(content=[
                 {"type": "text", "text": "\n".join(lines)}, *pictures]),
-        ])
+        ], subagent.chunk_sink)
     except tools.TurnInterrupted:
         raise
     except Exception as exc:  # noqa: BLE001 - an unreadable pick keeps the proposal
@@ -644,11 +645,16 @@ def _one(kind: str, shape: str, region: dict, shot, expect: str,
     if key and _reject_count.get(key, 0) >= 2:
         return region, "", _reject_reason[key]
     import graph
-    out = graph.run_subgraph(_graph(), {
-        "kind": kind, "shape": shape, "region": region, "shot": shot,
-        "expect": expect, "label": label or expect, "rounds": 0,
-        "candidates": [{"region": dict(region), "note": "proposal"}],
-    })
+    out = {}
+    # Reported for the operator's own calls too: the check is a model loop of
+    # its own, and the bubble only says how it ended.
+    with subagent.working("region", label or expect) as run:
+        out = graph.run_subgraph(_graph(), {
+            "kind": kind, "shape": shape, "region": region, "shot": shot,
+            "expect": expect, "label": label or expect, "rounds": 0,
+            "candidates": [{"region": dict(region), "note": "proposal"}],
+        })
+        run.settle(out.get("verdict") or "checked")
     verdict = out.get("verdict")
     if verdict == "reject":
         reason = out.get("reason") or "rejected"

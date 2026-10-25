@@ -9,11 +9,14 @@ definitions that disagree.
 
 from __future__ import annotations
 
+import json
+
 from uuid import uuid4
 
 import consult
 import protocol
 import session
+import subagent
 import transport
 
 # Written into the history for the call that was in flight and for every call
@@ -49,6 +52,10 @@ def call_cpp(name: str, args: dict) -> dict:
         protocol.build_tool_call(transport.get_current_rid(), call_id, name, args,
                                  **session.usage_fields())
     )
+    # The window shows the call when a subagent makes it; the operator's own
+    # calls are already in its bubble.
+    subagent.event("tool", text=subagent.line(
+        "**" + name + "** " + json.dumps(args, ensure_ascii=False)))
     # An interrupt that arrives now is this call's stop: the reader thread
     # queues it here instead of recording it for a generation that is not
     # running.
@@ -61,6 +68,9 @@ def call_cpp(name: str, args: dict) -> dict:
             if msg.get("type") == "interrupt" and msg.get("id") == transport.get_current_rid():
                 raise TurnInterrupted()
             if msg.get("type") == "tool_result" and msg.get("call_id") == call_id:
+                subagent.event(
+                    "tool_end", ok=bool(msg.get("ok")),
+                    text=subagent.line(msg.get("text") or msg.get("error") or ""))
                 return msg
             # A script this call is running stopped at an `ask()`. Answering it here
             # is what keeps the round trip nested: the host is blocked on *this*

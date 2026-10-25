@@ -32,6 +32,10 @@ constexpr int k_request_timeout_ms = 86400000;
 /// oldest is dropped and its timeline step renders as unavailable.
 constexpr int k_event_image_stash = 32;
 
+/// How many of the subagent window's newest screenshots keep their bytes. A
+/// graph-building run takes one per call; the window shows a handful of them.
+constexpr std::size_t k_subagent_image_stash = 8;
+
 /// The interpreter and script are found by convention, never configured.
 void resolve_sidecar_paths(const std::filesystem::path &_repo_root,
                            std::filesystem::path *_python,
@@ -137,6 +141,11 @@ void llm_host::handle_line(const std::string &_line) {
             m_thinking = m_thinking || msg.thinking;
         }
     } break;
+    case llm_protocol::message::kind::subagent:
+        // Polled per frame like the timeline, so no notify: a window that is
+        // not on screen costs nothing.
+        record_subagent(msg);
+        break;
     case llm_protocol::message::kind::consult_result: {
         std::lock_guard<std::mutex> lk(m_mu);
         if (msg.id == m_consult_pending_id) {
@@ -408,8 +417,59 @@ void llm_host::record_note(const std::string &_note) {
     m_events.push_back(std::move(e));
 }
 
-std::string llm_host::run_tool(const llm_protocol::message &_call) {
-    int call_index = 0;
+void llm_host::record_subagent(const llm_protocol::message &_msg) {
+    std::lock_guard<std::mutex> lk(m_mu);
+    const std::string &ev = _msg.subagent_event;
+    if (ev == "start") {
+        // A new run owns the window: the lines before it belong to another job.
+        const unsigned long runs = m_subagent.runs + 1;
+        m_subagent = subagent_state{};
+        m_subagent.runs = runs;
+        m_subagent.seen = true;
+        m_subagent.active = true;
+        m_subagent.agent = _msg.agent;
+        m_subagent.goal = _msg.text;
+        m_subagent_images.clear();
+        return;
+    }
+    m_subagent.seen = true;
+    if (!_msg.agent.empty()) {
+        m_subagent.agent = _msg.agent; // the innermost agent owns the title
+    }
+    if (ev == "end") {
+        m_subagent.active = false;
+        m_subagent.ok = _msg.ok;
+        return;
+    }
+    if (ev == "tool" || ev == "tool_end") {
+        llm_event e;
+        e.type = llm_event::kind::tool;
+        e.text = _msg.text;
+        e.ok = _msg.ok;
+        m_subagent.lines.push_back(std::move(e));
+    } else if (ev == "thinking") {
+        llm_events_append_thinking(m_subagent.lines, _msg.text);
+    } else {
+        llm_events_append_text(m_subagent.lines, _msg.text);
+    }
+}
+
+llm_host::subagent_state llm_host::subagent() const {
+    std::lock_guard<std::mutex> lk(m_mu);
+    return m_subagent;
+}
+
+std::string llm_host::subagent_image_png(long _image_id) const {
+    std::lock_guard<std::mutex> lk(m_mu);
+    for (const auto &entry : m_subagent_images) {
+        if (entry.first == _image_id) {
+            return entry.second;
+        }
+    }
+    return {};
+}
+
+std::string llm_host::run_tool(const llm_protocol::message &_call) {    int call_index = 0;
     {
         std::lock_guard<std::mutex> lk(m_mu);
         call_index = ++m_tool_calls;
@@ -463,6 +523,18 @@ std::string llm_host::run_tool(const llm_protocol::message &_call) {
         m_event_images.emplace_back(m_tool_image_id, reply.image_png);
         while (static_cast<int>(m_event_images.size()) > k_event_image_stash) {
             m_event_images.pop_front();
+        }
+        // The window shows the same picture the call returned: the bytes are
+        // already here, so nothing has to carry them a second time.
+        if (m_subagent.active) {
+            llm_event s;
+            s.type = llm_event::kind::image;
+            s.image_id = m_tool_image_id;
+            m_subagent.lines.push_back(std::move(s));
+            m_subagent_images.emplace_back(m_tool_image_id, reply.image_png);
+            while (m_subagent_images.size() > k_subagent_image_stash) {
+                m_subagent_images.pop_front();
+            }
         }
     }
     const std::string image_b64 =
@@ -857,6 +929,12 @@ std::string llm_host::run_tool(const llm_protocol::message &) {
 void llm_host::set_tool_context(const llm::tool_context &) {}
 
 void llm_host::record_note(const std::string &) {}
+
+void llm_host::record_subagent(const llm_protocol::message &) {}
+
+llm_host::subagent_state llm_host::subagent() const { return {}; }
+
+std::string llm_host::subagent_image_png(long) const { return {}; }
 
 llm_result llm_host::exchange(const std::string &, int, long) {
     llm_result r;

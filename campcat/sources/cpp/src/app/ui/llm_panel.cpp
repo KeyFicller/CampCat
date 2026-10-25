@@ -329,6 +329,200 @@ const ImVec4 k_user_bg{0.19F, 0.31F, 0.45F, 1.0F};
 const ImVec4 k_bot_bg{0.16F, 0.18F, 0.20F, 1.0F};
 const ImVec4 k_err_col{0.95F, 0.45F, 0.35F, 1.0F};
 const ImVec4 k_err_bg{0.30F, 0.16F, 0.16F, 1.0F}; ///< failed-reply bubble
+
+/// Name for the subagent window's heading. Unknown names are shown as sent.
+const char *agent_label(const std::string &_agent) {
+    if (_agent == "scripter") {
+        return "Scripter";
+    }
+    if (_agent == "diagnoser") {
+        return "Diagnoser";
+    }
+    if (_agent == "region") {
+        return "Region check";
+    }
+    return _agent.c_str();
+}
+
+/// Defined with the bubble's rendering below: the window shows the same four
+/// kinds of step the conversation does.
+void draw_item(llm_item &_it, bool _growing);
+bool grows_in_place(campcat::llm_event::kind _kind);
+
+/// How many of the window's pictures keep a texture. It is a side view, not the
+/// conversation, so this stays well under the bubble's cap.
+constexpr size_t k_sub_tex_cap = 4;
+
+/// The subagent window's steps, mirrored from the host, and the textures it
+/// owns. Its own queue rather than the bubble's: those items are not in a turn,
+/// so the bubble's eviction could not find them.
+std::vector<llm_item> g_sub_items;
+std::deque<long> g_sub_tex;
+unsigned long g_sub_run = 0;
+
+void release_sub_items() {
+    for (llm_item &it : g_sub_items) {
+        if (it.image_id != 0) {
+            campcat::app::delete_tex(&it.tex, &it.tex_w, &it.tex_h);
+        }
+    }
+    g_sub_items.clear();
+    g_sub_tex.clear();
+}
+
+/// Same shape as `sync_items`, and for the same reason: a growing step is
+/// updated in place, a new one appended, an image fetched once.
+void sync_sub_items(const campcat::llm_host::subagent_state &_st) {
+    if (_st.runs != g_sub_run) {
+        release_sub_items();
+        g_sub_run = _st.runs;
+    }
+    for (size_t i = 0; i < _st.lines.size(); ++i) {
+        const campcat::llm_event &e = _st.lines[i];
+        if (i < g_sub_items.size()) {
+            if (grows_in_place(e.type) && g_sub_items[i].text != e.text) {
+                g_sub_items[i].text = e.text;
+            }
+            continue;
+        }
+        llm_item it;
+        it.type = e.type;
+        it.text = e.text;
+        it.ok = e.ok;
+        it.image_id = e.image_id;
+        if (e.type == campcat::llm_event::kind::image) {
+            it.png = g_host.subagent_image_png(e.image_id);
+            it.tex_dropped = it.png.empty();
+        }
+        g_sub_items.push_back(std::move(it));
+    }
+    // The window is small, so it keeps fewer pictures alive than the bubble;
+    // an older one says so rather than staying blank.
+    for (llm_item &it : g_sub_items) {
+        if (it.image_id != 0 && it.tex != 0 &&
+            std::find(g_sub_tex.begin(), g_sub_tex.end(), it.image_id) ==
+                g_sub_tex.end()) {
+            g_sub_tex.push_back(it.image_id);
+        }
+    }
+    while (g_sub_tex.size() > k_sub_tex_cap) {
+        const long id = g_sub_tex.front();
+        g_sub_tex.pop_front();
+        for (llm_item &it : g_sub_items) {
+            if (it.image_id == id) {
+                campcat::app::delete_tex(&it.tex, &it.tex_w, &it.tex_h);
+                it.tex_dropped = true;
+            }
+        }
+    }
+}
+
+/// Right-click on the block just drawn: a menu that copies `_text` out.
+///
+/// `_top` is where the block started, taken before drawing it: a bubble is
+/// markdown, an image or a folded step, so the last item is only ever its final
+/// widget and cannot say where the block began.
+void copy_menu(const char *_id, std::string_view _text, ImVec2 _top) {
+    // The window check keeps a covered bubble quiet: the rect below is in
+    // screen space, and the subagent window may float over the conversation.
+    if (!_text.empty() && ImGui::IsWindowHovered() &&
+        ImGui::IsMouseHoveringRect(
+            _top, ImVec2(ImGui::GetWindowPos().x + ImGui::GetWindowSize().x,
+                         ImGui::GetItemRectMax().y)) &&
+        ImGui::IsMouseClicked(ImGuiMouseButton_Right)) {
+        ImGui::OpenPopup(_id);
+    }
+    if (!ImGui::BeginPopup(_id)) {
+        return;
+    }
+    if (ImGui::MenuItem("Copy")) {
+        ImGui::SetClipboardText(std::string(_text).c_str());
+    }
+    ImGui::EndPopup();
+}
+
+/// A reply bubble as plain text: every step in the order it happened, and the
+/// error when the turn failed.
+std::string reply_text(const llm_turn &_t) {
+    std::string out;
+    for (const llm_item &it : _t.items) {
+        if (it.text.empty()) {
+            continue;
+        }
+        if (!out.empty()) {
+            out += "\n\n";
+        }
+        out += it.text;
+    }
+    if (!_t.error.empty()) {
+        if (!out.empty()) {
+            out += "\n\n";
+        }
+        out += _t.error;
+    }
+    return out;
+}
+
+/// What the innermost subagent is doing while the operator waits for it.
+///
+/// One window, opened once per run: `runs` rises on every `start`, and a window
+/// the user closed stays closed for the rest of that run. Its title never
+/// changes, so the innermost agent swapping in and out moves nothing on screen.
+void draw_subagent_window() {
+    static bool open = false;
+    const campcat::llm_host::subagent_state st = g_host.subagent();
+    if (!st.seen) {
+        return;
+    }
+    if (!open && st.runs != g_sub_run) {
+        open = true;
+    }
+    if (!open) {
+        return;
+    }
+    sync_sub_items(st);
+    const ImGuiViewport *vp = ImGui::GetMainViewport();
+    ImGui::SetNextWindowPos(
+        ImVec2(vp->WorkPos.x + vp->WorkSize.x - 24.0F,
+               vp->WorkPos.y + vp->WorkSize.y - 24.0F),
+        ImGuiCond_FirstUseEver, ImVec2(1.0F, 1.0F));
+    ImGui::SetNextWindowSize(ImVec2(520.0F, 420.0F), ImGuiCond_FirstUseEver);
+    if (!ImGui::Begin("Sub-agent", &open)) {
+        ImGui::End();
+        return;
+    }
+    WITH_FONT(bold, { ImGui::TextUnformatted(agent_label(st.agent)); });
+    ImGui::SameLine();
+    if (st.active) {
+        ImGui::TextDisabled("working...");
+    } else if (st.ok) {
+        ImGui::TextDisabled("done");
+    } else {
+        ImGui::TextColored(k_err_col, "failed");
+    }
+    if (!st.goal.empty()) {
+        ImGui::TextDisabled("%s", st.goal.c_str());
+    }
+    ImGui::Separator();
+    ImGui::BeginChild("sub_lines", ImVec2(0.0F, 0.0F),
+                      ImGuiChildFlags_Borders);
+    // Follow the newest step unless the user scrolled up to read one.
+    const bool at_bottom = ImGui::GetScrollY() >= ImGui::GetScrollMaxY() - 1.0F;
+    for (size_t i = 0; i < g_sub_items.size(); ++i) {
+        const bool growing = st.active && i + 1 == g_sub_items.size() &&
+                             grows_in_place(g_sub_items[i].type);
+        const ImVec2 top = ImGui::GetCursorScreenPos();
+        ImGui::PushID(static_cast<int>(i));
+        draw_item(g_sub_items[i], growing);
+        copy_menu("copy", g_sub_items[i].text, top);
+        ImGui::PopID();
+    }
+    if (at_bottom) {
+        ImGui::SetScrollHereY(1.0F);
+    }
+    ImGui::EndChild();
+    ImGui::End();
+}
 /// Send is the one primary action here; plain buttons are surfaces (main.cpp).
 const ImVec4 k_primary{0.243F, 0.400F, 0.529F, 1.0F};
 const ImVec4 k_primary_hi{0.302F, 0.478F, 0.616F, 1.0F};
@@ -516,8 +710,38 @@ void draw_thinking(llm_item &_it, bool _streaming) {
     ImGui::PopStyleColor();
 }
 
-bool is_blank(std::string_view _s) {
-    for (const char c : _s) {
+/// One step of a timeline: an image, what the agent did, its reasoning, or its
+/// words. Shared by the conversation and the subagent window -- both show the
+/// same four kinds, and a second copy would drift.
+void draw_item(llm_item &_it, bool _growing) {
+    if (_it.type == campcat::llm_event::kind::image) {
+        ensure_texture(_it);
+        if (_it.tex != 0 && _it.tex_w > 0) {
+            const ImVec2 img = fit_image(_it.tex_w, _it.tex_h,
+                                         ImGui::GetContentRegionAvail().x);
+            ImGui::Image(
+                static_cast<ImTextureID>(static_cast<uintptr_t>(_it.tex)),
+                img, ImVec2(0.0F, 0.0F), ImVec2(1.0F, 1.0F));
+        } else if (_it.tex_dropped) {
+            ImGui::TextDisabled("(screenshot dropped)");
+        }
+        return;
+    }
+    if (_it.type == campcat::llm_event::kind::tool) {
+        ImGui::PushStyleColor(
+            ImGuiCol_Text, ImGui::GetStyle().Colors[ImGuiCol_TextDisabled]);
+        ImGui::Markdown(_it.text.c_str(), _it.text.size(), md_config());
+        ImGui::PopStyleColor();
+        return;
+    }
+    if (_it.type == campcat::llm_event::kind::thinking) {
+        draw_thinking(_it, _growing);
+        return;
+    }
+    ImGui::Markdown(_it.text.c_str(), _it.text.size(), md_config());
+}
+
+bool is_blank(std::string_view _s) {    for (const char c : _s) {
         if (!std::isspace(static_cast<unsigned char>(c))) {
             return false;
         }
@@ -972,7 +1196,9 @@ void draw_turn(llm_turn &_t, int _index) {
                       ImGuiChildFlags_AutoResizeY |
                           ImGuiChildFlags_AlwaysUseWindowPadding,
                       ImGuiWindowFlags_NoScrollbar);
+    const ImVec2 user_top = ImGui::GetCursorScreenPos();
     ImGui::TextWrapped("%s", _t.user_text.c_str());
+    copy_menu("copy", _t.user_text, user_top);
     ImGui::EndChild();
     ImGui::PopStyleVar();
     ImGui::PopStyleColor();
@@ -995,6 +1221,7 @@ void draw_turn(llm_turn &_t, int _index) {
                       ImGuiChildFlags_AutoResizeY |
                           ImGuiChildFlags_AlwaysUseWindowPadding,
                       ImGuiWindowFlags_NoScrollbar);
+    const ImVec2 reply_top = ImGui::GetCursorScreenPos();
     // The turn as it happened, step by step: the model's words in the normal
     // colour, what it did dimmed, and each image where it appeared. Markdown
     // rather than plain text for a note, because a note carries a whole tool
@@ -1003,31 +1230,7 @@ void draw_turn(llm_turn &_t, int _index) {
     // colour is pushed back by hand so the notes still read as quieter than the
     // replies between them.
     for (llm_item &it : _t.items) {
-        if (it.type == campcat::llm_event::kind::image) {
-            ensure_texture(it);
-            if (it.tex != 0 && it.tex_w > 0) {
-                const ImVec2 img = fit_image(it.tex_w, it.tex_h,
-                                             ImGui::GetContentRegionAvail().x);
-                ImGui::Image(
-                    static_cast<ImTextureID>(static_cast<uintptr_t>(it.tex)),
-                    img, ImVec2(0.0F, 0.0F), ImVec2(1.0F, 1.0F));
-            } else if (it.tex_dropped) {
-                ImGui::TextDisabled("(screenshot dropped)");
-            }
-            continue;
-        }
-        if (it.type == campcat::llm_event::kind::tool) {
-            ImGui::PushStyleColor(
-                ImGuiCol_Text, ImGui::GetStyle().Colors[ImGuiCol_TextDisabled]);
-            ImGui::Markdown(it.text.c_str(), it.text.size(), md_config());
-            ImGui::PopStyleColor();
-            continue;
-        }
-        if (it.type == campcat::llm_event::kind::thinking) {
-            draw_thinking(it, _t.pending && &it == &_t.items.back());
-            continue;
-        }
-        ImGui::Markdown(it.text.c_str(), it.text.size(), md_config());
+        draw_item(it, _t.pending && &it == &_t.items.back());
     }
     // Only while the reply is still to come: a growing text step is its own
     // sign that the model is working, and a label under it would just be a
@@ -1042,6 +1245,7 @@ void draw_turn(llm_turn &_t, int _index) {
         WITH_FONT(bold, { ImGui::TextColored(k_err_col, "Request failed"); });
         ImGui::TextWrapped("%s", _t.error.c_str());
     }
+    copy_menu("copy", reply_text(_t), reply_top);
     ImGui::EndChild();
     ImGui::PopStyleVar();
     ImGui::PopStyleColor();
@@ -1952,6 +2156,7 @@ void llm_panel_draw_panel(campcat::shell_state &_st, campcat::app_config &_cfg,
     }
 
     draw_memory_window();
+    draw_subagent_window();
 
     // Top of whatever comes below the log: the reference for the footer height.
     const float footer_top = ImGui::GetCursorScreenPos().y;

@@ -16,6 +16,7 @@ import agent.diagnoser as diagnoser
 import agent.memorier as memorier
 import observability
 import session
+import subagent
 import tools
 from agent.region_rules import REGION_RULES
 
@@ -500,7 +501,7 @@ def _scripter_invoke(state: dict) -> dict:
     import graph
     fresh = dict(state)
     fresh["reply"] = ""
-    return graph._invoke(fresh, state.get("tools") or [])
+    return graph._invoke(fresh, state.get("tools") or [], subagent.chunk_sink)
 
 
 def _apply_scripter_tools(state: dict) -> dict:
@@ -515,7 +516,11 @@ def _apply_scripter_tools(state: dict) -> dict:
             # The shot this diagnosis takes is the one a re-cut is checked
             # against, so it has to stay in the scripter's messages.
             before = session._LATEST_NUM
-            content = diagnoser.run_diagnoser(args)
+            with subagent.working(
+                    "diagnoser",
+                    f"{args.get('bundle', '')}/{args.get('template', '')}") as run:
+                content = diagnoser.run_diagnoser(args)
+                run.settle(content)
             pics: list = []
             if session._LATEST_NUM != before:
                 frame = session.latest_frame()

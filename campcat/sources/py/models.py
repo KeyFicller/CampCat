@@ -227,13 +227,16 @@ def build_chat_model(*, context: bool = False):
     )
 
 
-def streamed(model, messages):
+def streamed(model, messages, on_chunk=None):
     """One model call, abandoned as soon as the host stops the turn.
 
     `invoke` blocks until the provider has finished thinking, and with a
     reasoning model that is tens of seconds during which a stop could only be
     noticed afterwards. Streaming gives the loop a point to look between
     chunks, so a stop costs one chunk instead of one reply.
+
+    `on_chunk(is_answer, delta)` sees every non-empty delta as it arrives: the
+    subagent window is built from it. A plain operator call passes none.
 
     A model that cannot stream still works: LangChain's own `stream` falls back
     to a single `invoke` and yields one chunk, so there is simply nothing to
@@ -250,6 +253,14 @@ def streamed(model, messages):
     for chunk in model.stream(messages):
         if transport.stop_requested():
             raise transport.TurnInterrupted()
+        if on_chunk is not None:
+            reasoning = session.reasoning_text(chunk)
+            if reasoning:
+                on_chunk(False, reasoning)
+            else:
+                text = session.content_text(getattr(chunk, "content", ""))
+                if text:
+                    on_chunk(True, text)
         chunks.append(chunk)
     if not chunks:
         raise RuntimeError("model stream ended without a reply")

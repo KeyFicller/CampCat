@@ -83,6 +83,34 @@ TEST(LlmProtocol, MemorizeCarriesTheSelectedProvider) {
     EXPECT_EQ(j["memory"], "notes");
 }
 
+TEST(LlmProtocol, SubagentCarriesAgentAndEvent) {
+    campcat::llm_protocol::message msg;
+    ASSERT_TRUE(parse_line(
+        R"({"type":"subagent","id":3,"agent":"scripter","event":"start",
+            "text":"add an action"})",
+        &msg));
+
+    EXPECT_EQ(msg.type, campcat::llm_protocol::message::kind::subagent);
+    EXPECT_EQ(msg.id, 3);
+    EXPECT_EQ(msg.agent, "scripter");
+    EXPECT_EQ(msg.subagent_event, "start");
+    EXPECT_EQ(msg.text, "add an action");
+    // The window shows a tool as fine unless the line itself says otherwise.
+    EXPECT_TRUE(msg.ok);
+}
+
+TEST(LlmProtocol, SubagentToolEndCarriesTheFailure) {
+    campcat::llm_protocol::message msg;
+    ASSERT_TRUE(parse_line(
+        R"({"type":"subagent","id":3,"agent":"scripter","event":"tool_end",
+            "ok":false,"text":"no such bundle"})",
+        &msg));
+
+    EXPECT_EQ(msg.subagent_event, "tool_end");
+    EXPECT_FALSE(msg.ok);
+    EXPECT_EQ(msg.text, "no such bundle");
+}
+
 TEST(AppConfig, ProviderRoundTripsThroughTheFile) {
     const std::filesystem::path path =
         std::filesystem::temp_directory_path() / "campcat_provider_test.json";
