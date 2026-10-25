@@ -244,6 +244,7 @@ def streamed(model, messages, on_chunk=None):
     """
     if transport.stop_requested():
         raise transport.TurnInterrupted()
+    messages = session.think_in_chinese(messages)
     if not hasattr(model, "stream"):
         # Only a stand-in handed in by a test has no `stream` at all; a real
         # LangChain model always has one and falls back to a single `invoke`

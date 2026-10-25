@@ -165,8 +165,8 @@ def test_adjust_then_ok_sends_the_new_region_and_says_so(monkeypatch):
     ], None)
     assert calls[-1] == ("tap", {"region": {"x": 2, "y": 2, "w": 3, "h": 3}})
     text = _tap_text()[0]
-    assert "(self-check 1.00; already used box 2,2 3x3." in text
-    assert "Do not view_crop or save this region again this turn" in text
+    assert "(自查 1.00；已经改用 box 2,2 3x3。" in text
+    assert "这一轮里不要再 view_crop 或重新保存这个区域" in text
 
 
 def test_three_adjusts_then_the_pick_chooses(monkeypatch):
@@ -193,7 +193,7 @@ def test_an_unreadable_pick_keeps_the_first_proposal(monkeypatch):
         _say("Done."),
     ], None)
     assert calls[-1][1]["region"] == BOX
-    assert "kept the first of 2" in _tap_text()[0]
+    assert "2 个候选中保留第一个" in _tap_text()[0]
 
 
 def test_reject_never_reaches_the_host(monkeypatch):
@@ -203,7 +203,7 @@ def test_reject_never_reaches_the_host(monkeypatch):
         _say("Done."),
     ], None)
     assert "tap" not in [c[0] for c in calls]
-    assert _tap_text() == ["error: self-check rejected this region: wrong element"]
+    assert _tap_text() == ["error: 自查否掉了这个区域：wrong element"]
 
 
 def test_human_region_is_not_reviewed(monkeypatch):
@@ -229,14 +229,14 @@ def test_bad_output_or_model_error_lets_the_call_through(monkeypatch):
         _say("Done."),
     ], None)
     assert calls[-1][1] == {"region": BOX}
-    assert "(self-check skipped:" in _tap_text()[0]
+    assert "(自查跳过：" in _tap_text()[0]
 
     calls, _, _ = _drive(monkeypatch, [
         _call("tap", {"region": dict(BOX), "expect": "btn"}),
         _say("Done."),
     ], None, fail_at=2)
     assert calls[-1][1] == {"region": BOX}
-    assert "(self-check skipped:" in _tap_text()[-1]
+    assert "(自查跳过：" in _tap_text()[-1]
 
 
 def test_adjust_off_the_frame_keeps_the_previous_region(monkeypatch):
@@ -298,7 +298,7 @@ def test_tap_review_sends_the_neighbourhood(monkeypatch):
     ], None, images={"mark": big})
     review = _reviews(model)[0]
     assert _image_size(review.content[2]) == (300, 178)
-    assert "neighbourhood 300,236 300x178 of the 1000x800 frame" in review.content[0]["text"]
+    assert "1000x800 这一帧里 300,236 处 300x178 的邻域" in review.content[0]["text"]
 
 
 def test_neighbourhood_is_clipped_at_the_frame_edge():
@@ -442,7 +442,7 @@ def test_a_checked_template_keeps_its_cut(monkeypatch):
     assert cuts["dock.png"] == BOX
     assert cuts["icon.png"] == {"x": 4, "y": 4, "w": 1, "h": 1}
     assert seen == ["dock.png", "icon.png"]
-    assert "already checked this turn" in note
+    assert "这一轮已经检查过了" in note
 
 
 def test_a_second_rejection_is_the_last_review(monkeypatch):
@@ -458,7 +458,7 @@ def test_a_second_rejection_is_the_last_review(monkeypatch):
     assert first == "wrong element"
     _, _, second = region_review.review("tap", {
         "region": {"x": 9, "y": 9, "w": 2, "h": 2}, "expect": "btn"})
-    assert "Do not view_crop or save this region again this turn" in second
+    assert "这一轮里不要再 view_crop" in second
     _, _, third = region_review.review("tap", {
         "region": {"x": 8, "y": 8, "w": 2, "h": 2}, "expect": "btn"})
     assert third == second
@@ -519,7 +519,7 @@ def test_template_pick_follows_the_crop_rules(monkeypatch):
         _say("pick: 2\nreason: rule 1, the circle"),
         _say("Done."),
     ], None, name="save_template")
-    picks = [text for text in _systems(model) if text.startswith("You see every attempt")]
+    picks = [text for text in _systems(model) if text.startswith("你看到同一个")]
     assert picks
     assert "圆" in picks[-1]
     assert "留白" in picks[-1]
@@ -538,7 +538,7 @@ def test_unreadable_template_pick_keeps_the_first_cut(monkeypatch):
     ], None, name="save_template")
     assert [c for c in calls if c[0] == "save_template"] == [
         ("save_template", {"region": BOX})]
-    assert any("kept the first of 2" in text for text in _tap_text())
+    assert any("2 个候选中保留第一个" in text for text in _tap_text())
 
 
 def test_a_low_confidence_ok_gets_one_more_look(monkeypatch):
@@ -552,7 +552,7 @@ def test_a_low_confidence_ok_gets_one_more_look(monkeypatch):
         _say("Done."),
     ], None)
     texts = [review.content[0]["text"] for review in _reviews(model)]
-    assert sum("You were not sure last time" in text for text in texts) == 1
+    assert sum("上一次你没把握" in text for text in texts) == 1
     assert calls[-1][1]["region"] == BOX
 
 
@@ -578,7 +578,7 @@ def test_the_score_shows_up_in_the_history(monkeypatch):
     ], None)
     # The last verdict is the one reported, in the same bracket as what the
     # check did about it.
-    assert "(self-check 0.70; kept the first of 2: the first." in _tap_text()[0]
+    assert "(自查 0.70；2 个候选中保留第一个：the first。" in _tap_text()[0]
 
 
 def test_a_skipped_check_keeps_its_own_wording(monkeypatch):
@@ -588,8 +588,8 @@ def test_a_skipped_check_keeps_its_own_wording(monkeypatch):
         _say("Done."),
     ], None)
     text = _tap_text()[0]
-    assert "(self-check skipped:" in text
-    assert "(self-check 0." not in text
+    assert "(自查跳过：" in text
+    assert "(自查 0." not in text
 
 
 def test_the_score_is_shown_before_the_tool_runs(monkeypatch):
@@ -606,9 +606,9 @@ def test_the_score_is_shown_before_the_tool_runs(monkeypatch):
     ], None)
     # Once, before the host call: the approval gate reads the conversation, not
     # the tool result, and the result only exists after it is answered.
-    assert notes == ["self-check 0.80; kept the first of 2: the first."
-                     " Do not view_crop or save this region again this turn"
-                     " unless the tool returned an error."]
+    assert notes == ["自查 0.80；2 个候选中保留第一个：the first。"
+                     " 这一轮里不要再 view_crop 或重新保存这个区域，"
+                     "除非工具返回了错误。"]
     assert calls[-1][0] == "tap"
 
 
@@ -631,16 +631,16 @@ def test_the_pick_judges_each_attempt_on_its_own(monkeypatch):
         _say("pick: 1\nreason: the first"),
         _say("Done."),
     ], None)
-    picks = [text for text in _systems(model) if text.startswith("You see every attempt")]
-    assert picks and "not better and not worse" in picks[-1]
-    assert "surroundings" in picks[-1]
+    picks = [text for text in _systems(model) if text.startswith("你看到同一个")]
+    assert picks and "既不比第一次好，也不比它差" in picks[-1]
+    assert "周围环境" in picks[-1]
     # One text and two pictures per candidate; the judge's reason would only
     # make the later attempt sound better.
     wide = [review for review in _reviews(model) if len(review.content) > 3]
     assert len(wide) == 1
     assert len(wide[0].content) == 1 + 2 * 2
     assert "tightened" not in wide[0].content[0]["text"]
-    assert "candidate 1" in wide[0].content[0]["text"]
+    assert "候选 1" in wide[0].content[0]["text"]
     assert [c[0] for c in calls].count("tight_crop") == 2 + 2
     assert [c[0] for c in calls].count("mark") == 2 + 2
 
@@ -659,7 +659,7 @@ def test_a_wired_scorer_picks_the_highest(monkeypatch):
     assert calls[-1] == ("tap", {"region": {"x": 2, "y": 2, "w": 3, "h": 3}})
     assert [c[0] for c in calls].count("tight_crop") == 2
     assert [review for review in _reviews(model) if len(review.content) > 3] == []
-    assert "(self-check 0.80;" in _tap_text()[0]
+    assert "(自查 0.80；" in _tap_text()[0]
 
 
 def test_a_half_scored_or_broken_scorer_falls_back_to_the_model(monkeypatch):

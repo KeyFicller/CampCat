@@ -149,10 +149,10 @@ def test_operator_only_refuses_everything_but_screenshot_and_tap(monkeypatch, sc
     assert calls == []
     assert session.scripter_history() == []
     assert [m.content for m in _tool_messages()] == [
-        "error: only go_home, screenshot, start_emulator, tap are available "
-        "right now; author_script is not",
-        "error: only go_home, screenshot, start_emulator, tap are available "
-        "right now; run_script is not",
+        "error: 这一轮只能用 go_home, screenshot, start_emulator, tap；"
+        "不能用 author_script",
+        "error: 这一轮只能用 go_home, screenshot, start_emulator, tap；"
+        "不能用 run_script",
     ]
 
 
@@ -224,7 +224,7 @@ def test_empty_goal_skips_the_model(monkeypatch, scripted):
     list(graph.stream_turn({"text": "write it", "tools": [], "memory": ""}, {}))
 
     assert made["n"] == 2
-    assert _tool_messages()[0].content == "error: empty goal"
+    assert _tool_messages()[0].content == "error: goal 为空"
 
 
 def test_scripter_reply_strips_dsml(monkeypatch, scripted):
@@ -248,7 +248,7 @@ def test_scripter_silent_after_tools(monkeypatch, scripted):
     ])
 
     assert _tool_messages()[0].content == (
-        "failed: script agent gave no summary\nsave_script ok")
+        "failed: 写脚本的 agent 没有给出总结\nsave_script ok")
 
 
 def test_scripter_author_script_goes_to_host(monkeypatch, scripted):
@@ -288,7 +288,7 @@ def test_an_announcement_does_not_hide_a_missing_summary(monkeypatch, scripted):
     ])
 
     assert _tool_messages()[0].content == (
-        "failed: script agent gave no summary\nsave_script ok")
+        "failed: 写脚本的 agent 没有给出总结\nsave_script ok")
 
 
 def test_no_summary_ignores_an_earlier_handoff(monkeypatch, scripted):
@@ -310,7 +310,7 @@ def test_no_summary_ignores_an_earlier_handoff(monkeypatch, scripted):
     list(graph.stream_turn({"text": "write it", "tools": [], "memory": ""}, {}))
     list(graph.stream_turn({"text": "again", "tools": [], "memory": ""}, {}))
 
-    assert _tool_messages()[-1].content == "failed: script agent gave no summary"
+    assert _tool_messages()[-1].content == "failed: 写脚本的 agent 没有给出总结"
 
 
 def test_operator_turn_keeps_the_scripter_screenshot(monkeypatch, scripted):

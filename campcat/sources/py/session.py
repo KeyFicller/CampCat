@@ -14,7 +14,7 @@ import struct
 import time
 from uuid import uuid4
 
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import HumanMessage, SystemMessage
 
 try:                       # optional: without it the older frames are dropped
     from PIL import Image  # instead of scaled, which is what this did before
@@ -68,6 +68,34 @@ _DSML_TAG = re.compile(r"</?[^>]*DSML[^>]*>", re.IGNORECASE)
 # The frame number a caption names, e.g. "#9" in "Screenshot #9 (2560x1440 ...)".
 # `_shot_caption` fixes that shape; nothing else in a caption contains "#".
 _SHOT_NUM = re.compile(r"#(\d+)")
+
+# Appended to the text of every request a model gets -- the user's own words and
+# the brief after a handoff -- so its reasoning stays Chinese. It rides on the
+# message, not the system prompt, and it is committed with the turn: the next
+# request's prefix then matches what the provider already cached.
+ASK_IN_CHINESE = "\n\n用中文思考和回答。"
+
+# Ends the system prompt, the last thing read before the model starts
+# reasoning; ASK_IN_CHINESE on its own only nudges. Naming the two habits that
+# actually show up -- an English preamble and `Hmm`/`Wait` hedging -- is what
+# holds: on DeepSeek's region check it took Chinese thinking from 0/6 to 5/6,
+# and the scripter from 1/6 to 4/6. Allowing English identifiers here would
+# undo that, so they are not mentioned.
+THINK_IN_CHINESE = ("\n\n系统：你的思考过程（reasoning）必须全程使用简体中文，"
+                    "禁止英文和 Hmm/Wait。最终答复也用简体中文。")
+
+
+def think_in_chinese(messages: list) -> list:
+    """The messages with THINK_IN_CHINESE on the system prompt.
+
+    Every model call is routed through here rather than each prompt module, so
+    an agent added later cannot forget it. A new list comes back: the caller's
+    is the conversation, which gets committed and must not keep the note.
+    """
+    if not messages or not isinstance(messages[0], SystemMessage):
+        return messages
+    system = SystemMessage(content=(messages[0].content or "") + THINK_IN_CHINESE)
+    return [system, *messages[1:]]
 
 
 # Only the NDJSON read loop touches this, so it needs no lock.
@@ -266,7 +294,7 @@ def latest_frame() -> HumanMessage | None:
     if not _LATEST_NUM:
         return None
     return HumanMessage(content=_shot_content(
-        _shot_caption(_LATEST_NUM, "The last screenshot you took:",
+        _shot_caption(_LATEST_NUM, "你最近拍的一张截图：",
                       _LATEST_B64, _LATEST_TIME), _LATEST_B64))
 
 
@@ -286,7 +314,7 @@ def screenshot_frame(shot: object, image: str) -> HumanMessage | None:
     _LATEST_NUM, _LATEST_B64 = shot, image
     _LATEST_TIME = time.time()
     return HumanMessage(content=_shot_content(
-        _shot_caption(shot, "Screenshot", image, _LATEST_TIME, since), image))
+        _shot_caption(shot, "截图", image, _LATEST_TIME, since), image))
 
 
 def recall_frame(shot: object, image: str) -> HumanMessage:
@@ -297,10 +325,10 @@ def recall_frame(shot: object, image: str) -> HumanMessage:
     time either: the host keeps frames without one.
     """
     size = png_size(image)
-    dims = f" ({size[0]}x{size[1]} pixels)" if size else ""
+    dims = f"（{size[0]}x{size[1]} 像素）" if size else ""
     return HumanMessage(content=_shot_content(
-        f"Screenshot #{shot} again{dims}; this is an earlier "
-        f"screen, not the current one.", image))
+        f"#{shot} 号截图再看一次{dims}；这是早先的一张"
+        f"画面，不是当前画面。", image))
 
 
 def picture_of(name: str, image: str, args: dict | None = None) -> HumanMessage:
@@ -312,11 +340,11 @@ def picture_of(name: str, image: str, args: dict | None = None) -> HumanMessage:
     marked, which is how `demote_pictures` counts it apart from screenshots.
     """
     if args is None:
-        caption = f"Image after {name}."
+        caption = f"工具图：{name}。"
     else:
         caption = (
-            f"Image after {name}"
-            f"({json.dumps(args, ensure_ascii=False, separators=(',', ':'))})."
+            f"工具图：{name} "
+            f"{json.dumps(args, ensure_ascii=False, separators=(',', ':'))}。"
         )
     message = HumanMessage(content=_shot_content(caption, image))
     size = png_size(image)
@@ -355,13 +383,13 @@ def _shot_caption(shot: int, lead: str, image: str, captured: float = 0.0,
     old frame has to state that frame's size, which need not be the newest one's.
     """
     size = png_size(image)
-    parts = [f"#{shot}" + (f" ({size[0]}x{size[1]} pixels)" if size else "")]
+    parts = [f"#{shot}" + (f"（{size[0]}x{size[1]} 像素）" if size else "")]
     if captured:
         stamp = time.strftime("%H:%M:%S", time.localtime(captured))
-        parts.append(f"taken {stamp}.{int(captured * 1000) % 1000:03d}")
+        parts.append(f"拍于 {stamp}.{int(captured * 1000) % 1000:03d}")
     if since_previous is not None:
-        parts.append(f"+{since_previous:.1f}s since the previous screenshot")
-    return f"{lead} {', '.join(parts)}."
+        parts.append(f"距上一张截图 +{since_previous:.1f}s")
+    return f"{lead} {', '.join(parts)}。"
 
 
 def _shot_content(caption: str, image: str) -> list[dict]:
@@ -396,12 +424,12 @@ def _detach_picture(m: HumanMessage) -> HumanMessage:
     caption = " ".join(p["text"] for p in m.content if p.get("type") == "text")
     found = _SHOT_NUM.search(caption)
     if found:
-        note = ("[image not attached; call view_shot(" + found[1]
-                + ") to look again]")
-    elif caption.startswith("Image after "):
-        note = "[image not attached; make the same call again to look at it]"
+        note = ("[图片未附上；要再看一次就调 view_shot(" + found[1]
+                + ")]")
+    elif caption.startswith("工具图："):
+        note = "[图片未附上；把同一个调用再发一次就能看到]"
     else:
-        note = "[image not attached]"
+        note = "[图片未附上]"
     return HumanMessage(
         content=[p for p in m.content if p.get("type") != "image_url"]
         + [{"type": "text", "text": note}]
@@ -454,8 +482,8 @@ def _shrink_picture(m: HumanMessage) -> HumanMessage:
     if small is None:
         return _detach_picture(m)
     url, w, h = small
-    note = (f"[shown scaled to {w}x{h}; call view_shot({found[1]}) before "
-            f"cutting a template from this frame]")
+    note = (f"[已缩放显示为 {w}x{h}；从这一帧裁模板之前，"
+            f"先调 view_shot({found[1]})]")
     return HumanMessage(content=[
         p for p in m.content if p.get("type") != "image_url"
     ] + [

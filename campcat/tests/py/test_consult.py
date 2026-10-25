@@ -83,7 +83,7 @@ def test_an_empty_question_or_picture_never_reaches_the_model(monkeypatch):
     for req in (_request(question="  "), _request(image="")):
         out = consult.answer(req)
         assert out["ok"] is False
-        assert out["error"] == "empty question or picture"
+        assert out["error"] == "问题或图片为空"
     assert seen.seen == []
 
 

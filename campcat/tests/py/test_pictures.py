@@ -61,8 +61,8 @@ def test_crops_are_cleared_in_one_batch():
     for old in crops[:5]:
         assert not _urls(old)
         text = session.content_text(old.content)
-        assert "make the same call again" in text
-        assert 'view_crop({"region":' in text
+        assert "把同一个调用再发一次" in text
+        assert 'view_crop {"region":' in text
 
 
 def test_new_crop_under_the_high_mark_rewrites_nothing():
@@ -102,7 +102,7 @@ def test_large_crop_counts_as_a_frame():
 
     assert not _urls(messages[0])
     text = session.content_text(messages[0].content)
-    assert "make the same call again" in text
+    assert "把同一个调用再发一次" in text
 
 
 def test_mark_still_drops_when_not_newest_frame():
@@ -115,7 +115,7 @@ def test_mark_still_drops_when_not_newest_frame():
 
     text = session.content_text(messages[0].content)
     assert not _urls(messages[0])
-    assert "make the same call again" in text
+    assert "把同一个调用再发一次" in text
 
 
 def test_thumbnail_and_crop_helpers(monkeypatch):

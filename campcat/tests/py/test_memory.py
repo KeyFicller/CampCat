@@ -53,14 +53,14 @@ def test_empty_reply_and_unknown_agent_leave_cursors(monkeypatch):
 
 
 def test_instructions_name_the_sections():
-    assert "## Preferences" in memorier.MEMORY_INSTRUCTIONS
-    assert "## Names" in memorier.MEMORY_INSTRUCTIONS
+    assert "## 偏好" in memorier.MEMORY_INSTRUCTIONS
+    assert "## 叫法" in memorier.MEMORY_INSTRUCTIONS
     assert "Device & skills" not in memorier.MEMORY_INSTRUCTIONS
-    assert "passwords" in memorier.MEMORY_INSTRUCTIONS
-    assert "## Pitfalls" in memorier.SCRIPTER_MEMORY_INSTRUCTIONS
+    assert "密码" in memorier.MEMORY_INSTRUCTIONS
+    assert "## 坑" in memorier.SCRIPTER_MEMORY_INSTRUCTIONS
     assert "bundle" in memorier.SCRIPTER_MEMORY_INSTRUCTIONS
     assert memorier.scripter_memory_block("  ") == ""
-    assert "Pitfalls you kept" in memorier.scripter_memory_block("sign_in.png lies")
+    assert "你在之前会话里留下的坑" in memorier.scripter_memory_block("sign_in.png lies")
 
 
 def test_empty_notes_leave_both_prompts_byte_identical():
@@ -80,3 +80,15 @@ def test_each_prompt_sees_only_its_own_notes():
     assert "sign_in.png lies" not in op["messages"][0].content
     assert "sign_in.png lies" in sc["messages"][0].content
     assert "日常 -> app.daily_claim" not in sc["messages"][0].content
+
+
+def test_the_chinese_note_is_stored_with_the_turn():
+    """In history too, so the next request's prefix matches what was sent."""
+    session.reset()
+    state = graph.precheck({"text": "看看现在什么界面"})
+    assert state["text"] == "看看现在什么界面" + session.ASK_IN_CHINESE
+    built = graph.build_messages({**state, "memory": ""})
+    assert built["messages"][-1].content == state["text"]
+    graph.commit({**state, "messages": built["messages"],
+                  "input_len": built["input_len"]})
+    assert session.history()[0].content == "看看现在什么界面" + session.ASK_IN_CHINESE

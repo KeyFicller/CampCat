@@ -16,7 +16,7 @@ import pytest
 import session
 import tools
 import transport
-from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
 TAP = {
     "type": "function",
@@ -109,6 +109,22 @@ def test_streamed_stops_in_the_middle_of_a_reply(monkeypatch):
         models.streamed(Slow(), [HumanMessage(content="hi")])
     # The third chunk was never pulled: that is the saving.
     assert pulled == ["one ", "two "]
+
+
+def test_streamed_asks_for_chinese_thinking_at_the_end_of_the_system_prompt():
+    seen = {}
+
+    class Recorder:
+        def stream(self, messages):
+            seen["messages"] = messages
+            yield AIMessage(content="ok")
+
+    original = [SystemMessage(content="你是操作员。"), HumanMessage(content="hi")]
+    models.streamed(Recorder(), original)
+
+    assert seen["messages"][0].content.endswith(session.THINK_IN_CHINESE)
+    # The caller's list is the conversation: it must not keep the note.
+    assert original[0].content == "你是操作员。"
 
 
 def test_streamed_still_works_for_a_model_that_cannot_stream():
