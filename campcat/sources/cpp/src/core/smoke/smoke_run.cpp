@@ -8,9 +8,12 @@
 
 #include "core/adb_client.h"
 #include "core/app_config.h"
+#include "core/automation_log.h"
 #include "core/llm/llm_host.h"
 #include "core/mumu_launch.h"
 #include "core/script/ccat_graph.h"
+
+#include <mutex>
 
 namespace campcat {
 namespace {
@@ -30,6 +33,21 @@ std::string seconds_since(run_clock::time_point _from) {
     char out[32];
     std::snprintf(out, sizeof(out), "%.1fs", elapsed);
     return out;
+}
+
+/// The sidecar's stderr, and anything else that logs, has no sink in a smoke
+/// run -- no window is there to own one -- so it would be dropped. Keeping it
+/// is what makes the model's reasoning ([llm][py] [think]...) readable, and a
+/// turn that went in circles is only explicable from its own words.
+automation_log::handle install_log_sink() {
+    return automation_log::add_sink([](const std::string &_line) {
+        // Two threads reach this: the sidecar's stderr pump and the tools the
+        // turn runs. One line at a time, or the log interleaves mid-sentence.
+        static std::mutex mu;
+        std::lock_guard<std::mutex> lk(mu);
+        std::printf("%s\n", _line.c_str());
+        std::fflush(stdout);
+    });
 }
 
 /// `YYYYMMDD-HHMMSS`, local time: one directory per run, named in the order the
@@ -180,6 +198,7 @@ int run_smoke(const std::filesystem::path &_prompts,
 
     llm_host host;
     host.set_tool_context(ctx);
+    const automation_log::handle logs = install_log_sink();
 
     int done = 0;
     bool failed = false;

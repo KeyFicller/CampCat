@@ -850,8 +850,8 @@ constexpr int k_default_swipe_ms = 300;
 [[= js::image_result]][[= js::doc{
     .text = js::str(
         "新截一张设备屏幕的图并给它编号。脚本停下来提问时，用它看问题说的是"
-        "哪个界面。想知道设备停在哪个界面，用 locate：它一行就回答，而且不"
-        "出图。要看更早的帧，不要用它——view_shot 会在不替换当前屏幕的前提"
+        "哪个界面。想确认设备停在哪个界面，有 locate 就先用它：一行就回答，"
+        "不出图。要看更早的帧，不要用它——view_shot 会在不替换当前屏幕的前提"
         "下做到。")}]] std::string
     screenshot() {
     adb_api &adb = require_adb();
@@ -950,9 +950,9 @@ CPP_REFLECT_TOOL(view_template)
 [[= js::image_result]][[= js::doc{
     .text = js::str(
         "显示截图的某一个区域，把切图范围画出来，并带上周围最多 16 像素。"
-        "每个控件用一次，紧接在 save_template 之前：画出的形状就是切图，线外"
-        "的像素只是上下文，不属于模板。要看屏幕，不要用它（用 screenshot）；"
-        "也不要对同一个框看第二次来收紧。形状跟着控件走：矩形用 box "
+        "裁一个控件之前看一次，匹配失败之后也用它看报错里的位置：画出的形状"
+        "就是切图，线外的像素只是上下文，不属于模板。要看整屏，不要用它（用 "
+        "screenshot）；也不要对同一个框看第二次来收紧。形状跟着控件走：矩形用 box "
         "{x,y,w,h}，圆形控件用 circle {cx,cy,r}，菱形用 diamond {cx,cy,rx,ry}。"
         "它不改变当前屏幕。")}]]
     [[= js::param_docs(
@@ -1264,7 +1264,8 @@ std::string run_parsed(const ccat_lang::Program &_prog,
         "批准就不跑。用它验证你写的脚本，确认某一步真的落到位。不要原样再跑"
         "一遍同一个脚本当作修复。save_template 还没放进 bundle 的模板 PNG 会"
         "让语句失败（对它做 `if` 直接是假）；tap_at 和 swipe_at 不需要模板，"
-        "run(\"<name>/main.ccat\") 跑已保存的 bundle。语言本身看 "
+        "run(\"<name>/main.ccat\") 跑已保存的 bundle。它只回文本、不附图；"
+        "跑完想知道停在哪个界面，接着 screenshot。语言本身看 "
         "ccat_help。")}]]
     [[= js::param_docs(
         js::str("要跑的 .ccat 脚本全文。"))]] std::string
@@ -1542,8 +1543,9 @@ std::string save_template_region(std::string bundle, std::string name,
     .text = js::str(
         "从一张截图里切出一张模板 PNG，放进一个已经存在的 bundle，脚本就能"
         "用 tap(\"name.png\") 引用它；人工审批开启时，没人批准就不切。脚本"
-        "引用几张 PNG 就用几次，切之前随手截屏，切得紧贴不动的部分。不要只"
-        "为了把同一个框收紧再切一次，也不要从比当前屏幕更早的帧上切。形状"
+        "引用几张 PNG 就用几次。要切的控件还在当前屏幕上，就截一张新的再切；"
+        "不在，就用 shot 指定那张帧，先 view_shot 看一眼。切得紧贴不动的部分，"
+        "不要只为了把同一个框收紧再切一次。形状"
         "跟着控件走：矩形用 box {x,y,w,h}，圆形控件用 circle {cx,cy,r}，菱形"
         "用 diamond {cx,cy,rx,ry}（顶点落在坐标轴上）。给圆形或菱形控件套 box "
         "会把背景也切进去，匹配时还得绕开；用对应的形状则按形状写 alpha。")}]]
@@ -1977,7 +1979,8 @@ CPP_REFLECT_TOOL(update_script)
         "审批。加界面用它；一张图的第一个 anchor 必须叫 \"entry\"。图里已经"
         "有的界面不要再存一个 anchor：新 anchor 会先把已有的跑一遍，然后被"
         "拒绝，并指出认出它的是哪个。不要在里面放动作——anchor 只做判断，因为"
-        "每次 locate 都会跑所有 anchor。保存已有的 anchor 会三样全换，像 "
+        "每次 locate 都会跑所有 anchor。这次交接获准改这个 anchor 时，保存"
+        "已有的 anchor 会三样全换，像 "
         "update_script 那样。两个 anchor 之间用 "
         "save_script(\"<graph>.<from>-<to>\", ...) 连起来。")}]]
     [[= js::param_docs(
@@ -1986,7 +1989,8 @@ CPP_REFLECT_TOOL(update_script)
         js::str("golden.md：用 --- 行包起来的 front matter（kind: page | "
                 "transient | popup，默认 page；popup 需要 close: <关掉它的 "
                 "bundle>），后面接一句对这个界面的自然语言描述。"),
-        js::str("main.ccat：判断是不是这个界面，返回 true 或 false。"),
+        js::str("main.ccat：判断是不是这个界面，至少要有一条 return"
+                "（返回 true 或 false）。"),
         js::str("之后这个 anchor 应当拥有的全部模板，写法同 "
                 "update_script。"))]] std::string
         save_anchor(std::string graph, std::string anchor, std::string golden,
@@ -2070,8 +2074,8 @@ CPP_REFLECT_TOOL(save_anchor)
 [[= js::quiet{.text = js::str("Read graph {name}")}]][[= js::doc{
     .text = js::str(
         "按各 bundle 的描述返回一张图：每个 anchor 和它的种类、描述的第一行，"
-        "每条边，以及任何会挡住 goto 使用它的问题。goto 之前用它，加界面或"
-        "加边之前也用它。要读脚本，不要用它——那是 read_script。")}]]
+        "每条边，以及任何会挡住 goto 使用它的问题。写 goto(...) 之前用它，"
+        "加界面或加边之前也用它。要读脚本，不要用它——那是 read_script。")}]]
     [[= js::param_docs(
         js::str("图名，点号前面那部分（list_scripts 会把它的 <graph>.entry "
                 "bundle 标成 [graph ...]）。"))]] std::string

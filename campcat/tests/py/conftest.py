@@ -56,3 +56,18 @@ def scripted():
         return ScriptedModel(responses=responses)
 
     return _build
+
+
+@pytest.fixture(autouse=True)
+def no_reflection(monkeypatch):
+    """Silence the note a handoff writes about itself, unless a case asks for it.
+
+    `reflector.reflect` is a model call of its own, made from inside the
+    `author_script` branch. Left on, it takes the next reply off a scripted model
+    -- which is a tool call, so the turn starts over and never ends. It also
+    reaches the network in any case that does not stub `build_chat_model`. The
+    cases that care about it stub this fixture out and call it directly, or spy
+    on it, as `test_reflector.py` does.
+    """
+    import agent.reflector as reflector
+    monkeypatch.setattr(reflector, "reflect", lambda *a, **k: ("", ""))

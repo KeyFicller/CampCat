@@ -16,17 +16,26 @@ from typing import TypedDict
 
 from langchain_core.messages import HumanMessage, SystemMessage
 from langgraph.graph import END, StateGraph
+from concurrent.futures import ThreadPoolExecutor
 
 import models
 import session
 import subagent
 import tools
 
-MAX_ROUNDS = 3
+# A third verdict measured no better than the second, and cost a full pass over
+# the same two pictures; two rounds is where the corrections stop paying.
+MAX_ROUNDS = 2
 
 # One 0..1 scale for the judge's own confidence and any scoring model wired in
-# later: below this, another attempt is worth trying.
-MIN_SCORE = 0.6
+# later: below this, another attempt is worth trying. A 0.4 bought a second look
+# that came back worse, so the extra pass is kept for a real doubt.
+MIN_SCORE = 0.5
+
+# Template checks in one call do not see each other, so they run together. Four
+# is where the wall clock stops improving: each is a ~15 s model round trip, and
+# the host answers one tool call at a time anyway.
+MAX_REVIEWS = 4
 
 # kind, and the shape a single region takes. update_script and save_anchor have
 # one region per template entry, read off that entry's cut.
@@ -43,14 +52,13 @@ EXPECT_DOC = (
 )
 
 _PRESSURE = (
-    "先假定这个区域是错的，直到你找过毛病却没找到为止。这不是你画的："
-    "第一次的提议都带边距，已经修过一次的又可能改过了头。指出最可能出错的那"
-    "一条边——左、右、上、下，或者形状本身——只有当这个裁切你会原样交给之后"
-    "每一次运行使用时，才回答 ok。你签字放过的裁切，在这次检查消失很久之后"
-    "还在被用，所以看见了却放过才是贵的那个。调整很便宜，而且只参与比较、"
-    "不被信任：差的一次会被丢掉，所以你没有任何理由接受一个自己都不用的裁切。"
-    "置信度也不是投票：低的只是多买一次复查，不扣任何分；高的只是让检查提前"
-    "结束。"
+    "你看的是别人提议的区域，还没被使用。只做两件事：指出最可能错的那一条边"
+    "——左、右、上、下，或者形状本身——然后决定。给了上一轮的坐标，就在那组"
+    "数字上改，不要重新测量图片：同一个裁切量两遍会得到两个答案。只有明显错"
+    "（切掉了控件、框在别的东西上）才继续 adjust；只是几像素的边距，回答 ok，"
+    "边距交给几何修正。你签字放过的裁切，在这次检查消失很久之后还在被用，所以"
+    "看见了却放过才是贵的那个。置信度不是投票：低的只是多买一次复查，不扣任何"
+    "分。"
 )
 
 REVIEW_PROMPT = (
@@ -156,6 +164,22 @@ _human: tuple | None = None
 _STOP = (" 这一轮里不要再 view_crop 或重新保存这个区域，"
          "除非工具返回了错误。")
 _KEPT = "这一轮已经检查过了，沿用上一次的区域。" + _STOP
+
+
+def _kept(region: dict) -> str:
+    """The reuse note, with the box that reused: the model has to act on it."""
+    return _KEPT + "沿用的是 " + _where(region) + "。"
+
+
+def _where(region: dict) -> str:
+    """A region as the note writes it, in the shape the model has to send back."""
+    if _shape_of(region) == "box":
+        return (f"box {region['x']},{region['y']} "
+                f"{region['w']}x{region['h']}")
+    if _shape_of(region) == "diamond":
+        return (f"diamond rx={region['rx']} ry={region['ry']} "
+                f"at {region['cx']},{region['cy']}")
+    return f"circle r={region['r']} at {region['cx']},{region['cy']}"
 _accepted: dict[str, dict] = {}
 _reject_count: dict[str, int] = {}
 _reject_reason: dict[str, str] = {}
@@ -186,6 +210,7 @@ class ReviewState(TypedDict, total=False):
     frame_size: tuple
     verdict: str
     reason: str
+    last_reason: str
     candidates: list
 
 
@@ -356,15 +381,7 @@ def _moved(shape: str, before: dict, after: dict) -> str:
     if before == after:
         return ""
     # The sent crop may have changed shape, so the note follows `after`.
-    shape = _shape_of(after)
-    if shape == "box":
-        where = (f"box {after['x']},{after['y']} {after['w']}x{after['h']}")
-    elif shape == "diamond":
-        where = (f"diamond rx={after['rx']} ry={after['ry']} "
-                 f"at {after['cx']},{after['cy']}")
-    else:
-        where = (f"circle r={after['r']} at {after['cx']},{after['cy']}")
-    return f"已经改用 {where}。{_STOP}"
+    return f"已经改用 {_where(after)}。{_STOP}"
 
 
 _NUMBER = re.compile(r"[-+]?\d*\.?\d+")
@@ -459,6 +476,7 @@ def review_judge(state: ReviewState) -> dict:
         f"{REVIEW_CRITERIA[state['kind']]}\n"
         f"期望：{state.get('expect') or '（未给出）'}\n"
         f"区域：{json.dumps(state['region'], separators=(',', ':'))}\n"
+        f"上一轮：{state.get('last_reason') or '（这一轮）'}\n"
         f"{state.get('context_note', '')}"
     ) + session.ASK_IN_CHINESE
     alt = _needs_alt(state)
@@ -488,6 +506,11 @@ def review_judge(state: ReviewState) -> dict:
     if verdict == "adjust" and _inside(region, shape, state.get("frame_size")):
         out["region"] = region
         out["shape"] = shape
+        # The next round corrects these numbers instead of measuring the same
+        # picture again; two readings of one crop never agree.
+        out["last_reason"] = (f"已经改成 "
+                              f"{json.dumps(region, separators=(',', ':'))}，"
+                              f"理由是：{reason}")
         out["candidates"] = list(state.get("candidates") or []) + [
             {"region": region, "note": reason}]
     elif verdict == "adjust":
@@ -508,8 +531,10 @@ def _after_judge(state: ReviewState) -> str:
     if _needs_alt(state):
         return "render"
     # A correction is a candidate, not the answer: the last call picks among
-    # them. One candidate means nothing moved, so there is nothing to pick.
-    if (state.get("verdict") in ("ok", "adjust")
+    # them. One candidate means nothing moved, so there is nothing to pick; and
+    # an `ok` says this box is usable whatever else was tried, so a pick there
+    # would only be the same pictures read one more time.
+    if (state.get("verdict") == "adjust"
             and len(state.get("candidates") or []) > 1):
         return "pick"
     return "end"
@@ -632,7 +657,10 @@ def _one(kind: str, shape: str, region: dict, shot, expect: str,
     """`(region to send, note, rejection)`. A rejection ends the call."""
     key = (label or "").strip()
     if key and key in _accepted:
-        return dict(_accepted[key]), _KEPT, ""
+        # Name the box: an operator that measured (174,1836) and was told "the
+        # previous region is reused" had no way to tell whether the cache was
+        # right, spent a turn suspecting a bug, and tapped blind.
+        return dict(_accepted[key]), _kept(_accepted[key]), ""
     if key and _reject_count.get(key, 0) >= 2:
         return region, "", _reject_reason[key]
     import graph
@@ -680,28 +708,52 @@ def _human_repeat(name: str, args: dict) -> bool:
     return True
 
 
+def _review_one(entry: dict) -> tuple[dict, str, str]:
+    """`(kept entry, note, rejection)` for one template entry, cut included."""
+    cut = entry["cut"]
+    final, note, rejected = _one(
+        "template", _shape_of(cut), cut, entry.get("shot"),
+        str(entry.get("expect") or ""), str(entry.get("name") or ""))
+    kept = {key: value for key, value in entry.items() if key != "expect"}
+    kept["cut"] = final
+    return kept, note, rejected
+
+
 def _review_update(args: dict) -> tuple[dict, str, str]:
+    """Check every template in this call, a few at a time.
+
+    Three templates in one `save_anchor` are three independent model round trips
+    and each one takes about 15 s; serial, that was a quarter of a 20-minute run.
+    What bounds the fan-out is that each check is a model call of its own and the
+    host answers one tool call at a time -- `pool.map` keeps the results in
+    submission order, so which template is "first rejected" does not change.
+    """
     notes = []
     templates = []
-    for entry in args.get("templates") or []:
+    rejected_at = ""
+    entries = args.get("templates") or []
+    cuts = [entry for entry in entries
+            if isinstance(entry, dict) and isinstance(entry.get("cut"), dict)]
+    with ThreadPoolExecutor(max_workers=MAX_REVIEWS) as pool:
+        done = list(pool.map(_review_one, cuts))
+    i = 0
+    for entry in entries:
         if not isinstance(entry, dict) or not isinstance(entry.get("cut"), dict):
             templates.append(
                 {key: value for key, value in entry.items() if key != "expect"}
                 if isinstance(entry, dict) else entry)
             continue
-        cut = entry["cut"]
-        shape = _shape_of(cut)
-        final, note, rejected = _one(
-            "template", shape, cut, entry.get("shot"),
-            str(entry.get("expect") or ""), str(entry.get("name") or ""))
+        kept, note, rejected = done[i]
+        i += 1
         if rejected:
             name = entry.get("name") or ""
-            return args, "", f"{name}: {rejected}" if name else rejected
-        kept = {key: value for key, value in entry.items() if key != "expect"}
-        kept["cut"] = final
+            rejected_at = f"{name}: {rejected}" if name else rejected
+            break
         templates.append(kept)
         if note:
             notes.append(note)
+    if rejected_at:
+        return args, "", rejected_at
     out = _strip(args)
     out["templates"] = templates
     return out, "；".join(notes), ""

@@ -7,7 +7,11 @@ holds the keys.
 
 from __future__ import annotations
 
+import json
 import os
+import sys
+import threading
+import time
 from pathlib import Path
 
 from langchain.chat_models import init_chat_model
@@ -15,6 +19,7 @@ from langchain_core.callbacks import BaseCallbackHandler
 from langchain_openai import ChatOpenAI
 
 import session
+import subagent
 import transport
 
 
@@ -227,6 +232,83 @@ def build_chat_model(*, context: bool = False):
     )
 
 
+_trace_state = threading.local()
+
+
+def _trace(is_answer: bool, delta: str) -> None:
+    """Echo one streamed delta to stderr when `CAMPCAT_LLM_TRACE` is set.
+
+    Every model call in this process goes through `streamed`, so this is the one
+    place a smoke run's reasoning can be read back: timings say a run was slow,
+    only its words say where it went in circles. Text only -- a picture is the
+    one thing a log cannot carry -- and every line is tagged with who thought it.
+
+    The pending line is per thread: template checks run several model calls at
+    once, and one shared buffer would splice their sentences together.
+    """
+    if not delta or not _env("CAMPCAT_LLM_TRACE"):
+        return
+    who = subagent.current.get() or "operator"
+    head = "[" + ("say" if is_answer else "think") + "][" + who + "] "
+    # The stream turns from reasoning to answer without a newline between them,
+    # so the line pending under the old tag has to be settled before the new one
+    # writes its first word -- otherwise the reasoning is logged as an answer.
+    if head != getattr(_trace_state, "head", ""):
+        _trace_flush()
+        _trace_state.head = head
+    lines = (getattr(_trace_state, "partial", "") + delta).split("\n")
+    _trace_state.partial = lines.pop()
+    for text in lines:
+        print(_stamp() + _trace_state.head + text, file=sys.stderr, flush=True)
+    # A reasoning paragraph can run on for hundreds of tokens without a newline.
+    # Holding all of it until the answer starts is how a run that gets killed
+    # loses the very thinking that explains it, so a long pending line is
+    # printed early.
+    if len(_trace_state.partial) > 400:
+        _trace_flush()
+
+
+def _stamp() -> str:
+    """Wall clock on every trace line, so one log reads as a timeline.
+
+    Without it a run's shape has to be guessed from line counts: a round that
+    took 90 seconds and one that took two look the same.
+    """
+    return time.strftime("%H:%M:%S ")
+
+
+def _trace_flush() -> None:
+    """The last line of a call, which no newline ended."""
+    if getattr(_trace_state, "partial", ""):
+        print(_stamp() + getattr(_trace_state, "head", "") + _trace_state.partial,
+              file=sys.stderr, flush=True)
+        _trace_state.partial = ""
+
+
+def _tool_calls(reply):
+    """The assembled tool calls, or none if a malformed stream cannot be read.
+
+    Reading them parses the arguments, which a cut-off stream can leave invalid;
+    that must not turn into a failed turn just because the trace wanted a log.
+    """
+    try:
+        return reply.tool_calls or []
+    except (ValueError, TypeError):
+        return []
+
+
+def _trace_call(call) -> None:
+    """Echo one tool call the reply asked for, without the pictures in it."""
+    if not _env("CAMPCAT_LLM_TRACE"):
+        return
+    _trace_flush()
+    who = subagent.current.get() or "operator"
+    args = {k: v for k, v in (call.get("args") or {}).items() if k != "image"}
+    line = json.dumps(args, ensure_ascii=False, default=str)
+    print(_stamp() + f"[call][{who}] {call.get('name')} {line}",
+          file=sys.stderr, flush=True)
+
+
 def streamed(model, messages, on_chunk=None):
     """One model call, abandoned as soon as the host stops the turn.
 
@@ -254,20 +336,28 @@ def streamed(model, messages, on_chunk=None):
     for chunk in model.stream(messages):
         if transport.stop_requested():
             raise transport.TurnInterrupted()
-        if on_chunk is not None:
-            reasoning = session.reasoning_text(chunk)
-            if reasoning:
+        reasoning = session.reasoning_text(chunk)
+        if reasoning:
+            _trace(False, reasoning)
+            if on_chunk is not None:
                 on_chunk(False, reasoning)
-            else:
-                text = session.content_text(getattr(chunk, "content", ""))
-                if text:
+        else:
+            text = session.content_text(getattr(chunk, "content", ""))
+            if text:
+                _trace(True, text)
+                if on_chunk is not None:
                     on_chunk(True, text)
         chunks.append(chunk)
+    _trace_flush()
     if not chunks:
         raise RuntimeError("model stream ended without a reply")
     reply = chunks[0]
     for chunk in chunks[1:]:
         reply = reply + chunk
+    for call in _tool_calls(reply):
+        # The calls, not just the words: a loop is visible as the same call
+        # repeated, and the narration alone will not say which one.
+        _trace_call(call)
     # Reasoning belongs to this call's display, not to the conversation: some
     # providers reject it on the way back, and the next turn does not need it.
     reply.additional_kwargs.pop("reasoning_content", None)

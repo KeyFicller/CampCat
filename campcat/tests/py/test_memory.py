@@ -90,5 +90,5 @@ def test_the_chinese_note_is_stored_with_the_turn():
     built = graph.build_messages({**state, "memory": ""})
     assert built["messages"][-1].content == state["text"]
     graph.commit({**state, "messages": built["messages"],
-                  "input_len": built["input_len"]})
+                  "turn_mark": built["turn_mark"]})
     assert session.history()[0].content == "看看现在什么界面" + session.ASK_IN_CHINESE

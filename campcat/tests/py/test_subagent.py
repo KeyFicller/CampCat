@@ -122,6 +122,60 @@ def test_streamed_reports_every_delta():
     assert seen == [(True, "ab"), (True, "cd")]
 
 
+def test_the_trace_writes_whole_lines_tagged_with_who_thought_them(
+        monkeypatch, capsys):
+    # A smoke run has no window: its log is the only place the reasoning can be
+    # read, and a line split across two deltas has to come out as one line.
+    class Split:
+        def stream(self, messages):
+            yield AIMessageChunk(content="",
+                                 additional_kwargs={"reasoning_content": "想一"})
+            yield AIMessageChunk(content="",
+                                 additional_kwargs={"reasoning_content": "想\n"})
+            yield AIMessageChunk(content="开跑")
+
+    monkeypatch.setenv("CAMPCAT_LLM_TRACE", "1")
+    with subagent.working("scripter", "goal"):
+        models.streamed(Split(), [HumanMessage(content="hi")])
+
+    err = capsys.readouterr().err
+    assert "[think][scripter] 想一想" in err
+    assert "[say][scripter] 开跑" in err
+
+
+def test_the_trace_prints_the_calls_a_reply_asked_for(monkeypatch, capsys):
+    # A loop is the same call repeated; the narration alone never says which
+    # call it kept making.
+    class Calls:
+        def stream(self, messages):
+            yield AIMessageChunk(content="",
+                                 tool_call_chunks=[{"name": "tap",
+                                                    "args": '{"x": 1, "y": 2}',
+                                                    "index": 0, "id": "a"}])
+
+    monkeypatch.setenv("CAMPCAT_LLM_TRACE", "1")
+    models.streamed(Calls(), [HumanMessage(content="hi")])
+
+    err = capsys.readouterr().err
+    assert '[call][operator] tap {"x": 1, "y": 2}' in err
+
+
+def test_the_trace_keeps_reasoning_out_of_the_answer_when_no_newline_ends_it(
+        monkeypatch, capsys):
+    # The stream turns from reasoning to answer without a newline between them.
+    class Turn:
+        def stream(self, messages):
+            yield AIMessageChunk(content="",
+                                 additional_kwargs={"reasoning_content": "先想"})
+            yield AIMessageChunk(content="再答")
+
+    monkeypatch.setenv("CAMPCAT_LLM_TRACE", "1")
+    models.streamed(Turn(), [HumanMessage(content="hi")])
+
+    err = capsys.readouterr().err
+    assert "[think][operator] 先想\n" in err and "先想再答" not in err
+
+
 def test_a_line_is_flat_and_bounded():
     assert subagent.line("a\n  b") == "a b"
     assert len(subagent.line("x" * 500)) == subagent.LIMIT

@@ -7,6 +7,9 @@ the subgraph nodes do, once `graph` has finished loading.
 from __future__ import annotations
 
 import contextvars
+import os
+import re
+import sys
 from pathlib import Path
 
 from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
@@ -14,6 +17,7 @@ from langgraph.graph import END, StateGraph
 
 import agent.diagnoser as diagnoser
 import agent.memorier as memorier
+import agent.reflector as reflector
 import observability
 import session
 import subagent
@@ -55,12 +59,63 @@ def scripter_tools(host_tools: list) -> list:
         diagnoser.DIAGNOSE_TEMPLATE]
 
 
+# The order the renderer writes a step in; the legend quotes it.
+_STEP_FIELDS = ("shot", "screen", "did", "region", "expect", "result")
+_STEP_LEGEND = ("steps（每行：帧号 | 界面 | 做了什么 | 最终区域 | 该有什么 | 结果；"
+                "`-` 表示没填）:")
+_SHOT_NUMBER = re.compile(r"\d+")
+
+
+def _cell(value: object) -> str:
+    """One table cell. Whitespace is collapsed: a newline would break the row."""
+    text = " ".join(str(value if value is not None else "").split())
+    return text or "-"
+
+
+def _shot_cell(value: object) -> str:
+    """A frame number as `#N`, or `-` when the model wrote nothing readable."""
+    if isinstance(value, bool):
+        return "-"
+    if isinstance(value, int):
+        return f"#{value}"
+    found = _SHOT_NUMBER.search(str(value if value is not None else ""))
+    return f"#{found[0]}" if found else "-"
+
+
+def _step_lines(steps: object) -> tuple[bool, list[str]]:
+    """`(structured, lines)` for the scripter's brief.
+
+    A model that sends free text where rows were asked for is not an error: one
+    step written awkwardly is far cheaper than a handoff refused. Its lines go
+    through as they are, and the six-column legend is left off with them,
+    because quoting a legend over free text would contradict it.
+    """
+    if isinstance(steps, str):
+        return False, [line.strip() for line in steps.splitlines() if line.strip()]
+    if not isinstance(steps, list):
+        return False, []
+    rows, raw = [], []
+    for item in steps:
+        if isinstance(item, dict):
+            if all(_cell(item.get(key)) == "-" for key in _STEP_FIELDS):
+                continue                      # an empty object the model padded
+            cells = [_shot_cell(item.get("shot"))] + [
+                _cell(item.get(key)) for key in _STEP_FIELDS[1:]]
+            rows.append(f"{len(rows) + 1}. " + " | ".join(cells))
+        elif str(item).strip():
+            raw.append(str(item).strip())
+    if raw:                                   # a mixed list: rows, then verbatim
+        return False, rows + raw
+    return bool(rows), rows
+
+
 def brief_of(args: dict) -> str:
     """The scripter's one user message. Empty optional fields are left out."""
     lines = [f"goal: {args.get('goal', '')}"]
-    steps = (args.get("steps") or "").strip()
-    if steps:
-        lines.append(f"steps:\n{steps}")
+    structured, step_lines = _step_lines(args.get("steps"))
+    if step_lines:
+        lines.append(_STEP_LEGEND if structured else "steps:")
+        lines.extend(step_lines)
     bundle = args.get("bundle") or ""
     if bundle:
         lines.append(f"bundle: {bundle}")
@@ -122,13 +177,22 @@ def refuse_existing(tool: str, args: dict, frozen: set[str]) -> str | None:
             return None
     if target not in frozen:
         return None
-    return f"error: {target} 已存在；这次交接不能改它"
+    return f"error: {target} 已存在；这次交接不能改它。要改它得让交接带上 fix: true，请把这一句写进你的总结。"
 
 
 # None means this handoff may change existing bundles. A set is the names
 # that existed when it started.
 _frozen: contextvars.ContextVar[frozenset[str] | None] = contextvars.ContextVar(
     "scripter_frozen", default=None)
+
+# This handoff's tool calls, for the reflection that runs when it ends. Cleared
+# at the start of every run: the note is about one handoff, not the session.
+_CALLS: list[dict] = []
+
+
+def calls() -> list[dict]:
+    """What the last handoff called, in the order it called it."""
+    return _CALLS
 
 
 def arm_freeze(names: frozenset[str] | None):
@@ -150,9 +214,12 @@ RULES = {
         "`last_error` 时才改已存在的 bundle。否则不要对它 "
         "`update_script`、`delete_script`、`rename_script` 或 `save_template`，"
         "也不要在已存在的 anchor 上 `save_anchor`；写一个新名字的新 bundle。"
-        "有图的游戏上的任务，先 `goto(\"<graph>:<anchor>\")` 去到它工作所在的"
-        "界面；图里还没有的界面要先加（见「图的流程」）。\n"
-        "2. `screenshot`，这样你能看到自己要写脚本的那个界面。\n"
+        "有图的游戏上的任务，先用 `run_script` 跑一段 "
+        "`goto(\"<graph>:<anchor>\")` 去到它工作所在的界面；图里还没有的界面"
+        "要先加（见「图的流程」）。\n"
+        "2. brief 给了帧号（`#N`）的界面直接用那一帧：`view_shot(N)` 看一眼就能裁，"
+        "`save_template`、`save_anchor` 的 `shot` 也填这个号。只有这块界面没有帧时"
+        "才 `screenshot`——设备留给验边，不用来重拍已经给过的界面。\n"
         "3. 给每一步定 anchor：只有这一步成功才会出现的图，取自固定的 UI 控件"
         "——一个按钮、一个标签页、一个标签——绝不用自由文本，它每次运行都会变，"
         "会让检查失去意义。把那一步期望看到的东西写成 `//` 注释放在旁边"
@@ -160,16 +227,19 @@ RULES = {
         "   // 领完之后按钮会变灰`）：这样失败的一次运行就有期望可以对照，"
         "审批时也读得懂。\n"
         "4. `save_script` 创建 bundle。它只写 main.ccat，不运行任何东西；"
-        "名字已存在会被拒绝。\n"
-        "5. `save_template`，脚本里出现的每一个 PNG 各调一次。每次裁之前先截屏"
-        "——裁得再好也不会好过它来源的那张图——围着不动的部分裁紧。"
+        "名字已存在会被拒绝。名字按这个形式起，全小写英文：边 "
+        "`图.锚点-锚点`，动作 `图.锚点.动作`。起好了就不要为了风格再改名——"
+        "`rename_script` 只在内容真的换了名字时才用。\n"
+        "5. `save_template`，脚本里出现的每一个 PNG 各调一次。手上没有这张"
+        "界面的新鲜帧，才先截屏；已有的帧用 `shot` 指定，先 `view_shot` 看"
+        "一眼。区域里的数按说明的 ×k 换成帧像素，在哪张图上量的就乘哪张的 k。"
+        "围着不动的部分裁紧。"
         "对那个元素只调一次 `view_crop`，然后 `save_template`。只是为了把同一个框"
         "再收紧一点而重复调用，不会得到更好的裁切。形状由你根据控件外轮廓自己"
         "挑。矩形是方块 `{\"x\":...,\"y\":...,\"w\":...,\"h\":...}`。"
         "圆形控件是圆 `{\"cx\":...,\"cy\":...,\"r\":...}`。菱形"
         "（菱形，顶点在坐标轴上）是 `{\"cx\":...,\"cy\":...,\"rx\":...,\"ry\":...}`。"
-        "圆形或菱形控件外面套方块，会把匹配必须忽略的背景留下。圆或菱形会写出"
-        "该形状的 alpha，形状之外的像素一律不参与匹配。\n" +
+        "圆形或菱形控件外面套方块，会把匹配必须忽略的背景留下。\n" +
         REGION_RULES +
         "6. 跑一遍 bundle：`run_script`，源码传 `run(\"<name>/main.ccat\")`。"
         "传这个 `run(...)` 调用，不要传脚本正文——光秃秃的 `run_script` 会相对"
@@ -188,8 +258,6 @@ RULES = {
         "  * `view_crop` 的图会画出裁切，并显示框外最多 16 像素的屏幕。线以内"
         "就是 `save_template` 保存的内容。线以外是上下文：不要为了把它纳进来而"
         "放大区域，也不要为了把它排除掉而重新裁。\n"
-        "  * 某条语句失败会中止脚本。回到你手上的就是这个报错，而不是一个看起来"
-        "不对的屏幕。\n"
         "  * 给每一个动作配 anchor。tap、swipe 或 `run(...)` 之后，用 "
         "`wait_until(\"expected.png\", ms)` 断言它本该产生的界面。没落地的动作"
         "会当场在那里失败并指名文件，而不是让下一条语句在一个过时的界面上执行。"
@@ -200,14 +268,16 @@ RULES = {
         "声明某个状态的 `log(...)`，就放在确认该状态的那个模板的 `wait_until` 或 "
         "`if` 之后。\n"
         "  * `ms` 要从截图里量出来，不要猜。每张截图的说明都写了它是什么时候拍的，"
-        "同一轮之内还写了距上一张过了多久；花了 +3.2s 的变化就给大约两倍。"
+        "同一轮之内还写了距上一张过了多久（旧帧只有编号和尺寸）；花了 +3.2s "
+        "的变化就给大约两倍。"
         "`wait_until` 一看到 anchor 就返回，所以给宽一点不花代价。两个等待都有上限，"
         "是截断而不是报错——`wait(ms)` 截在 5000 ms，`wait_until(\"a.png\", ms)` "
         "截在 20000 ms——所以写大了会静默变成上限，你拿到的时间比要的少；"
         "`wait_until(\"a.png\", 0)` 是语法错误。超时是一个会中止脚本的错误。\n"
-        "  * 已存在的 bundle 是拿来跑的，不是拿来改的，除非 brief 里有 "
-        "`fix: true` 或 `last_error`。`save_script` 仍然拒绝已存在的名字。"
-        "这次交接里创建的 bundle 可以更新。\n"
+        "  * 等一个可能很久的状态不要用循环 `wait` 硬等：一个脚本里等的时间合计"
+        "不超过 20000ms。等不到就在 `log` 里写一句没等到，继续往下走。\n"
+        "  * `save_template`、`update_script`、`save_anchor` 每次调用都要带 "
+        "`expect`：一句话说明这块区域里应该是什么，自检拿它对照。\n"
     ),
     "失败处理": (
         "脚本失败时停在失败的那条语句上，报错会带着匹配器看到的东西回到你这里"
@@ -249,14 +319,18 @@ RULES = {
         "`[anchor of <graph>, <kind>]`、`[edge of <graph>]` 和 "
         "`[action of <graph> on <anchor>]`。新图从 anchor `entry` 开始："
         "每一次运行都能从那里起步的界面，通常就是桌面。\n"
-        "2. 每个界面：`screenshot`，然后 `save_anchor(graph, anchor, golden, "
-        "source, templates)`，一次写好 golden.md、main.ccat 和模板。"
+        "2. 每个界面：brief 给了帧号就用帧（`save_anchor` 的 `templates[].shot` "
+        "填那个号），没有帧才 `screenshot`；然后一次 "
+        "`save_anchor(graph, anchor, golden, source, templates)` 写好 "
+        "golden.md、main.ccat 和模板。"
         "它会先在最新截图上跑一遍已有的 anchor：被拒绝并回 `already anchor <id>` "
         "说明这个界面已经在图里了——用那个 anchor，不要再存一个。\n"
-        "3. 每条边：`save_script(\"<graph>.<a>-<b>\", <那些移动>)`，再用 "
+        "3. 每条边：`save_script(\"<graph>.<a>-<b>\", <那些移动>)`（边已经"
+        "存在时用 `update_script`），再用 "
         "`save_template` 存它的模板。回复末尾会附上图检查的结果；"
         "它列出的每个问题都要修。\n"
-        "4. 用 `run_script` 验证从界面 a 出发的一条边，源码传 "
+        "4. 验证一条边时，同一段 `run_script` 里先 "
+        "`goto(\"<graph>:a\")` 再到它，源码传 "
         "`run(\"<graph>.<a>-<b>/main.ccat\")`：它会检查起点是 a、终点是 b。"
         "验证整条路径用 `run_script` 加 `goto(\"<graph>:<anchor>\")`；"
         "报错会列出它试过的每一跳和最后看到的界面。\n"
@@ -320,12 +394,7 @@ def _read_gold_script() -> str:
 
 _example = _read_gold_script()
 if _example:
-    RULES["示例"] = (
-        "下面这些完整的例子遵守了上面的每一条规则——一个 anchor、一条边、"
-        "那个 anchor 上的一个 action，以及一个走到那里并跑它的任务。"
-        "照着它们的写法写：\n\n" +
-        _example
-    )
+    RULES["示例"] = "下面这些完整的例子照着它们的写法写：\n\n" + _example
 
 _CCAT_CHEATSHEET = (
     ".ccat 语言。完整参考调 `ccat_help`；下面这些是最容易写错的地方：\n"
@@ -347,9 +416,7 @@ _CCAT_CHEATSHEET = (
     "  * 某条语句失败会中止脚本，并作为错误回到你这里。需要 PNG 的语句"
     "（`tap`、`tap_offset`、`swipe`、`wait_until`）或需要 `.ccat` 的语句"
     "（`run`）在文件缺失时失败；模板缺失的 `has(...)` 只是 false。\n"
-    "  * 图是一个游戏的各个界面：anchor bundle 是 `<graph>.<id>`"
-    "（golden.md，加上一个只做判断的 main.ccat），边 bundle 是 "
-    "`<graph>.<a>-<b>`。`goto(\"<graph>:<anchor>\")` 走到某个 anchor，"
+    "  * 图里：`goto(\"<graph>:<anchor>\")` 走到某个 anchor，"
     "`at(\"<graph>:<anchor>\")` 测你是不是在某个 anchor 上，用于分支。"
     "对一条边 `run` 时也会检查它的两端。\n"
 )
@@ -401,6 +468,7 @@ def run_scripter(args: dict, host_tools: list,
     goal = str(args.get("goal") or "").strip()
     if not goal:
         return "error: goal 为空"
+    _CALLS.clear()
     brief = brief_of(args)
     with observability.span("author-script", brief) as (callbacks, obs):
         def note(text: str) -> str:
@@ -436,6 +504,11 @@ def run_scripter(args: dict, host_tools: list,
             note("interrupted")
             raise
         except Exception as exc:  # noqa: BLE001 - the operator hears it as a tool error
+            # Traced as well as returned: the operator's next sentence calls this
+            # a "structural error" whoever caused it, and the log otherwise
+            # shows only that the handoff came back with nothing.
+            if os.environ.get("CAMPCAT_LLM_TRACE"):
+                print(f"[handoff] error: {exc}", file=sys.stderr, flush=True)
             return note("error: " + str(exc))
         finally:
             if token is not None:
@@ -444,12 +517,49 @@ def run_scripter(args: dict, host_tools: list,
             note("interrupted")
             raise tools.TurnInterrupted()
         if out.get("error"):
+            # The model raised inside the scripter; the operator only sees the
+            # text, and calls it a "400" whoever caused it. The role sequence
+            # is what a provider's complaint about `tool` is really about.
+            if os.environ.get("CAMPCAT_LLM_TRACE"):
+                print(f"[handoff] scripter error: {out['error']}",
+                      file=sys.stderr, flush=True)
+                print("[handoff] roles: " + _roles(out.get("messages") or []),
+                      file=sys.stderr, flush=True)
             return note("error: " + str(out["error"]))
         reply = (out.get("reply") or "").strip()
         if not reply:
-            own = (out.get("messages") or [])[out.get("input_len") or 0:]
+            own = session.own_since(out.get("messages") or [],
+                                    out.get("turn_mark"))
             return note(_no_summary(own))
         return note(reply)
+
+
+def _roles(messages: list) -> str:
+    """One token per message, with the tool ids that make the pairing legal.
+
+    The first `tool` message whose question is not the message just above it is
+    marked, because that is the one a provider names in a 400.
+    """
+    pending: set[str] = set()
+    out: list[str] = []
+    broken = ""
+    for i, m in enumerate(messages):
+        calls = getattr(m, "tool_calls", None) or []
+        ids = [str(c.get("id")) for c in calls]
+        pending = set(ids) if ids else pending
+        if ids:
+            out.append(f"A{i}({','.join(ids)})")
+            continue
+        if isinstance(m, ToolMessage):
+            out.append(f"T{i}({m.tool_call_id})")
+            if str(m.tool_call_id) not in pending:
+                if not broken:
+                    broken = f"  <-- T{i} follows {out[-2] if len(out) > 1 else 'nothing'}"
+            else:
+                pending.discard(str(m.tool_call_id))
+            continue
+        out.append(f"{type(m).__name__}{i}")
+    return " ".join(out) + (broken or "")
 
 
 def _scripter_build(state: dict) -> dict:
@@ -457,15 +567,15 @@ def _scripter_build(state: dict) -> dict:
     memorier.compact_scripter()
     messages: list[object] = [SystemMessage(content=(
         scripter_prompt() + memorier.scripter_memory_block(session.scripter_memory())
+        + reflector.ledger_block(session.lessons())
     ))]
     messages.extend(session.scripter_history())
     frame = session.latest_frame()
     if frame is not None:
         messages.append(frame)
-    messages.append(HumanMessage(content=state.get("text", "")))
-    # One past the brief, matching `build_messages`: `append_scripter_turn`
-    # writes the brief itself, so the slice must not include it again.
-    return {"messages": messages, "input_len": len(messages)}
+    mark = session.new_mark("brief")
+    messages.append(HumanMessage(content=state.get("text", ""), id=mark))
+    return {"messages": messages, "turn_mark": mark}
 
 
 def _scripter_invoke(state: dict) -> dict:
@@ -511,7 +621,21 @@ def _apply_scripter_tools(state: dict) -> dict:
                 return refusal, []
         return graph._host_result(name, args)
 
-    results, pictures, interrupted = graph._run_calls(calls, run_one)
+    def record(call: dict) -> tuple[object, list]:
+        """`run_one`, plus a line in the trajectory the reflection reads.
+
+        Recorded after the call so a failure is recorded as one. An interrupt
+        raises before reaching this, which is right: the handoff never finished.
+        """
+        out = run_one(call)
+        _CALLS.append({
+            "name": call.get("name", ""),
+            "args": call.get("args") or {},
+            "failed": str(out[0]).startswith("error:"),
+        })
+        return out
+
+    results, pictures, interrupted = graph._run_calls(calls, record)
     out = {
         "messages": session.demote_pictures(messages + results + pictures),
         "tool_rounds": state.get("tool_rounds", 0) + 1,
@@ -533,7 +657,7 @@ def _scripter_commit(state: dict) -> dict:
         return {}
     session.append_scripter_turn(
         state.get("text", ""),
-        list(state.get("messages") or [])[state.get("input_len") or 0:])
+        session.own_since(state.get("messages") or [], state.get("turn_mark")))
     return {}
 
 

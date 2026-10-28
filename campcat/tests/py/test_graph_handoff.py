@@ -82,6 +82,26 @@ def test_handoff_carries_the_operator_steps(monkeypatch, scripted):
     assert "- tap 政策: box 10,20 30x40" in seen
 
 
+def test_handoff_steps_arrive_as_a_table(monkeypatch, scripted):
+    """A row-shaped handoff, end to end: the tool schema reaches the scripter."""
+    _drive(monkeypatch, scripted, [
+        AIMessage(content="", tool_calls=[
+            _call("author_script", {
+                "goal": "签到",
+                "steps": [{"shot": 4, "screen": "任务页", "did": "点「签到」",
+                           "region": "box 640,1295 160x100",
+                           "expect": "白色「签到」两字", "result": "按钮变灰"}],
+            }, "a")]),
+        AIMessage(content="saved the bundle"),
+        AIMessage(content="Done."),
+    ])
+
+    seen = " ".join(
+        session.content_text(m.content) for m in session.scripter_history())
+    assert ("1. #4 | 任务页 | 点「签到」 | box 640,1295 160x100 | "
+            "白色「签到」两字 | 按钮变灰") in seen
+
+
 def test_same_batch_keeps_tool_message_order(monkeypatch, scripted):
     _drive(monkeypatch, scripted, [
         AIMessage(content="", tool_calls=[
@@ -236,6 +256,51 @@ def test_scripter_reply_strips_dsml(monkeypatch, scripted):
     ])
 
     assert _tool_messages()[0].content == "saved ok"
+
+
+def test_the_finished_handoff_leaves_a_note_for_the_next_one(monkeypatch, scripted):
+    import agent.reflector as reflector
+    seen = []
+
+    def spy(calls, operator_rounds, reply):
+        seen.append(([c["name"] for c in calls], operator_rounds, reply))
+        return "这次交接：1 次调用。", "下一手先读 bundle。"
+
+    monkeypatch.setattr(reflector, "reflect", spy)
+    _drive(monkeypatch, scripted, [
+        AIMessage(content="", tool_calls=[
+            _call("author_script", {"goal": "签到"}, "a")]),
+        AIMessage(content="", tool_calls=[_call("save_script", {}, "s")]),
+        AIMessage(content="saved ok"),
+        AIMessage(content="Done."),
+    ])
+
+    assert seen == [(["save_script"], 0, "saved ok")]
+    assert session.lessons() == ["下一手先读 bundle。"]
+    # The numbers go back on this result instead: the operator's prompt is
+    # built once per user turn, so a note there would never be updated.
+    result = _tool_messages()[0].content
+    assert result.startswith("saved ok")
+    assert "这次交接：1 次调用。" in result
+    assert "下一手先读 bundle。" in result
+
+
+def test_the_note_reaches_the_next_scripter_prompt(monkeypatch, scripted):
+    import agent.reflector as reflector
+    import agent.scripter as scripter
+
+    monkeypatch.setattr(reflector, "reflect",
+                        lambda *a: ("", "别再看同一帧。"))
+    _drive(monkeypatch, scripted, [
+        AIMessage(content="", tool_calls=[
+            _call("author_script", {"goal": "签到"}, "a")]),
+        AIMessage(content="saved ok"),
+        AIMessage(content="Done."),
+    ])
+
+    built = scripter._scripter_build({"text": "brief"})
+
+    assert "别再看同一帧。" in built["messages"][0].content
 
 
 def test_scripter_silent_after_tools(monkeypatch, scripted):

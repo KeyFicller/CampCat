@@ -20,6 +20,7 @@
 #include "app/ui/script_editor_panel.h"
 
 #include <imgui.h>
+#include <imgui_internal.h> // BringWindowToDisplayFront: no public always-on-top window
 #include <imgui_markdown.h>
 #include <misc/cpp/imgui_stdlib.h>
 
@@ -490,6 +491,13 @@ void draw_subagent_window() {
     if (!ImGui::Begin("Sub-agent", &open)) {
         ImGui::End();
         return;
+    }
+    // Clicking the conversation raises that window over this one, and this one is
+    // meant to be read while the operator works. A popup stays above it: a menu
+    // opened here, or the approval form, must not be covered by its own window.
+    if (!ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopupId |
+                                    ImGuiPopupFlags_AnyPopupLevel)) {
+        ImGui::BringWindowToDisplayFront(ImGui::GetCurrentWindow());
     }
     WITH_FONT(bold, { ImGui::TextUnformatted(agent_label(st.agent)); });
     ImGui::SameLine();

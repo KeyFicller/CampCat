@@ -15,6 +15,7 @@ from langgraph.graph import END, StateGraph
 
 import agent.memorier as memorier
 import agent.operator as operator
+import agent.reflector as reflector
 import agent.region_review as region_review
 import agent.scripter as scripter
 import models
@@ -53,7 +54,7 @@ class TurnState(TypedDict, total=False):
     memory: str     # request: long-term notes, read off disk by the host
     messages: list  # built by build_messages
     tool_rounds: int
-    input_len: int  # built by build_messages: where this turn's own messages start
+    turn_mark: str  # built by build_messages: id of the message this turn starts at
     reply: str      # response: model output
     turns: int      # response: turns retained in the conversation
     max_model_rounds: int  # request: per-turn round cap; default MAX_MODEL_ROUNDS
@@ -95,8 +96,9 @@ def build_messages(state: TurnState) -> dict:
     frame = session.latest_frame()
     if frame is not None:
         messages.append(frame)
-    messages.append(HumanMessage(content=state.get("text", "")))
-    return {"messages": messages, "input_len": len(messages)}
+    mark = session.new_mark("turn")
+    messages.append(HumanMessage(content=state.get("text", ""), id=mark))
+    return {"messages": messages, "turn_mark": mark}
 
 
 def _invoke(state: TurnState, offered: list, on_chunk=None) -> dict:
@@ -289,7 +291,17 @@ def run_tools(state: TurnState) -> dict:
                 content = scripter.run_scripter(
                     args, host_tools,
                     state.get("max_model_rounds", MAX_MODEL_ROUNDS))
+                # After the handoff, where its trajectory and the operator's
+                # round count are both still in hand; neither survives the
+                # return. The body serves every *later* handoff's scripter; the
+                # head rides back on this result, for the operator who is the
+                # only one that can change how the next handoff is split.
+                content = str(content)
+                head, body = reflector.reflect(
+                    scripter.calls(), state.get("tool_rounds", 0), content)
+                session.add_lessons(body)
                 run.settle(content)
+                content += reflector.directive(head, body)
             pics: list = []
             if session._LATEST_NUM != before:
                 frame = session.latest_frame()
@@ -335,7 +347,8 @@ def commit(state: TurnState) -> dict:
     if state.get("error"):
         return {"turns": session.size()}
     session.append_turn(state.get("text", ""),
-                        list(state.get("messages") or [])[state.get("input_len") or 0:])
+                        session.own_since(state.get("messages") or [],
+                                          state.get("turn_mark")))
     return {"turns": session.size()}
 
 

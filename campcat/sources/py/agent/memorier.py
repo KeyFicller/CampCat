@@ -230,6 +230,28 @@ def _tokens(messages: list) -> int:
     )
 
 
+def _without_orphan_tools(messages: list) -> list:
+    """Drop a tool result whose `tool_calls` turn is no longer above it.
+
+    The summarizer cuts at a message boundary, and it can cut between an
+    assistant turn and the results it asked for. A `tool` message with no
+    `tool_calls` before it is not a request the provider will take: it answers
+    400 and names the role, which reads as a broken tool rather than a broken
+    history. Losing that one result is cheaper than losing the whole request.
+    """
+    pending: set[str] = set()
+    kept = []
+    for m in messages:
+        for call in getattr(m, "tool_calls", None) or []:
+            pending.add(str(call.get("id") or ""))
+        if isinstance(m, ToolMessage):
+            if str(m.tool_call_id) not in pending:
+                continue
+            pending.discard(str(m.tool_call_id))
+        kept.append(m)
+    return kept
+
+
 def _middleware():
     """Summarizes older turns once the request approaches the budget.
 
@@ -267,7 +289,8 @@ def compact() -> None:
     if not out or "messages" not in out:
         return
     # Drop the RemoveMessage sentinel: it signals a reducer this list has none of.
-    session._MESSAGES[:] = [m for m in out["messages"] if not isinstance(m, RemoveMessage)]
+    session._MESSAGES[:] = _without_orphan_tools(
+        [m for m in out["messages"] if not isinstance(m, RemoveMessage)])
 
 
 def _scripter_middleware():
@@ -297,6 +320,6 @@ def compact_scripter() -> None:
         return
     if not out or "messages" not in out:
         return
-    session._SCRIPTER_MESSAGES[:] = [
-        m for m in out["messages"] if not isinstance(m, RemoveMessage)]
+    session._SCRIPTER_MESSAGES[:] = _without_orphan_tools(
+        [m for m in out["messages"] if not isinstance(m, RemoveMessage)])
 
