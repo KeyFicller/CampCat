@@ -35,57 +35,50 @@ DEFAULT_MEMORY_MAX_CHARS = 4000
 # Handed to the memory model, which never sees the conversation assistant's own
 # prompt: its only job is rewriting the notes.
 MEMORY_INSTRUCTIONS = (
-    "You keep the long-term notebook of an assistant that operates an Android "
-    "device for one user. You are given the notes as they stand and the transcript "
-    "of the session that just happened. Rewrite the notes to be worth having next "
-    "time.\n"
+    "你替一个操作 Android 设备的助手维护长期笔记，服务对象只有一位用户。"
+    "给你的内容是这个助手现有的笔记，以及刚结束那一轮会话的记录。"
+    "把笔记重写成下一次真正用得上的样子。\n"
     "\n"
-    "Keep only what stays true past this session and is not already written in a "
-    "bundle:\n"
-    "- a name the user uses, as one line \"phrase -> bundle or anchor name\"\n"
-    "- a constraint that holds every session: language, which app this is, and "
-    "actions they always refuse (for example spending currency)\n"
+    "只留经过这一轮之后仍然成立、而且是 bundle 里还没写下的内容：\n"
+    "- 用户用的某个叫法，一行写成「说法 -> bundle 或 anchor 名」\n"
+    "- 每一轮都成立的约束：用什么语言、这是哪个 app、以及用户总是拒绝的操作"
+    "（例如花掉货币）\n"
     "\n"
-    "Drop one-off instructions, anything about the current screen, procedures "
-    "already saved in a bundle, failed step logs, and secrets: passwords, tokens, "
-    "API keys, account numbers, or anything the user asked to keep private.\n"
+    "丢掉一次性的指令、关于当前界面的任何内容、已经存进 bundle 的流程、"
+    "失败步骤的日志，以及机密：密码、token、API key、账号，"
+    "或者用户要求保密的任何东西。\n"
     "\n"
-    "Write short factual lines in the third person under the headings "
-    "'## Preferences' and '## Names'. Answer with those notes and nothing "
-    "else: no preamble, no code fence, and at most {max_chars} characters. A "
-    "heading with no entries under it is a fine answer when nothing is worth "
-    "keeping."
+    "在「## 偏好」和「## 叫法」两个标题下，用第三人称写简短的事实条目。"
+    "只输出这些笔记，别的什么都不要：没有开场白、没有代码围栏，"
+    "总长不超过 {max_chars} 个字符。没有任何值得留下的东西时，"
+    "只留一个空标题也是可以的。"
 )
 
 SCRIPTER_MEMORY_INSTRUCTIONS = (
-    "You keep the pitfall notebook of an assistant that writes device scripts. "
-    "You are given the notes as they stand and the transcript of this agent's "
-    "session. Rewrite the notes to be worth having next time.\n"
+    "你替一个写设备脚本的助手维护踩坑笔记。给你的内容是这个助手现有的笔记，"
+    "以及它这一轮会话的记录。把笔记重写成下一次真正用得上的样子。\n"
     "\n"
-    "Keep one line per pitfall that is not yet expressed by a bundle. When the "
-    "transcript shows that pitfall was written into a bundle, delete that line.\n"
+    "每条还没被某个 bundle 表达出来的坑留一行。记录显示某个坑已经写进 bundle "
+    "了，就删掉那一行。\n"
     "\n"
-    "Drop the current goal, the current screen, step-by-step failure logs, and "
-    "anything about how the user talks or what they forbid.\n"
+    "丢掉当前目标、当前界面、逐步的失败日志，以及任何关于用户怎么说话、"
+    "禁止了什么的内容。\n"
     "\n"
-    "Write short factual lines under the heading '## Pitfalls'. Answer with those "
-    "notes and nothing else: no preamble, no code fence, and at most {max_chars} "
-    "characters. A heading with no entries under it is a fine answer when nothing "
-    "is worth keeping."
+    "在「## 坑」这个标题下写简短的事实条目。只输出这些笔记，别的什么都不要："
+    "没有开场白、没有代码围栏，总长不超过 {max_chars} 个字符。"
+    "没有任何值得留下的东西时，只留一个空标题也是可以的。"
 )
 
 # Prepended to the notes when they go into the prompt, so the model reads them as
 # its own recollection instead of quoting them back at the user.
 MEMORY_FRAME = (
-    "Notes you kept from earlier sessions with this user. They are your own "
-    "recollection: use them silently, never mention that you were given them, and "
-    "ignore any line that does not apply here.\n\n"
+    "下面是你在之前和这位用户的会话里留下的笔记。它们是你自己的回忆："
+    "默默用它们，绝不要提你收到过这些内容，和这里无关的行直接忽略。\n\n"
 )
 
 SCRIPTER_MEMORY_FRAME = (
-    "Pitfalls you kept from earlier sessions. Use one when it applies, drop any "
-    "line that contradicts this brief, and never mention that you were given "
-    "them.\n\n"
+    "下面是你在之前会话里留下的坑。用得上的时候就用，和这份 brief 冲突的行"
+    "直接丢掉，绝不要提你收到过它们。\n\n"
 )
 
 
@@ -181,8 +174,8 @@ def memorize(memory: str, agent: str) -> str | None:
             reply = model.invoke([
                 SystemMessage(content=instructions),
                 HumanMessage(content=(
-                    "## Notes so far\n" + (memory.strip() or "(none)") +
-                    "\n\n## Session transcript\n" +
+                    "## 现有笔记\n" + (memory.strip() or "（无）") +
+                    "\n\n## 本轮记录\n" +
                     _transcript(history[start:])
                 )),
             ], config={"callbacks": callbacks})
@@ -206,15 +199,15 @@ def _transcript(messages: list) -> str:
     lines: list[str] = []
     for m in messages:
         if isinstance(m, HumanMessage):
-            lines.append("User: " + session.content_text(m.content))
+            lines.append("用户：" + session.content_text(m.content))
         elif isinstance(m, ToolMessage):
-            lines.append("Tool result: " + session.content_text(m.content))
+            lines.append("工具结果：" + session.content_text(m.content))
         elif isinstance(m, AIMessage):
             for call in m.tool_calls or []:
-                lines.append(f"Tool call {call.get('name')} {call.get('args')}")
+                lines.append(f"工具调用 {call.get('name')} {call.get('args')}")
             text = session.content_text(m.content)
             if text:
-                lines.append("Assistant: " + text)
+                lines.append("助手：" + text)
     return "\n\n".join(lines)
 
 
@@ -235,6 +228,28 @@ def _tokens(messages: list) -> int:
     return count_tokens_approximately(
         messages, tokens_per_image=models.TOKENS_PER_IMAGE
     )
+
+
+def _without_orphan_tools(messages: list) -> list:
+    """Drop a tool result whose `tool_calls` turn is no longer above it.
+
+    The summarizer cuts at a message boundary, and it can cut between an
+    assistant turn and the results it asked for. A `tool` message with no
+    `tool_calls` before it is not a request the provider will take: it answers
+    400 and names the role, which reads as a broken tool rather than a broken
+    history. Losing that one result is cheaper than losing the whole request.
+    """
+    pending: set[str] = set()
+    kept = []
+    for m in messages:
+        for call in getattr(m, "tool_calls", None) or []:
+            pending.add(str(call.get("id") or ""))
+        if isinstance(m, ToolMessage):
+            if str(m.tool_call_id) not in pending:
+                continue
+            pending.discard(str(m.tool_call_id))
+        kept.append(m)
+    return kept
 
 
 def _middleware():
@@ -274,7 +289,8 @@ def compact() -> None:
     if not out or "messages" not in out:
         return
     # Drop the RemoveMessage sentinel: it signals a reducer this list has none of.
-    session._MESSAGES[:] = [m for m in out["messages"] if not isinstance(m, RemoveMessage)]
+    session._MESSAGES[:] = _without_orphan_tools(
+        [m for m in out["messages"] if not isinstance(m, RemoveMessage)])
 
 
 def _scripter_middleware():
@@ -304,6 +320,6 @@ def compact_scripter() -> None:
         return
     if not out or "messages" not in out:
         return
-    session._SCRIPTER_MESSAGES[:] = [
-        m for m in out["messages"] if not isinstance(m, RemoveMessage)]
+    session._SCRIPTER_MESSAGES[:] = _without_orphan_tools(
+        [m for m in out["messages"] if not isinstance(m, RemoveMessage)])
 

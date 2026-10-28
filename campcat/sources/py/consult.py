@@ -18,9 +18,9 @@ import session
 # The model sees one screenshot and one question. "unsure" is the way out: a
 # wrong yes or no picks a wrong branch, and the script would rather stop.
 _SYSTEM = (
-    "You answer one yes/no question about an Android screenshot. Look only at "
-    "the picture. Reply with exactly one word: yes, no, or unsure. Answer "
-    "unsure when the picture does not show enough to decide; never guess."
+    "你回答关于一张 Android 截图的一个是/否问题。只看图片。"
+    "只回一个词，照抄英文原样：yes、no 或 unsure。"
+    "图片里显示的信息不足以判断时，回答 unsure；永远不要猜。"
 )
 
 
@@ -37,7 +37,7 @@ def answer(req: dict) -> dict:
     image = req.get("image_b64") or ""
     if not question or not image:
         return protocol.build_consult_result(
-            rid, False, error="empty question or picture")
+            rid, False, error="问题或图片为空")
     try:
         reply: Any = models.build_chat_model().invoke([
             SystemMessage(content=_SYSTEM),

@@ -4,6 +4,7 @@ import contextlib
 
 import graph
 import observability
+import session
 import tools
 from langchain_core.messages import AIMessage, ToolMessage
 
@@ -35,7 +36,8 @@ def test_frozen_bundles_are_refused():
     ]
     for tool, args, target in cases:
         assert scripter.refuse_existing(tool, args, frozen) == (
-            f"error: {target} already exists; this handoff may not change it")
+            f"error: {target} 已存在；这次交接不能改它。要改它得让交接带上 fix: true，"
+            "请把这一句写进你的总结。")
 
 
 def test_a_new_name_and_a_missing_field_pass():
@@ -69,7 +71,8 @@ def test_the_gate_stops_the_host(monkeypatch):
         scripter.disarm_freeze(token)
     assert calls == []
     assert _result_text(out) == [
-        "error: old already exists; this handoff may not change it"]
+        "error: old 已存在；这次交接不能改它。要改它得让交接带上 fix: true，"
+        "请把这一句写进你的总结。"]
 
     token = scripter.arm_freeze(None)
     try:
@@ -98,7 +101,7 @@ def test_a_handoff_opens_its_own_span(monkeypatch):
 
     monkeypatch.setattr(graph, "run_subgraph", run)
     assert scripter.run_scripter({"goal": "签到"}, []) == "done"
-    assert opened == [("author-script", "goal: 签到")]
+    assert opened == [("author-script", "goal: 签到" + session.ASK_IN_CHINESE)]
     assert seen[0][2] is None
 
 

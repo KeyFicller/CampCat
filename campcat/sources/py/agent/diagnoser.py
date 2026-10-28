@@ -14,6 +14,7 @@ from langgraph.graph import END, StateGraph
 
 import models
 import session
+import subagent
 import tools
 
 DIAGNOSE_TEMPLATE_NAME = "diagnose_template"
@@ -23,33 +24,32 @@ DIAGNOSE_TEMPLATE = {
     "function": {
         "name": DIAGNOSE_TEMPLATE_NAME,
         "description": (
-            "Decide why a template failed to match, from the template, the "
-            "screen at the matcher's best box, and the whole screen. Returns "
-            "crop_issue, wrong_screen, or inconclusive, and the shot to re-cut "
-            "from. Pass the run_script error verbatim."
+            "判断一个模板为什么匹配失败：看模板本身、匹配器最佳位置处的屏幕、"
+            "以及整屏。返回 crop_issue、wrong_screen 或 inconclusive，"
+            "以及应该拿哪张截图重新裁。把 run_script 的报错原样传进来。"
         ),
         "parameters": {
             "type": "object",
             "properties": {
                 "bundle": {
                     "type": "string",
-                    "description": "Bundle the template lives in.",
+                    "description": "模板所在的 bundle。",
                 },
                 "template": {
                     "type": "string",
-                    "description": "Template name; .png may be omitted.",
+                    "description": "模板名；.png 可以省略。",
                 },
                 "error": {
                     "type": "string",
                     "description": (
-                        "The run_script failure verbatim. It must contain "
-                        "best=… box=x,y,w,h threshold=…."
+                        "run_script 的失败原文。里面必须有 "
+                        "best=… box=x,y,w,h threshold=…。"
                     ),
                 },
                 "expect": {
                     "type": "string",
                     "description": (
-                        "What that step expected to see, usually its // comment."
+                        "这一步期望看到什么，通常就是它的 // 注释。"
                     ),
                 },
             },
@@ -59,17 +59,17 @@ DIAGNOSE_TEMPLATE = {
 }
 
 JUDGE_PROMPT = (
-    "A script failed because a template did not match. You see three pictures: "
-    "the template it looked for, the screen at the place the matcher liked best "
-    "(same scale as the template), and the whole screen. Decide which side is "
-    "wrong and answer in exactly this form:\n"
+    "一个脚本因为某个模板没匹配上而失败了。你看到三张图：它要找的模板、"
+    "匹配器最看好的那个位置上的屏幕（与模板同尺度），以及整屏。"
+    "判断是哪一边错了，严格按下面的格式回答：\n"
     "verdict: crop_issue | wrong_screen | inconclusive\n"
-    "reason: what you see in the template and on the screen, in one or two sentences\n"
-    "fix: one sentence on what to change\n"
-    "crop_issue: the control in the template is on this screen, but the template "
-    "also holds background or a neighbouring element, or its edges are off. "
-    "wrong_screen: the control is not on this screen at all. inconclusive: you "
-    "cannot tell. A circular template's corners are transparent and are not background."
+    "reason: 你在模板和屏幕上分别看到了什么，一到两句\n"
+    "fix: 一句话说明该改什么\n"
+    "verdict、reason、fix 这三个键名，以及 crop_issue / wrong_screen / "
+    "inconclusive 三个取值，都要照抄英文原样，不要翻译。\n"
+    "crop_issue：这个控件就在这个屏幕上，但模板里还框进了背景或旁边的元素，"
+    "或者边没贴准。wrong_screen：这个屏幕上根本没有这个控件。"
+    "inconclusive：你判断不了。圆形模板的四个角是透明的，不算背景。"
 )
 
 _MATCH = re.compile(
@@ -131,7 +131,7 @@ def _host_fail(reply: dict, shot: int = 0) -> dict:
     return {
         "verdict": "inconclusive",
         "shot": shot,
-        "reason": str(reply.get("error") or "host call failed"),
+        "reason": str(reply.get("error") or "宿主调用失败"),
         "fix": "",
     }
 
@@ -142,7 +142,7 @@ def diagnose_parse(state: DiagnoseState) -> dict:
         return {
             "verdict": "inconclusive",
             "shot": 0,
-            "reason": "the error has no match verdict for this template",
+            "reason": "报错里没有这个模板的匹配结论",
             "fix": "",
         }
     return {"match": match, "shot": 0}
@@ -177,7 +177,8 @@ def diagnose_gather(state: DiagnoseState) -> dict:
 def diagnose_judge(state: DiagnoseState) -> dict:
     match = state["match"]
     expect = state.get("expect") or "(none given)"
-    text = f"best={match['best']} threshold={match['threshold']}\nexpectation: {expect}"
+    text = (f"best={match['best']} threshold={match['threshold']}\n"
+            f"期望：{expect}" + session.ASK_IN_CHINESE)
     screen = session.thumbnail_png(state.get("screen_b64") or "")
     if screen is None:
         screen = state.get("screen_b64") or ""
@@ -191,13 +192,13 @@ def diagnose_judge(state: DiagnoseState) -> dict:
         reply = models.streamed(models.build_chat_model(), [
             SystemMessage(content=JUDGE_PROMPT),
             HumanMessage(content=content),
-        ])
+        ], subagent.chunk_sink)
     except tools.TurnInterrupted:
         raise
     except Exception as exc:  # noqa: BLE001 - reported as inconclusive, not a failed turn
         return {
             "verdict": "inconclusive",
-            "reason": "model error: " + str(exc),
+            "reason": "模型出错：" + str(exc),
             "fix": "",
         }
     raw = reply.content if isinstance(reply.content, str) else str(reply.content)

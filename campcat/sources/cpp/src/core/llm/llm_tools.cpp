@@ -778,35 +778,35 @@ namespace tools {
 /// would decode into each other, making `shape` below ambiguous.
 struct box {
     [[= js::desc{.text =
-                     js::str("Left edge X, in screenshot pixels.")}]] int x;
+                     js::str("左边缘 X，截图像素。")}]] int x;
     [[= js::desc{.text =
-                     js::str("Top edge Y, in screenshot pixels.")}]] int y;
-    [[= js::desc{.text = js::str("Width in pixels.")}]] int w;
-    [[= js::desc{.text = js::str("Height in pixels.")}]] int h;
+                     js::str("上边缘 Y，截图像素。")}]] int y;
+    [[= js::desc{.text = js::str("宽度，像素。")}]] int w;
+    [[= js::desc{.text = js::str("高度，像素。")}]] int h;
 };
 
 /// A filled disc: centre (cx,cy) and radius r, in screenshot pixels. Covers the
 /// pixels where `dx*dx + dy*dy <= r*r`.
 struct circle {
     [[= js::desc{.text =
-                     js::str("Centre X, in screenshot pixels.")}]] int cx;
+                     js::str("中心 X，截图像素。")}]] int cx;
     [[= js::desc{.text =
-                     js::str("Centre Y, in screenshot pixels.")}]] int cy;
+                     js::str("中心 Y，截图像素。")}]] int cy;
     [[= js::desc{.text =
-                     js::str("Radius in pixels, at least 1.")}]] int r;
+                     js::str("半径，像素，至少 1。")}]] int r;
 };
 
 /// A filled diamond: centre (cx,cy) and half-diagonals rx, ry. Vertices sit on
 /// the axes. Covers the pixels where `|dx|/rx + |dy|/ry <= 1`.
 struct diamond {
     [[= js::desc{.text =
-                     js::str("Centre X, in screenshot pixels.")}]] int cx;
+                     js::str("中心 X，截图像素。")}]] int cx;
     [[= js::desc{.text =
-                     js::str("Centre Y, in screenshot pixels.")}]] int cy;
+                     js::str("中心 Y，截图像素。")}]] int cy;
     [[= js::desc{.text = js::str(
-                     "Horizontal half-diagonal in pixels, at least 1.")}]] int rx;
+                     "水平半对角线，像素，至少 1。")}]] int rx;
     [[= js::desc{.text = js::str(
-                     "Vertical half-diagonal in pixels, at least 1.")}]] int ry;
+                     "垂直半对角线，像素，至少 1。")}]] int ry;
 };
 
 /// A region, told apart by its fields (`{x,y,w,h}`, `{cx,cy,r}`, or
@@ -848,13 +848,11 @@ cv::Mat decode_current_screen() {
 constexpr int k_default_swipe_ms = 300;
 
 [[= js::image_result]][[= js::doc{
-    .text =
-        js::str("Takes a fresh screenshot of the device screen and numbers it. "
-                "When a script stops to ask a question, use it to see the "
-                "screen the question is about. To find out which screen the "
-                "device is on, use locate: it answers in one line and returns "
-                "no picture. Do not use it for an older frame -- view_shot "
-                "does that without replacing the current screen.")}]] std::string
+    .text = js::str(
+        "新截一张设备屏幕的图并给它编号。脚本停下来提问时，用它看问题说的是"
+        "哪个界面。想确认设备停在哪个界面，有 locate 就先用它：一行就回答，"
+        "不出图。要看更早的帧，不要用它——view_shot 会在不替换当前屏幕的前提"
+        "下做到。")}]] std::string
     screenshot() {
     adb_api &adb = require_adb();
     cv::Mat bgr;
@@ -882,11 +880,10 @@ CPP_REFLECT_TOOL(screenshot)
 
 [[= js::image_result]][[= js::doc{
     .text = js::str(
-        "Shows an earlier frame of this session again, by its number. Use it "
-        "to look at one before cutting a template from it. Do not use it for "
-        "the screen now -- screenshot; this does not replace it, so a tap "
-        "still lands on the newest.")}]][[= js::param_docs(
-    js::str("Frame number from a screenshot caption."))]] std::string
+        "按编号重新显示本次会话中更早的一帧。要从某一帧上切模板之前，先用它"
+        "看一眼。要看当前的屏幕，不要用它——用 screenshot；它不替换当前屏幕，"
+        "所以 tap 仍然落在最新那张上。")}]] [[= js::param_docs(
+    js::str("帧编号，就是截图说明里显示的那个数字。"))]] std::string
     view_shot(int shot) {
     std::string error;
     const screen_state *frame = frame_for(shot, &error);
@@ -899,16 +896,13 @@ CPP_REFLECT_TOOL(view_shot)
 
 [[= js::image_result]][[= js::doc{
     .text = js::str(
-        "Shows a template PNG: what a failed tap, swipe or wait_until was "
-        "matching against. Use it after a failed match, with a screenshot or "
-        "view_crop, to tell a control that is gone (the step before did not "
-        "land) from one that changed (a loose, stale or text-bearing cut). Do "
-        "not use it to judge a cut you are about to save -- view_crop shows "
-        "that.")}]]
+        "显示一张模板 PNG：失败的 tap、swipe 或 wait_until 当时在拿什么比对。"
+        "匹配失败之后，配合 screenshot 或 view_crop 用它，分清是控件没了（前"
+        "一步没落到位），还是控件变了（切图太松、过时，或者带进了文字）。要"
+        "判断一张即将保存的切图，不要用它——那是 view_crop 的事。")}]]
     [[= js::param_docs(
-        js::str("Bundle the template is in, as list_scripts showed it."),
-        js::str("Template name, as read_script lists it; \".png\" is appended "
-                "when missing."))]] std::string
+        js::str("模板所在的 bundle，写 list_scripts 显示的名字。"),
+        js::str("模板名，read_script 列出的写法；缺 \".png\" 时补上。"))]] std::string
     view_template(std::string bundle, std::string name) {
     if (!ccat_lang::safe_leaf_name(bundle)) {
         throw js::bind_error("bundle \"" + bundle +
@@ -955,20 +949,17 @@ CPP_REFLECT_TOOL(view_template)
 
 [[= js::image_result]][[= js::doc{
     .text = js::str(
-        "Shows one region of a screenshot with the cut drawn on it, plus up to "
-        "16 pixels around it. Use it once per element, right before "
-        "save_template: the drawn shape is the cut, and pixels outside the "
-        "line are context, not part of the template. Do not use it to see a "
-        "screen (screenshot), or a second time to tighten the same box. The "
-        "shape follows the control: a box {x,y,w,h} for a rectangle, a circle "
-        "{cx,cy,r} for a round control, a diamond {cx,cy,rx,ry} for a diamond. "
-        "It does not change the current screen.")}]]
+        "显示截图的某一个区域，把切图范围画出来，并带上周围最多 16 像素。"
+        "裁一个控件之前看一次，匹配失败之后也用它看报错里的位置：画出的形状"
+        "就是切图，线外的像素只是上下文，不属于模板。要看整屏，不要用它（用 "
+        "screenshot）；也不要对同一个框看第二次来收紧。形状跟着控件走：矩形用 box "
+        "{x,y,w,h}，圆形控件用 circle {cx,cy,r}，菱形用 diamond {cx,cy,rx,ry}。"
+        "它不改变当前屏幕。")}]]
     [[= js::param_docs(
-        js::str("The region to cut out: a box {x,y,w,h}, a circle {cx,cy,r}, or "
-                "a diamond {cx,cy,rx,ry}."),
-        js::str("Which screenshot to look at: the number its caption showed. "
-                "Omit for the current screen; looking at another frame does "
-                "not make it current."))]] std::string
+        js::str("要切出来的区域：矩形 {x,y,w,h}，圆形 {cx,cy,r}，或菱形 "
+                "{cx,cy,rx,ry}。"),
+        js::str("看哪张截图：截图说明里显示的编号。省略就看当前屏幕；看别的"
+                "帧不会把它变成当前帧。"))]] std::string
     view_crop(shape region, std::optional<int> shot) {
     cv::Mat bgr;
     std::string error;
@@ -989,15 +980,13 @@ CPP_REFLECT_TOOL(view_crop)
 
 [[= js::image_result]][[= js::doc{
     .text = js::str(
-        "The tight cut of a region; a circle or a diamond is transparent "
-        "outside its shape. Used by the region check. Do not use it for "
-        "context -- view_crop includes the surroundings.")}]]
+        "某个区域的紧切图；circle 或 diamond 在形状之外是透明的。区域检查用"
+        "它。要看上下文，不要用它——view_crop 会把周围一起带上。")}]]
     [[= js::param_docs(
-        js::str("The region to cut out: a box {x,y,w,h}, a circle {cx,cy,r}, or "
-                "a diamond {cx,cy,rx,ry}."),
-        js::str("Which screenshot to look at: the number its caption showed. "
-                "Omit for the current screen; looking at another frame does "
-                "not make it current."))]] std::string
+        js::str("要切出来的区域：矩形 {x,y,w,h}，圆形 {cx,cy,r}，或菱形 "
+                "{cx,cy,rx,ry}。"),
+        js::str("看哪张截图：截图说明里显示的编号。省略就看当前屏幕；看别的"
+                "帧不会把它变成当前帧。"))]] std::string
     tight_crop(shape region, std::optional<int> shot) {
     cv::Mat bgr;
     std::string error;
@@ -1018,17 +1007,15 @@ CPP_REFLECT_TOOL(tight_crop)
 
 [[= js::image_result]][[= js::doc{
     .text = js::str(
-        "Draws a region on a screenshot and returns the picture; nothing is "
-        "tapped or written, and nothing needs approval. Used by the region "
-        "check to show the surroundings. A box is {x,y,w,h}, a circle is "
-        "{cx,cy,r} and a diamond is {cx,cy,rx,ry}.")}]]
+        "在截图上画出一个区域并返回这张图；不点任何东西、不写文件，也不需要"
+        "审批。区域检查用它把周围环境显示出来。矩形是 {x,y,w,h}，圆是 "
+        "{cx,cy,r}，菱形是 {cx,cy,rx,ry}。")}]]
     [[= js::param_docs(
-        js::str("Short label for what the region marks, e.g. \"the login button\"."),
-        js::str("The region to mark: a box {x,y,w,h}, a circle {cx,cy,r}, or a "
-                "diamond {cx,cy,rx,ry}."),
-        js::str("Which screenshot to look at: the number its caption showed. "
-                "Omit for the current screen; looking at another frame does "
-                "not make it current."))]] std::string
+        js::str("说明这个区域标的是什么的短标签，例如 \"登录按钮\"。"),
+        js::str("要标出的区域：矩形 {x,y,w,h}，圆形 {cx,cy,r}，或菱形 "
+                "{cx,cy,rx,ry}。"),
+        js::str("看哪张截图：截图说明里显示的编号。省略就看当前屏幕；看别的"
+                "帧不会把它变成当前帧。"))]] std::string
     mark(std::string label, shape region, std::optional<int> shot) {
     cv::Mat bgr;
     std::string error;
@@ -1135,16 +1122,14 @@ std::string tap_region(const llm::region &_given) {
 }
 
 [[= js::doc{.text = js::str(
-                "Taps the centre of a region, in screenshot pixels. Use it to "
-                "press the element the region names. Do not use it before "
-                "screenshotting the screen you are about to act on. A box is "
-                "{x,y,w,h}, a circle is {cx,cy,r} and a diamond is "
-                "{cx,cy,rx,ry}; the region is the control, not the room around "
-                "it. While human approval is on, the region is shown and "
-                "nothing is tapped unless they approve it.")}]]
+                "点击某个区域的中心，坐标是截图像素。用它按下这个区域所指的"
+                "控件。动手之前，先截你要操作的那个屏幕。矩形是 {x,y,w,h}，圆是 "
+                "{cx,cy,r}，菱形是 {cx,cy,rx,ry}；区域指的是控件本身，不是它"
+                "周围的空白。人工审批开启时，会把这个区域显示出来，没人批准"
+                "就不点。")}]]
     [[= js::param_docs(js::str(
-        "The region to tap: a box {x,y,w,h}, a circle {cx,cy,r}, or a diamond "
-        "{cx,cy,rx,ry}."))]] std::string
+        "要点的区域：矩形 {x,y,w,h}，圆形 {cx,cy,r}，或菱形 "
+        "{cx,cy,rx,ry}。"))]] std::string
     tap(shape region) {
     return tap_region(to_region(region));
 }
@@ -1152,12 +1137,10 @@ CPP_REFLECT_TOOL(tap)
 
 [[= js::doc{
     .text = js::str(
-        "Boots the Android emulator (MuMu) this shell is configured for and "
-        "waits until it is up, up to about four minutes. Use it when a device "
-        "call fails because the device is not reachable. Do not use it in the "
-        "same round as another device call -- that call runs before the boot "
-        "finishes and fails; give it a round of its own. Do not use it when "
-        "the emulator is already up: it says so and starts nothing.")}]] std::string start_emulator() {
+        "启动这个 shell 配置的 Android 模拟器（MuMu）并等它就绪，最多约四"
+        "分钟。设备调不通的时候用它。不要和别的设备调用放在同一轮——那个调用"
+        "会在启动完成之前跑，必然失败；给它单独一轮。模拟器已经起来时不要用"
+        "它：它会说明这一点，什么也不启动。")}]] std::string start_emulator() {
     if (!g_ctx.start_emulator) {
         throw js::bind_error("no emulator control in this session");
     }
@@ -1196,11 +1179,9 @@ CPP_REFLECT_TOOL(start_emulator)
 
 [[= js::doc{
     .text = js::str(
-        "Returns to the launcher and force-stops every recent app, blocking "
-        "until they are stopped. Use it at the start of a flow that has to "
-        "begin from a known screen. Do not use it mid-flow to back out of a "
-        "screen -- it closes the app you were working in. While human approval "
-        "is on, nothing runs unless the user approves it.")}]]
+        "回到桌面，并强制停止所有最近用过的应用，等它们都停了才返回。流程"
+        "必须从一个已知界面开始时用它。流程中途想退出某个界面，不要用它——"
+        "它会把正在操作的应用关掉。人工审批开启时，没人批准就不执行。")}]]
     std::string go_home() {
     if (needs_approval("go_home")) {
         if (!g_ctx.request_approval) {
@@ -1279,15 +1260,15 @@ std::string run_parsed(const ccat_lang::Program &_prog,
 
 [[= js::quiet{.text = js::str("Ran script")}]][[= js::doc{
     .text = js::str(
-        "Runs a .ccat script on the device and returns what happened; with "
-        "human approval on, nothing runs without it. Use it to verify a script "
-        "you wrote and to check that a step landed. Do not run the same script "
-        "again unchanged as a fix. A template PNG save_template has not put in "
-        "the bundle makes a statement fail (an `if` on it is just false); "
-        "tap_at and swipe_at need no template, and run(\"<name>/main.ccat\") "
-        "runs a saved bundle. ccat_help has the language.")}]]
+        "在设备上跑一段 .ccat 脚本，并返回发生了什么；人工审批开启时，没人"
+        "批准就不跑。用它验证你写的脚本，确认某一步真的落到位。不要原样再跑"
+        "一遍同一个脚本当作修复。save_template 还没放进 bundle 的模板 PNG 会"
+        "让语句失败（对它做 `if` 直接是假）；tap_at 和 swipe_at 不需要模板，"
+        "run(\"<name>/main.ccat\") 跑已保存的 bundle。它只回文本、不附图；"
+        "跑完想知道停在哪个界面，接着 screenshot。语言本身看 "
+        "ccat_help。")}]]
     [[= js::param_docs(
-        js::str("The full .ccat script source to run."))]] std::string
+        js::str("要跑的 .ccat 脚本全文。"))]] std::string
         run_script(std::string source) {
     // Parse first: a syntax error answers the model directly instead of asking
     // a human to read a script that cannot run.
@@ -1343,13 +1324,12 @@ std::string landing_of(const std::string &_name) {
 
 [[= js::quiet{.text = js::str("Ran bundle {name}")}]][[= js::doc{
     .text = js::str(
-        "Runs a saved bundle by name, exactly as its main.ccat stands on disk. "
-        "Use it to play a whole skill; list_scripts has the names. With human "
-        "approval on, the run waits for it. A run that succeeds ends by naming "
-        "the anchor it landed on, so do not locate to confirm one. To run a "
-        "script that is not saved yet, use run_script.")}]]
+        "按名字跑一个已保存的 bundle，跑的正是磁盘上那份 main.ccat。用它演"
+        "一遍完整的技能；名字看 list_scripts。人工审批开启时，要等批准才跑。"
+        "成功的那次运行结尾会说明落在哪个 anchor 上，所以不要再用 locate 去"
+        "确认。还没保存的脚本用 run_script。")}]]
     [[= js::param_docs(
-        js::str("Bundle name, as list_scripts shows it."))]] std::string
+        js::str("bundle 名，list_scripts 显示的写法。"))]] std::string
         run_bundle(std::string name) {
     if (!ccat_lang::safe_leaf_name(name)) {
         throw js::bind_error("not a bundle name: \"" + name + "\"");
@@ -1415,15 +1395,14 @@ std::string graph_check(const std::string &_graph) {
 
 [[= js::quiet{.text = js::str("Saved script {name}")}]][[= js::doc{
     .text = js::str(
-        "Saves .ccat source as a new bundle: main.ccat next to the template "
-        "PNGs it names; with human approval on, nothing is written without "
-        "it, and it runs nothing. Use it for a new skill, or a new edge of a "
-        "graph. Do not use it to change an existing bundle -- update_script "
-        "does that, and a name already taken is refused.")}]]
+        "把 .ccat 源码保存成一个新 bundle：main.ccat 和它引用的模板 PNG 放在"
+        "一起；人工审批开启时，没人批准就不写，而且它不运行任何东西。新建"
+        "技能，或者给一张图加一条新边，用它。要改已有的 bundle，不要用它——"
+        "那是 update_script，而且重名会被拒绝。")}]]
     [[= js::param_docs(
-        js::str("Bundle name: a leaf name describing what the script does, "
-                "e.g. \"claim_reward\"."),
-        js::str("The full .ccat script source to save."))]] std::string
+        js::str("bundle 名：一个说明脚本干什么的叶子名，例如 "
+                "\"claim_reward\"。"),
+        js::str("要保存的 .ccat 脚本全文。"))]] std::string
         save_script(std::string name, std::string source) {
     const std::unique_ptr<ccat_lang::Program> prog =
         check_new_bundle(name, source);
@@ -1562,26 +1541,21 @@ std::string save_template_region(std::string bundle, std::string name,
 
 [[= js::doc{
     .text = js::str(
-        "Cuts one template PNG from a screenshot into a bundle that already "
-        "exists, so its script can name it with tap(\"name.png\"); with human "
-        "approval on, nothing is cut without it. Use it once for every PNG a "
-        "script names, screenshotting right before the cut, tight around the "
-        "part that stays put. Do not cut again only to tighten the same box, "
-        "and do not cut from a frame older than the screen. The shape follows "
-        "the control: a box {x,y,w,h} for a rectangle, a circle {cx,cy,r} for "
-        "a round control, a diamond {cx,cy,rx,ry} for a diamond (vertices on "
-        "the axes). A box around a round or diamond control keeps background "
-        "the match must ignore, while those shapes write that shape's "
-        "alpha.")}]]
+        "从一张截图里切出一张模板 PNG，放进一个已经存在的 bundle，脚本就能"
+        "用 tap(\"name.png\") 引用它；人工审批开启时，没人批准就不切。脚本"
+        "引用几张 PNG 就用几次。要切的控件还在当前屏幕上，就截一张新的再切；"
+        "不在，就用 shot 指定那张帧，先 view_shot 看一眼。切得紧贴不动的部分，"
+        "不要只为了把同一个框收紧再切一次。形状"
+        "跟着控件走：矩形用 box {x,y,w,h}，圆形控件用 circle {cx,cy,r}，菱形"
+        "用 diamond {cx,cy,rx,ry}（顶点落在坐标轴上）。给圆形或菱形控件套 box "
+        "会把背景也切进去，匹配时还得绕开；用对应的形状则按形状写 alpha。")}]]
     [[= js::param_docs(
-        js::str("Bundle to put the template in; it must already exist (see "
-                "save_script)."),
+        js::str("把模板放进哪个 bundle；它必须已经存在（见 save_script）。"),
         js::str(
-            "Template name, a leaf name; \".png\" is appended when missing."),
-        js::str("Which screenshot to cut from: the number its caption showed. "
-                "Omit for the most recent one."),
-        js::str("The region to cut out: a box {x,y,w,h}, a circle {cx,cy,r}, or "
-                "a diamond {cx,cy,rx,ry}."))]] std::string
+            "模板名，叶子名；缺 \".png\" 时补上。"),
+        js::str("从哪张截图切：截图说明里显示的编号。省略就用最近一张。"),
+        js::str("要切出来的区域：矩形 {x,y,w,h}，圆形 {cx,cy,r}，或菱形 "
+                "{cx,cy,rx,ry}。"))]] std::string
         save_template(std::string bundle, std::string name,
                       std::optional<int> shot, shape region) {
     return save_template_region(std::move(bundle), std::move(name), shot,
@@ -1591,9 +1565,8 @@ CPP_REFLECT_TOOL(save_template)
 
 [[= js::quiet{.text = js::str("Read CCAT.md")}]][[= js::doc{
     .text = js::str(
-        "Returns the .ccat language reference. Use it before writing a script "
-        "with run_script. Do not use it for a bundle's own source -- "
-        "read_script.")}]] std::string
+        "返回 .ccat 语言参考。把脚本交给 run_script 之前先看它。要看某个 "
+        "bundle 自己的源码，不要用它——用 read_script。")}]] std::string
     ccat_help() {
     if (g_ctx.cfg == nullptr) {
         throw js::bind_error("no shell config; cannot locate CCAT.md");
@@ -1618,11 +1591,10 @@ CPP_REFLECT_TOOL(ccat_help)
 
 [[= js::quiet{.text = js::str("List scripts")}]][[= js::doc{
     .text = js::str(
-        "Lists the saved .ccat bundles, one \"name -- description\" line each, "
-        "the description being the first // line of main.ccat. Use it before "
-        "writing a new skill: a bundle that already does the job is run with "
-        "run(\"<name>/main.ccat\") rather than rewritten. Do not use it to "
-        "read a bundle's code -- read_script.")}]] std::string
+        "列出已保存的 .ccat bundle，每行一条「名字 -- 描述」，描述取 "
+        "main.ccat 的第一条 // 注释。写新技能之前先看它：已经能干这件事的 "
+        "bundle 用 run(\"<name>/main.ccat\") 跑，不要重写。要看 bundle 的"
+        "代码，不要用它——用 read_script。")}]] std::string
     list_scripts() {
     const std::vector<std::string> names =
         ccat_lang::bundle_names(g_ctx.script_dir);
@@ -1675,12 +1647,11 @@ CPP_REFLECT_TOOL(list_scripts)
 
 [[= js::quiet{.text = js::str("Read script {name}")}]][[= js::doc{
     .text = js::str(
-        "Returns a bundle's main.ccat exactly as written, prefixed by a header "
-        "naming the bundle and its template PNGs. Use it to read a bundle, and "
-        "to edit it with update_script from what this returns. Do not use it "
-        "to see a template -- view_template.")}]][
+        "原样返回某个 bundle 的 main.ccat，前面加一段头，说明 bundle 名和它"
+        "的模板 PNG。要读一个 bundle，以及照着它返回的内容用 update_script "
+        "改，用它。要看模板，不要用它——用 view_template。")}]][
     [= js::param_docs(
-        js::str("Bundle name, as list_scripts showed it."))]] std::string
+        js::str("bundle 名，list_scripts 显示的写法。"))]] std::string
     read_script(std::string name) {
     if (!ccat_lang::safe_leaf_name(name)) {
         throw js::bind_error("name \"" + name + "\" is not a plain file name");
@@ -1730,17 +1701,14 @@ void require_bundle(const std::string &_name) {
 /// which screenshot to cut from. "Keep" needs the optional because one update
 /// cannot re-cut every template -- their screens are not all on one frame.
 struct template_cut {
-    [[= js::desc{.text = js::str("Template name, a leaf name; \".png\" is "
-                                "appended when missing.")}]] std::string name;
+    [[= js::desc{.text = js::str("模板名，叶子名；缺 \".png\" 时补上。")}]] std::string name;
     [[= js::desc{
         .text = js::str(
-            "Omit to keep the template already in the bundle; give it to "
-            "re-cut "
-            "that template.")}]] std::optional<shape> cut;
+            "省略表示保留 bundle 里已有的这张模板；给出它表示重切"
+            "这张。")}]] std::optional<shape> cut;
     [[= js::desc{
-        .text = js::str("Which screenshot to cut from: the number its caption "
-                        "showed. Omit for the most recent one; ignored when "
-                        "there is no cut.")}]] std::optional<int> shot;
+        .text = js::str("从哪张截图切：截图说明里显示的编号。"
+                        "省略就用最近一张；没有 cut 时忽略。")}]] std::optional<int> shot;
 };
 
 /// What a declared template set does to a bundle. Everything in it has been
@@ -1927,16 +1895,15 @@ void require_anchor_script(const ccat_lang::Program &_prog) {
 
 [[= js::quiet{.text = js::str("Updated script {name}")}]][[= js::doc{
     .text = js::str(
-        "Replaces a bundle's main.ccat and its whole template set in one step, "
-        "under one approval: a declared cut is re-cut, a declared name alone "
-        "keeps the PNG, and PNGs you do not declare are deleted. Use it to "
-        "change a skill that already exists. Do not use it to create one -- "
-        "save_script, or to try out a single cut -- save_template.")}]]
+        "一步替换某个 bundle 的 main.ccat 和整套模板，只走一次审批：给了 "
+        "cut 的会重切，只给名字的保留原 PNG，你没有声明的 PNG 会被删掉。改"
+        "已经存在的技能，用它。新建技能不要用它——用 save_script；只想试切"
+        "一张也不要——用 save_template。")}]]
     [[= js::param_docs(
-        js::str("Bundle to update; it must already exist (see list_scripts)."),
-        js::str("The new main.ccat source, replacing the old one."),
+        js::str("要更新的 bundle；它必须已经存在（见 list_scripts）。"),
+        js::str("新的 main.ccat 源码，替换旧的。"),
         js::str(
-            "Every template the bundle should have afterwards."))]] std::string
+            "更新后这个 bundle 应当拥有的全部模板。"))]] std::string
         update_script(std::string name, std::string source,
                       std::vector<template_cut> templates) {
     if (!ccat_lang::safe_leaf_name(name)) {
@@ -2007,25 +1974,25 @@ CPP_REFLECT_TOOL(update_script)
 
 [[= js::quiet{.text = js::str("Save anchor {graph}.{anchor}")}]][[= js::doc{
     .text = js::str(
-        "Saves one screen of a graph as anchor bundle <graph>.<anchor>: "
-        "golden.md (what the screen is), main.ccat (whether it is showing) and "
-        "its templates, under one approval. Use it to add a screen; a graph's "
-        "first anchor must be \"entry\". Do not save a second anchor for a "
-        "screen the graph has: a new anchor runs the existing ones and is "
-        "refused, naming the one that recognises it. Do not put actions in it "
-        "-- an anchor only judges, because every anchor runs on every locate. "
-        "Saving an existing anchor replaces all three, like update_script. "
-        "Join two anchors with save_script(\"<graph>.<from>-<to>\", ...).")}]]
+        "把一张图上的一个界面保存成 anchor bundle <graph>.<anchor>："
+        "golden.md（这个界面是什么）、main.ccat（是不是它）和它的模板，一次"
+        "审批。加界面用它；一张图的第一个 anchor 必须叫 \"entry\"。图里已经"
+        "有的界面不要再存一个 anchor：新 anchor 会先把已有的跑一遍，然后被"
+        "拒绝，并指出认出它的是哪个。不要在里面放动作——anchor 只做判断，因为"
+        "每次 locate 都会跑所有 anchor。这次交接获准改这个 anchor 时，保存"
+        "已有的 anchor 会三样全换，像 "
+        "update_script 那样。两个 anchor 之间用 "
+        "save_script(\"<graph>.<from>-<to>\", ...) 连起来。")}]]
     [[= js::param_docs(
-        js::str("Graph name, [a-z0-9_]+, e.g. the game: \"shuaitu\"."),
-        js::str("Anchor name, [a-z0-9_]+: the screen, e.g. \"main_city\"."),
-        js::str("golden.md: front matter between --- lines (kind: page | "
-                "transient | popup, default page; a popup needs close: <bundle "
-                "that closes it>), then one natural-language description of "
-                "the screen."),
-        js::str("main.ccat: judges the screen and returns true or false."),
-        js::str("Every template the anchor should have afterwards, as in "
-                "update_script."))]] std::string
+        js::str("图名，[a-z0-9_]+，例如游戏名 \"shuaitu\"。"),
+        js::str("anchor 名，[a-z0-9_]+：指这个界面，例如 \"main_city\"。"),
+        js::str("golden.md：用 --- 行包起来的 front matter（kind: page | "
+                "transient | popup，默认 page；popup 需要 close: <关掉它的 "
+                "bundle>），后面接一句对这个界面的自然语言描述。"),
+        js::str("main.ccat：判断是不是这个界面，至少要有一条 return"
+                "（返回 true 或 false）。"),
+        js::str("之后这个 anchor 应当拥有的全部模板，写法同 "
+                "update_script。"))]] std::string
         save_anchor(std::string graph, std::string anchor, std::string golden,
                     std::string source, std::vector<template_cut> templates) {
     if (!ccat_lang::graph_part_name(graph) ||
@@ -2106,14 +2073,12 @@ CPP_REFLECT_TOOL(save_anchor)
 
 [[= js::quiet{.text = js::str("Read graph {name}")}]][[= js::doc{
     .text = js::str(
-        "Returns a graph as its bundles describe it: every anchor with its kind "
-        "and the first line of its description, every edge, and every problem "
-        "that would stop goto from using it. Use it before a goto, and before "
-        "adding a screen or an edge. Do not use it to read a script -- "
-        "read_script does that.")}]]
+        "按各 bundle 的描述返回一张图：每个 anchor 和它的种类、描述的第一行，"
+        "每条边，以及任何会挡住 goto 使用它的问题。写 goto(...) 之前用它，"
+        "加界面或加边之前也用它。要读脚本，不要用它——那是 read_script。")}]]
     [[= js::param_docs(
-        js::str("Graph name, the part before the dot (list_scripts marks its "
-                "<graph>.entry bundle [graph ...])."))]] std::string
+        js::str("图名，点号前面那部分（list_scripts 会把它的 <graph>.entry "
+                "bundle 标成 [graph ...]）。"))]] std::string
         read_graph(std::string name) {
     const ccat_lang::scanned_graph scanned =
         ccat_lang::scan_graph(g_ctx.script_dir, name);
@@ -2129,18 +2094,15 @@ CPP_REFLECT_TOOL(read_graph)
 
 [[= js::doc{
     .text = js::str(
-        "Answers which screen of this graph the device is on, in one line: "
-        "\"<graph>.<anchor> (page)\", \"(transient)\", \"(popup)\", "
-        "\"unknown\" or \"ambiguous\". Use it only when you do not already "
-        "know which screen the device is on -- before a run whose starting "
-        "screen you cannot name. A run that succeeds names the anchor it "
-        "landed on, so it is never the way to check one. It taps nothing, and "
-        "it reads the current screenshot rather than taking one. For a "
-        "question a script asked, use screenshot: that is the only reason to "
-        "pull a picture.")}]]
+        "一句话回答设备停在这张图的哪个界面：\"<graph>.<anchor> (page)\"、"
+        "\"(transient)\"、\"(popup)\"、\"unknown\" 或 \"ambiguous\"。只在"
+        "你确实不知道设备在哪个界面时才用它——比如要在说不清起始界面的情况"
+        "下开一次运行。成功的那次运行会说明落在哪个 anchor 上，所以确认从来"
+        "不用它。它不点任何东西，读的是当前截图，而不是新截一张。脚本提问要"
+        "看图时用 screenshot：那是唯一需要出图的理由。")}]]
     [[= js::param_docs(
-        js::str("Graph name, the part before the dot (list_scripts marks it "
-                "<graph>.entry bundle [graph ...])."))]] std::string
+        js::str("图名，点号前面那部分（list_scripts 会把它的 <graph>.entry "
+                "bundle 标成 [graph ...]）。"))]] std::string
     locate(std::string graph) {
     if (g_ctx.cfg == nullptr) {
         throw js::bind_error("no shell config for the script tools");
@@ -2175,14 +2137,13 @@ CPP_REFLECT_TOOL(read_graph)
 }
 CPP_REFLECT_TOOL(locate)
 
-[[= js::doc{.text = js::str("Deletes a bundle: its main.ccat and every "
-                            "template, which cannot be undone; with human "
-                            "approval on, nothing is removed without it. Use "
-                            "it for a bundle nothing reaches any more. Do not "
-                            "use it while another script runs it with run(...) "
-                            "-- update or delete that script first.")}]]
+[[= js::doc{.text = js::str("删掉一个 bundle：它的 main.ccat 和所有模板，"
+                            "删了无法恢复；人工审批开启时，没人批准就不删。"
+                            "给已经没有任何东西用得到的 bundle 用它。别的脚本"
+                            "还在用 run(...) 跑它时不要用它——先改或删掉那个"
+                            "脚本。")}]]
     [[= js::param_docs(
-        js::str("Bundle to delete, as list_scripts showed it."))]] std::string
+        js::str("要删的 bundle，list_scripts 显示的写法。"))]] std::string
         delete_script(std::string name) {
     if (!ccat_lang::safe_leaf_name(name)) {
         throw js::bind_error("name \"" + name + "\" is not a plain file name");
@@ -2224,15 +2185,13 @@ CPP_REFLECT_TOOL(delete_script)
 
 [[= js::doc{
     .text = js::str(
-        "Renames a bundle and rewrites every script that runs it by literal "
-        "path, under one approval -- do not edit those scripts yourself "
-        "afterwards. Use it to rename an existing bundle. Do not use it when a "
-        "script reaches the bundle through a `defs` name: there is no text to "
-        "rewrite, so update that script first. Refused when the new name is "
-        "taken or is not a plain file name.")}]]
+        "重命名一个 bundle，并按字面路径改掉所有跑它的脚本，只走一次审批——"
+        "之后不要再自己去改那些脚本。给已有的 bundle 改名用它。如果脚本是"
+        "通过 `defs` 名字用到这个 bundle 的，不要用它：那里没有文本可改，先"
+        "更新那个脚本。新名字已被占用或者不是纯文件名时会被拒绝。")}]]
     [[= js::param_docs(
-        js::str("Bundle to rename, as list_scripts showed it."),
-        js::str("The new name: a plain file name, not a path."))]] std::string
+        js::str("要改名的 bundle，list_scripts 显示的写法。"),
+        js::str("新名字：纯文件名，不是路径。"))]] std::string
         rename_script(std::string name, std::string new_name) {
     if (!ccat_lang::safe_leaf_name(name) ||
         !ccat_lang::safe_leaf_name(new_name)) {

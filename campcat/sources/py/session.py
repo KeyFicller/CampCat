@@ -9,12 +9,14 @@ from __future__ import annotations
 import base64
 import io
 import json
+import os
 import re
 import struct
+import sys
 import time
 from uuid import uuid4
 
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import HumanMessage, SystemMessage
 
 try:                       # optional: without it the older frames are dropped
     from PIL import Image  # instead of scaled, which is what this did before
@@ -39,7 +41,18 @@ _KEEP_PICTURES = 3
 _KEEP_CROPS = 4
 _CROP_HIGH = 8
 
+# Frames asked for again with `view_shot`, which are a class of their own. They
+# used to compete with the live screen for the `_KEEP_PICTURES` slots, so the
+# first picture of every batch was dropped before the model could see it, the
+# caption said to call `view_shot(n)` again, and the model did -- the same frame
+# seven times, because asking for four at once guarantees the oldest is lost.
+_KEEP_LOOKBACKS = 6
+
 CROP_TOOLS = frozenset({"view_crop", "view_template"})
+
+# Marks a looked-back frame, the way `crop:` marks a small cut. Not a screenshot:
+# it is older than the screen and must never take the screen's place.
+_LOOKBACK = "look:"
 
 # The longest side any context frame is worth, whatever the screen it came from.
 # A request carries every picture still in the list and the provider answers 413
@@ -47,6 +60,11 @@ CROP_TOOLS = frozenset({"view_crop", "view_template"})
 # a request's size. It is also what says a frame has already been through here:
 # demotion runs over the whole list every round, and nothing below is longer.
 _THUMB_PX = 960
+
+# What a frame's caption claims about its own pixels. Declared once because the
+# shrinker has to take it back out again: a picture that is scaled cannot also
+# be at original size, and a message saying both is one the model argues with.
+_ORIGINAL_SIZE = "就是原尺寸；坐标直接用这张图的像素"
 
 # Share of its long side a context frame keeps. Relative, because screens differ:
 # one absolute target shrank a 2560-wide frame to 37% while leaving a 1280-wide
@@ -68,6 +86,36 @@ _DSML_TAG = re.compile(r"</?[^>]*DSML[^>]*>", re.IGNORECASE)
 # The frame number a caption names, e.g. "#9" in "Screenshot #9 (2560x1440 ...)".
 # `_shot_caption` fixes that shape; nothing else in a caption contains "#".
 _SHOT_NUM = re.compile(r"#(\d+)")
+# What `_detach_picture` writes where the picture was. Used to tell a frame's
+# own message from prose that happens to name a frame number.
+_DETACHED = "[图片未附上"
+# Appended to the text of every request a model gets -- the user's own words and
+# the brief after a handoff -- so its reasoning stays Chinese. It rides on the
+# message, not the system prompt, and it is committed with the turn: the next
+# request's prefix then matches what the provider already cached.
+ASK_IN_CHINESE = "\n\n用中文思考和回答。"
+
+# Ends the system prompt, the last thing read before the model starts
+# reasoning; ASK_IN_CHINESE on its own only nudges. Naming the two habits that
+# actually show up -- an English preamble and `Hmm`/`Wait` hedging -- is what
+# holds: on DeepSeek's region check it took Chinese thinking from 0/6 to 5/6,
+# and the scripter from 1/6 to 4/6. Allowing English identifiers here would
+# undo that, so they are not mentioned.
+THINK_IN_CHINESE = ("\n\n系统：你的思考过程（reasoning）必须全程使用简体中文，"
+                    "禁止英文和 Hmm/Wait。最终答复也用简体中文。")
+
+
+def think_in_chinese(messages: list) -> list:
+    """The messages with THINK_IN_CHINESE on the system prompt.
+
+    Every model call is routed through here rather than each prompt module, so
+    an agent added later cannot forget it. A new list comes back: the caller's
+    is the conversation, which gets committed and must not keep the note.
+    """
+    if not messages or not isinstance(messages[0], SystemMessage):
+        return messages
+    system = SystemMessage(content=(messages[0].content or "") + THINK_IN_CHINESE)
+    return [system, *messages[1:]]
 
 
 # Only the NDJSON read loop touches this, so it needs no lock.
@@ -118,6 +166,11 @@ _SCRIPTER_TURN_MARK = "scripter-turn"
 _SCRIPTER_MEMORIZED_UPTO = 0
 # Pitfalls the host sent with this turn. Empty until a turn sets them.
 _SCRIPTER_MEMORY = ""
+# What the handoffs in this conversation taught, newest first. Never read off
+# disk. Capped because it is prepended to every scripter prompt: a note that
+# outlives its lesson costs tokens on every round of every later handoff.
+LEDGER_MAX_CHARS = 1500
+_LESSONS: list[str] = []
 
 
 def set_scripter_memory(text: str) -> None:
@@ -131,6 +184,28 @@ def scripter_memory() -> str:
     return _SCRIPTER_MEMORY
 
 
+def add_lessons(body: str) -> None:
+    """What this handoff taught, for every later one in this conversation.
+
+    Newest first. Over the cap the oldest note goes whole rather than losing
+    its tail: half a lesson reads as an instruction.
+    """
+    global _LESSONS
+    text = body.strip()
+    if not text:
+        return
+    _LESSONS.insert(0, text)
+    while len(_LESSONS) > 1 and sum(map(len, _LESSONS)) > LEDGER_MAX_CHARS:
+        _LESSONS.pop()
+    if len(_LESSONS[0]) > LEDGER_MAX_CHARS:
+        _LESSONS[0] = _LESSONS[0][-LEDGER_MAX_CHARS:]
+
+
+def lessons() -> list[str]:
+    """The notes the handoffs left, newest first."""
+    return list(_LESSONS)
+
+
 def _review_turn() -> None:
     import agent.region_review as region_review
     region_review.begin_turn()
@@ -139,7 +214,7 @@ def _review_turn() -> None:
 def reset() -> None:
     """Drop every turn. The next request starts a fresh conversation."""
     global _LATEST_NUM, _LATEST_B64, _LATEST_TIME, _MEMORIZED_UPTO, _TURN_PREV_SHOT
-    global _SCRIPTER_MEMORIZED_UPTO, _SCRIPTER_MEMORY
+    global _SCRIPTER_MEMORIZED_UPTO, _SCRIPTER_MEMORY, _LESSONS
     global _TURN_SEQ, _LLM_CALLS, _TOOL_CALLS, _CONTEXT
     import agent.memorier as memorier
     _review_turn()
@@ -154,6 +229,7 @@ def reset() -> None:
     _MEMORIZED_UPTO = 0
     _SCRIPTER_MEMORIZED_UPTO = 0
     _SCRIPTER_MEMORY = ""
+    _LESSONS.clear()
     _TURN_SEQ = 0
     _LLM_CALLS = 0
     _TOOL_CALLS = 0
@@ -236,6 +312,31 @@ def append_turn(text: str, raw: list) -> None:
     _MESSAGES.extend(_detach_picture(m) if _is_picture(m) else m for m in raw)
 
 
+def new_mark(prefix: str) -> str:
+    """A unique id for the message that starts a turn."""
+    global _TURN_SEQ
+    _TURN_SEQ += 1
+    return f"{prefix}:{_TURN_SEQ}"
+
+
+def own_since(messages: list, mark: str | None) -> list:
+    """The messages after the one carrying `mark`.
+
+    Found by id, not by an index saved at build time: `demote_pictures` drops
+    stale frames from the history as a turn goes on, so that index points past
+    the end of a list which has since shrunk. One run sliced an assistant turn
+    out and kept its tool results, and the provider then rejected every later
+    request with "Messages with role 'tool' must be a response to a preceding
+    message with 'tool_calls'".
+    """
+    if not mark:
+        return list(messages)
+    for i, m in enumerate(messages):
+        if getattr(m, "id", None) == mark:
+            return list(messages[i + 1:])
+    return list(messages)
+
+
 def scripter_history() -> list:
     """The scripter's conversation. A copy, for the same reason as `history`."""
     return list(_SCRIPTER_MESSAGES)
@@ -266,7 +367,7 @@ def latest_frame() -> HumanMessage | None:
     if not _LATEST_NUM:
         return None
     return HumanMessage(content=_shot_content(
-        _shot_caption(_LATEST_NUM, "The last screenshot you took:",
+        _shot_caption(_LATEST_NUM, "你最近拍的一张截图：",
                       _LATEST_B64, _LATEST_TIME), _LATEST_B64))
 
 
@@ -286,7 +387,7 @@ def screenshot_frame(shot: object, image: str) -> HumanMessage | None:
     _LATEST_NUM, _LATEST_B64 = shot, image
     _LATEST_TIME = time.time()
     return HumanMessage(content=_shot_content(
-        _shot_caption(shot, "Screenshot", image, _LATEST_TIME, since), image))
+        _shot_caption(shot, "截图", image, _LATEST_TIME, since), image))
 
 
 def recall_frame(shot: object, image: str) -> HumanMessage:
@@ -294,13 +395,20 @@ def recall_frame(shot: object, image: str) -> HumanMessage:
 
     It must not become the current screen -- tap boxes are validated against
     that one, and a stale frame would move them without saying so. No capture
-    time either: the host keeps frames without one.
+    time either: the host keeps frames without one. It is marked as a look-back
+    so `demote_pictures` will not let it take the live screen's place.
+
+    Its caption states the size the same way a screenshot does, `_ORIGINAL_SIZE`
+    included, because `_shrink_picture` swaps that phrase for the multiplier: a
+    picture that is scaled must not also claim to be at original size.
     """
     size = png_size(image)
-    dims = f" ({size[0]}x{size[1]} pixels)" if size else ""
-    return HumanMessage(content=_shot_content(
-        f"Screenshot #{shot} again{dims}; this is an earlier "
-        f"screen, not the current one.", image))
+    dims = f"（{size[0]}x{size[1]} 像素，{_ORIGINAL_SIZE}）" if size else ""
+    message = HumanMessage(content=_shot_content(
+        f"#{shot} 号截图再看一次{dims}；这是早先的一张"
+        f"画面，不是当前画面。", image))
+    message.id = _LOOKBACK + uuid4().hex
+    return message
 
 
 def picture_of(name: str, image: str, args: dict | None = None) -> HumanMessage:
@@ -312,11 +420,11 @@ def picture_of(name: str, image: str, args: dict | None = None) -> HumanMessage:
     marked, which is how `demote_pictures` counts it apart from screenshots.
     """
     if args is None:
-        caption = f"Image after {name}."
+        caption = f"工具图：{name}。"
     else:
         caption = (
-            f"Image after {name}"
-            f"({json.dumps(args, ensure_ascii=False, separators=(',', ':'))})."
+            f"工具图：{name} "
+            f"{json.dumps(args, ensure_ascii=False, separators=(',', ':'))}。"
         )
     message = HumanMessage(content=_shot_content(caption, image))
     size = png_size(image)
@@ -355,13 +463,14 @@ def _shot_caption(shot: int, lead: str, image: str, captured: float = 0.0,
     old frame has to state that frame's size, which need not be the newest one's.
     """
     size = png_size(image)
-    parts = [f"#{shot}" + (f" ({size[0]}x{size[1]} pixels)" if size else "")]
+    parts = [f"#{shot}" + (f"（{size[0]}x{size[1]} 像素，{_ORIGINAL_SIZE}）"
+                           if size else "")]
     if captured:
         stamp = time.strftime("%H:%M:%S", time.localtime(captured))
-        parts.append(f"taken {stamp}.{int(captured * 1000) % 1000:03d}")
+        parts.append(f"拍于 {stamp}.{int(captured * 1000) % 1000:03d}")
     if since_previous is not None:
-        parts.append(f"+{since_previous:.1f}s since the previous screenshot")
-    return f"{lead} {', '.join(parts)}."
+        parts.append(f"距上一张截图 +{since_previous:.1f}s")
+    return f"{lead} {', '.join(parts)}。"
 
 
 def _shot_content(caption: str, image: str) -> list[dict]:
@@ -396,15 +505,16 @@ def _detach_picture(m: HumanMessage) -> HumanMessage:
     caption = " ".join(p["text"] for p in m.content if p.get("type") == "text")
     found = _SHOT_NUM.search(caption)
     if found:
-        note = ("[image not attached; call view_shot(" + found[1]
-                + ") to look again]")
-    elif caption.startswith("Image after "):
-        note = "[image not attached; make the same call again to look at it]"
+        note = ("[图片未附上；要再看一次就调 view_shot(" + found[1]
+                + ")]")
+    elif caption.startswith("工具图："):
+        note = "[图片未附上；把同一个调用再发一次就能看到]"
     else:
-        note = "[image not attached]"
+        note = "[图片未附上]"
     return HumanMessage(
         content=[p for p in m.content if p.get("type") != "image_url"]
-        + [{"type": "text", "text": note}]
+        + [{"type": "text", "text": note}],
+        id=getattr(m, "id", None),
     )
 
 
@@ -454,20 +564,55 @@ def _shrink_picture(m: HumanMessage) -> HumanMessage:
     if small is None:
         return _detach_picture(m)
     url, w, h = small
-    note = (f"[shown scaled to {w}x{h}; call view_shot({found[1]}) before "
-            f"cutting a template from this frame]")
-    return HumanMessage(content=[
-        p for p in m.content if p.get("type") != "image_url"
-    ] + [
-        {"type": "text", "text": note},
-        {"type": "image_url", "image_url": {"url": url}},
-    ])
+    # The multiplier is what saves the arithmetic: reading a box off a picture
+    # and rescaling it by hand was a large block of thinking in a smoke run. It
+    # replaces the "original size" claim rather than joining it -- one message
+    # saying both is a contradiction the model stops to argue with.
+    shown = (f"按 {w}x{h} 显示，读到的数 ×{size[0] / w:.2f}；"
+             f"坐标仍是帧像素 {size[0]}x{size[1]}；"
+             f"要从这一帧裁模板先调 view_shot({found[1]})")
+    content = []
+    for p in m.content:
+        if p.get("type") == "image_url":
+            continue
+        text = p.get("text") or ""
+        content.append({"type": "text", "text": text.replace(_ORIGINAL_SIZE, shown)})
+    content.append({"type": "image_url", "image_url": {"url": url}})
+    # The id says which class this message is in, and demotion runs every round:
+    # a shrunk look-back that came back unmarked would be read as a screenshot
+    # from then on and evict the live screen.
+    return HumanMessage(content=content, id=getattr(m, "id", None))
 
 
 def _is_crop(m: object) -> bool:
     """A small crop or template, counted apart from screenshots."""
     return _is_picture(m) and isinstance(getattr(m, "id", None), str) \
         and m.id.startswith("crop:")
+
+
+def _is_lookback(m: object) -> bool:
+    """A frame asked for again with `view_shot`, counted apart from the screen."""
+    return _is_picture(m) and isinstance(getattr(m, "id", None), str) \
+        and m.id.startswith(_LOOKBACK)
+
+
+def _frame_copy(m: object) -> str | None:
+    """The frame number, for a message whose one job is to carry that frame.
+
+    A picture of the frame, or the same message after its picture was detached
+    (it keeps the note saying so). An assistant turn or a tool result that
+    happens to mention "#15" is not a copy of frame 15, and a crop carries its
+    frame's number without being a duplicate of it.
+    """
+    if not isinstance(m, HumanMessage):
+        return None
+    ident = getattr(m, "id", None)
+    if isinstance(ident, str) and ident.startswith("crop:"):
+        return None
+    if not (_is_picture(m) or _DETACHED in content_text(m.content)):
+        return None
+    found = _SHOT_NUM.search(content_text(m.content))
+    return None if found is None else found[1]
 
 
 def thumbnail_png(b64: str) -> str | None:
@@ -510,14 +655,21 @@ def demote_pictures(messages: list, keep: int | None = None,
 
     Screenshots and small crops are counted apart, so looking at a crop does
     not shrink the screenshot it was cut from. The newest screenshot stays full
-    size: a tap's box is measured on it and validated at that resolution. The
-    next few become thumbnails. The rest lose their image and keep their
-    caption, which already names the number `view_shot` wants back.
+    size: a tap's box is measured on it, and proposals read off a 540x960
+    thumbnail were corrected 72% of the time against 40% off a full frame. The
+    next few become thumbnails, and each one's caption states its own
+    multiplier -- one message claiming both sizes at once is what the model
+    stops to argue with. The rest lose their image and keep their caption, which
+    already names the number `view_shot` wants back.
 
     Crops stay whole until more than `_CROP_HIGH` of them still carry their
     picture, and then only the newest `keep_crops` do. Clearing them one at a
     time would rewrite an earlier message on every call and drop the provider's
     prefix cache from there on.
+
+    Looked-back frames are their own class with their own window. Sharing the
+    screenshot window meant a batch of four `view_shot`s lost its first picture
+    every time, and the caption then sent the model right back to ask for it.
 
     `keep` and `keep_crops` default to the windows this module holds, resolved
     at the call rather than bound as a default argument, so the constants stay
@@ -526,8 +678,9 @@ def demote_pictures(messages: list, keep: int | None = None,
     keep = _KEEP_PICTURES if keep is None else keep
     keep_crops = _KEEP_CROPS if keep_crops is None else keep_crops
     frames = [i for i, m in enumerate(messages)
-              if _is_picture(m) and not _is_crop(m)]
+              if _is_picture(m) and not _is_crop(m) and not _is_lookback(m)]
     crops = [i for i, m in enumerate(messages) if _is_crop(m)]
+    looks = [i for i, m in enumerate(messages) if _is_lookback(m)]
     for n, i in enumerate(reversed(frames)):
         if n >= keep:
             messages[i] = _detach_picture(messages[i])
@@ -537,7 +690,67 @@ def demote_pictures(messages: list, keep: int | None = None,
         for n, i in enumerate(reversed(crops)):
             if n >= keep_crops:
                 messages[i] = _detach_picture(messages[i])
+    for n, i in enumerate(reversed(looks)):
+        if n >= _KEEP_LOOKBACKS:
+            messages[i] = _detach_picture(messages[i])
+        else:
+            messages[i] = _shrink_picture(messages[i])
+    # After the sizes are settled, so "already without its picture" is the
+    # state the model will read.
+    messages = _without_stale_lookbacks(messages)
+    _trace_pictures(messages)
     return messages
+
+
+def _without_stale_lookbacks(messages: list) -> list:
+    """Only the newest message per frame number, among the ones without a picture.
+
+    A second `view_shot(N)` appends another copy while the first, by then
+    detached, still reads "[图片未附上；要再看一次就调 view_shot(N)]" -- so the
+    model took its own earlier copy for a failed call and asked again: 42 calls
+    for 10 frames in one smoke run, and a 47-message picture list in a round.
+
+    The screenshot of that frame is such a copy too, once its picture is gone,
+    so the newest per number wins across both classes then. A screenshot that
+    still carries its picture is kept: it is the frame a tap's box is measured
+    on, and only it stays at full size.
+
+    Only a frame's own message is ever dropped. An assistant turn that mentions
+    "#15" in passing and carries `tool_calls` is not a copy of frame 15, and
+    dropping it orphans its tool result -- the provider then rejects the whole
+    request. Crops are left alone too: several crops of one frame all carry its
+    number and none of them is a duplicate of the frame.
+    """
+    newest: dict[str, object] = {}
+    for m in messages:
+        num = _frame_copy(m)
+        if num:
+            newest[num] = m
+    kept = {id(m) for m in newest.values()}
+    messages[:] = [
+        m for m in messages
+        if id(m) in kept
+        or _frame_copy(m) is None
+        or (_is_picture(m) and not _is_lookback(m))
+    ]
+    return messages
+
+
+def _trace_pictures(messages: list) -> None:
+    """One line per round: which pictures still carry bytes, and which only a caption.
+
+    A detached frame and an attached one read the same in the log otherwise, so a
+    model asking `view_shot(N)` again cannot be told from one that was never sent
+    the picture -- `*` marks the ones it can actually see.
+    """
+    if not os.environ.get("CAMPCAT_LLM_TRACE"):
+        return
+    seen = []
+    for m in messages:
+        found = _SHOT_NUM.search(content_text(m.content))
+        if found:
+            seen.append("#" + found[1] + ("*" if _is_picture(m) else ""))
+    print("[pics] " + (", ".join(seen) or "(none)"), file=sys.stderr, flush=True)
 
 
 def content_text(content: object) -> str:

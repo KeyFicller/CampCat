@@ -7,6 +7,9 @@ the subgraph nodes do, once `graph` has finished loading.
 from __future__ import annotations
 
 import contextvars
+import os
+import re
+import sys
 from pathlib import Path
 
 from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
@@ -14,8 +17,10 @@ from langgraph.graph import END, StateGraph
 
 import agent.diagnoser as diagnoser
 import agent.memorier as memorier
+import agent.reflector as reflector
 import observability
 import session
+import subagent
 import tools
 from agent.region_rules import REGION_RULES
 
@@ -54,12 +59,63 @@ def scripter_tools(host_tools: list) -> list:
         diagnoser.DIAGNOSE_TEMPLATE]
 
 
+# The order the renderer writes a step in; the legend quotes it.
+_STEP_FIELDS = ("shot", "screen", "did", "region", "expect", "result")
+_STEP_LEGEND = ("steps（每行：帧号 | 界面 | 做了什么 | 最终区域 | 该有什么 | 结果；"
+                "`-` 表示没填）:")
+_SHOT_NUMBER = re.compile(r"\d+")
+
+
+def _cell(value: object) -> str:
+    """One table cell. Whitespace is collapsed: a newline would break the row."""
+    text = " ".join(str(value if value is not None else "").split())
+    return text or "-"
+
+
+def _shot_cell(value: object) -> str:
+    """A frame number as `#N`, or `-` when the model wrote nothing readable."""
+    if isinstance(value, bool):
+        return "-"
+    if isinstance(value, int):
+        return f"#{value}"
+    found = _SHOT_NUMBER.search(str(value if value is not None else ""))
+    return f"#{found[0]}" if found else "-"
+
+
+def _step_lines(steps: object) -> tuple[bool, list[str]]:
+    """`(structured, lines)` for the scripter's brief.
+
+    A model that sends free text where rows were asked for is not an error: one
+    step written awkwardly is far cheaper than a handoff refused. Its lines go
+    through as they are, and the six-column legend is left off with them,
+    because quoting a legend over free text would contradict it.
+    """
+    if isinstance(steps, str):
+        return False, [line.strip() for line in steps.splitlines() if line.strip()]
+    if not isinstance(steps, list):
+        return False, []
+    rows, raw = [], []
+    for item in steps:
+        if isinstance(item, dict):
+            if all(_cell(item.get(key)) == "-" for key in _STEP_FIELDS):
+                continue                      # an empty object the model padded
+            cells = [_shot_cell(item.get("shot"))] + [
+                _cell(item.get(key)) for key in _STEP_FIELDS[1:]]
+            rows.append(f"{len(rows) + 1}. " + " | ".join(cells))
+        elif str(item).strip():
+            raw.append(str(item).strip())
+    if raw:                                   # a mixed list: rows, then verbatim
+        return False, rows + raw
+    return bool(rows), rows
+
+
 def brief_of(args: dict) -> str:
     """The scripter's one user message. Empty optional fields are left out."""
     lines = [f"goal: {args.get('goal', '')}"]
-    steps = (args.get("steps") or "").strip()
-    if steps:
-        lines.append(f"steps:\n{steps}")
+    structured, step_lines = _step_lines(args.get("steps"))
+    if step_lines:
+        lines.append(_STEP_LEGEND if structured else "steps:")
+        lines.extend(step_lines)
     bundle = args.get("bundle") or ""
     if bundle:
         lines.append(f"bundle: {bundle}")
@@ -71,7 +127,7 @@ def brief_of(args: dict) -> str:
     last_error = args.get("last_error") or ""
     if last_error:
         lines.append(f"last_error: {last_error}")
-    return "\n".join(lines)
+    return "\n".join(lines) + session.ASK_IN_CHINESE
 
 
 def handoff_may_change(args: dict) -> bool:
@@ -121,13 +177,22 @@ def refuse_existing(tool: str, args: dict, frozen: set[str]) -> str | None:
             return None
     if target not in frozen:
         return None
-    return f"error: {target} already exists; this handoff may not change it"
+    return f"error: {target} 已存在；这次交接不能改它。要改它得让交接带上 fix: true，请把这一句写进你的总结。"
 
 
 # None means this handoff may change existing bundles. A set is the names
 # that existed when it started.
 _frozen: contextvars.ContextVar[frozenset[str] | None] = contextvars.ContextVar(
     "scripter_frozen", default=None)
+
+# This handoff's tool calls, for the reflection that runs when it ends. Cleared
+# at the start of every run: the note is about one handoff, not the session.
+_CALLS: list[dict] = []
+
+
+def calls() -> list[dict]:
+    """What the last handoff called, in the order it called it."""
+    return _CALLS
 
 
 def arm_freeze(names: frozenset[str] | None):
@@ -141,183 +206,172 @@ def disarm_freeze(token) -> None:
 # How a reply is written, one entry per part of the rule. Fed as Markdown with
 # the key as a heading, so a part can be rewritten or dropped on its own.
 RULES = {
-    "script_workflow": (
-        "Writing or changing a script is this sequence, and you do not skip a step:\n"
+    "脚本流程": (
+        "写或改一个脚本，就是这个顺序，一步都不跳过：\n"
         "\n"
-        "1. `list_scripts` first. If a bundle already does the job, run it with "
-        "`run(\"<name>/main.ccat\")`. Change an existing bundle only when the brief "
-        "has `fix: true` or `last_error`. Otherwise do not `update_script`, "
-        "`delete_script`, `rename_script`, or `save_template` it, and do not "
-        "`save_anchor` over an anchor that already exists; write a new bundle under "
-        "a new name. A task on a game that has a graph "
-        "starts with `goto(\"<graph>:<anchor>\")` to the screen it works on; a screen "
-        "the graph does not have yet is added first (graph_workflow).\n"
-        "2. `screenshot`, so you can see the screen you are scripting.\n"
-        "3. Decide each step's anchor: the image that only appears when that step worked, "
-        "taken from a fixed UI control -- a button, a tab, a label -- never from free-form "
-        "text, which drifts between runs and makes the check meaningless. Write what that "
-        "step expects beside it as a `//` comment (`wait_until(\"claim_taken.png\", 8000)"
-        "   // the button turns grey once the claim lands`): a failing run then has an "
-        "expectation to compare the screen against, and the approval reads.\n"
-        "4. `save_script` to create the bundle. It writes main.ccat and runs nothing; a name "
-        "that already exists is refused.\n"
-        "5. `save_template`, once for every PNG the script names. Screenshot right before "
-        "each cut -- it can only match as well as the picture it came from -- and crop tight "
-        "around the part that stays put. Call `view_crop` once for that element, then "
-        "`save_template`. Calling it again only to tighten the same box does not make a "
-        "better cut. Pick the shape yourself from the control's outline. A rectangle is a box "
-        "`{\"x\":...,\"y\":...,\"w\":...,\"h\":...}`. A round control is a circle "
-        "`{\"cx\":...,\"cy\":...,\"r\":...}`. A diamond (菱形, vertices on the axes) is "
-        "`{\"cx\":...,\"cy\":...,\"rx\":...,\"ry\":...}`. A box around a round or diamond "
-        "control keeps the background the match must ignore. A circle or a diamond writes "
-        "that shape's alpha and leaves every pixel outside it out of the match.\n" +
+        "1. 先 `list_scripts`。已经有 bundle 能干这件事，就用 "
+        "`run(\"<name>/main.ccat\")` 跑它。只有当 brief 里有 `fix: true` 或 "
+        "`last_error` 时才改已存在的 bundle。否则不要对它 "
+        "`update_script`、`delete_script`、`rename_script` 或 `save_template`，"
+        "也不要在已存在的 anchor 上 `save_anchor`；写一个新名字的新 bundle。"
+        "有图的游戏上的任务，先用 `run_script` 跑一段 "
+        "`goto(\"<graph>:<anchor>\")` 去到它工作所在的界面；图里还没有的界面"
+        "要先加（见「图的流程」）。\n"
+        "2. brief 给了帧号（`#N`）的界面直接用那一帧：`view_shot(N)` 看一眼就能裁，"
+        "`save_template`、`save_anchor` 的 `shot` 也填这个号。只有这块界面没有帧时"
+        "才 `screenshot`——设备留给验边，不用来重拍已经给过的界面。\n"
+        "3. 给每一步定 anchor：只有这一步成功才会出现的图，取自固定的 UI 控件"
+        "——一个按钮、一个标签页、一个标签——绝不用自由文本，它每次运行都会变，"
+        "会让检查失去意义。把那一步期望看到的东西写成 `//` 注释放在旁边"
+        "（`wait_until(\"claim_taken.png\", 8000)"
+        "   // 领完之后按钮会变灰`）：这样失败的一次运行就有期望可以对照，"
+        "审批时也读得懂。\n"
+        "4. `save_script` 创建 bundle。它只写 main.ccat，不运行任何东西；"
+        "名字已存在会被拒绝。名字按这个形式起，全小写英文：边 "
+        "`图.锚点-锚点`，动作 `图.锚点.动作`。起好了就不要为了风格再改名——"
+        "`rename_script` 只在内容真的换了名字时才用。\n"
+        "5. `save_template`，脚本里出现的每一个 PNG 各调一次。手上没有这张"
+        "界面的新鲜帧，才先截屏；已有的帧用 `shot` 指定，先 `view_shot` 看"
+        "一眼。区域里的数按说明的 ×k 换成帧像素，在哪张图上量的就乘哪张的 k。"
+        "围着不动的部分裁紧。"
+        "对那个元素只调一次 `view_crop`，然后 `save_template`。只是为了把同一个框"
+        "再收紧一点而重复调用，不会得到更好的裁切。形状由你根据控件外轮廓自己"
+        "挑。矩形是方块 `{\"x\":...,\"y\":...,\"w\":...,\"h\":...}`。"
+        "圆形控件是圆 `{\"cx\":...,\"cy\":...,\"r\":...}`。菱形"
+        "（菱形，顶点在坐标轴上）是 `{\"cx\":...,\"cy\":...,\"rx\":...,\"ry\":...}`。"
+        "圆形或菱形控件外面套方块，会把匹配必须忽略的背景留下。\n" +
         REGION_RULES +
-        "6. Run the bundle: `run_script` with the source `run(\"<name>/main.ccat\")`. Pass "
-        "that `run(...)` call and not the script's own text -- a bare `run_script` resolves "
-        "template names against the script root, so the PNGs you just saved into the bundle "
-        "are invisible to it.\n"
-        "7. Change what you have with `update_script(name, source, templates)`: the source "
-        "and the whole template set in one step, under one approval. Each entry is "
-        "`{\"name\":...,\"cut\":{\"x\":...,\"y\":...,\"w\":...,\"h\":...},\"shot\":...}` "
-        "for a box, `{\"cx\":...,\"cy\":...,\"r\":...}` for a circle, or "
-        "`{\"cx\":...,\"cy\":...,\"rx\":...,\"ry\":...}` for a diamond. Re-cut with the "
-        "shape that matches the control, not the shape the old template happened to use. "
-        "`shot` omitted means the most recent screenshot. `update_script` is for a "
-        "bundle this handoff created, or one the brief allows with `fix: true` or "
-        "`last_error`. `save_script` refuses an existing name."
+        "6. 跑一遍 bundle：`run_script`，源码传 `run(\"<name>/main.ccat\")`。"
+        "传这个 `run(...)` 调用，不要传脚本正文——光秃秃的 `run_script` 会相对"
+        "脚本根目录解析模板名，你刚存进 bundle 的那些 PNG 它看不见。\n"
+        "7. 用 `update_script(name, source, templates)` 改已有的东西：源码和"
+        "整套模板一次交付，一次审批。每一项是 "
+        "`{\"name\":...,\"cut\":{\"x\":...,\"y\":...,\"w\":...,\"h\":...},\"shot\":...}`"
+        "（方块）、`{\"cx\":...,\"cy\":...,\"r\":...}`（圆），或者 "
+        "`{\"cx\":...,\"cy\":...,\"rx\":...,\"ry\":...}`（菱形）。重新裁时用"
+        "符合控件的那个形状，不要沿用旧模板碰巧用的形状。`shot` 省略表示最近"
+        "一张截图。`update_script` 只用于这次交接自己创建的 bundle，或者 brief "
+        "里用 `fix: true` / `last_error` 放行的那个。`save_script` 会拒绝已存在的"
+        "名字。"
     ),
-    "script_rules": (
-        "  * A `view_crop` image draws the cut and shows up to 16 pixels of screen "
-        "outside it. Inside the line is what `save_template` stores. Outside the "
-        "line is context: do not enlarge the region to take it in, and do not crop "
-        "again only to leave it out.\n"
-        "  * A failing statement stops the script. That error is what you get back -- not a "
-        "screen that looks wrong.\n"
-        "  * Anchor every action. After a tap, swipe or `run(...)`, assert the screen it "
-        "should have produced with `wait_until(\"expected.png\", ms)`. A step that did not "
-        "land then fails there, naming the file, instead of the next statement acting on a "
-        "stale screen. Save the anchor's template with the script. A template path is a "
-        "file name in this bundle; one with `/` or `..` is refused, so cut the picture "
-        "here instead of borrowing it from another bundle. `run(\"../other/main.ccat\")` "
-        "is still how you reuse a skill.\n"
-        "  * Ground every `log(...)` in an anchor: never print \"task complete\" on its own. "
-        "A `log(...)` that declares a state sits right after the `wait_until` or `if` on a "
-        "template that confirms that state.\n"
-        "  * Size that `ms` from the screenshots, not from a guess. Each caption says when it "
-        "was taken and, within a turn, how long passed since the one before; a change that "
-        "took +3.2s gets about twice that. `wait_until` stops as soon as the anchor appears, "
-        "so a generous number costs nothing. Both waits are capped, not rejected -- "
-        "`wait(ms)` at 5000 ms and `wait_until(\"a.png\", ms)` at 20000 ms -- so a larger "
-        "number silently becomes the cap and you get less time than you asked for; "
-        "`wait_until(\"a.png\", 0)` is a parse error. A timeout is an error that stops the "
-        "script.\n"
-        "  * A bundle that already exists is run, not edited, unless the brief has "
-        "`fix: true` or `last_error`. `save_script` still refuses a name that already "
-        "exists. A bundle created in this handoff may be updated.\n"
+    "脚本规则": (
+        "  * `view_crop` 的图会画出裁切，并显示框外最多 16 像素的屏幕。线以内"
+        "就是 `save_template` 保存的内容。线以外是上下文：不要为了把它纳进来而"
+        "放大区域，也不要为了把它排除掉而重新裁。\n"
+        "  * 给每一个动作配 anchor。tap、swipe 或 `run(...)` 之后，用 "
+        "`wait_until(\"expected.png\", ms)` 断言它本该产生的界面。没落地的动作"
+        "会当场在那里失败并指名文件，而不是让下一条语句在一个过时的界面上执行。"
+        "anchor 的模板要随脚本一起保存。模板路径就是这个 bundle 里的文件名；"
+        "带 `/` 或 `..` 的会被拒绝，所以在这里裁图，不要从别的 bundle 借。"
+        "复用技能仍然用 `run(\"../other/main.ccat\")`。\n"
+        "  * 每一条 `log(...)` 都要有 anchor 依据：绝不要单独打印「任务完成」。"
+        "声明某个状态的 `log(...)`，就放在确认该状态的那个模板的 `wait_until` 或 "
+        "`if` 之后。\n"
+        "  * `ms` 要从截图里量出来，不要猜。每张截图的说明都写了它是什么时候拍的，"
+        "同一轮之内还写了距上一张过了多久（旧帧只有编号和尺寸）；花了 +3.2s "
+        "的变化就给大约两倍。"
+        "`wait_until` 一看到 anchor 就返回，所以给宽一点不花代价。两个等待都有上限，"
+        "是截断而不是报错——`wait(ms)` 截在 5000 ms，`wait_until(\"a.png\", ms)` "
+        "截在 20000 ms——所以写大了会静默变成上限，你拿到的时间比要的少；"
+        "`wait_until(\"a.png\", 0)` 是语法错误。超时是一个会中止脚本的错误。\n"
+        "  * 等一个可能很久的状态不要用循环 `wait` 硬等：一个脚本里等的时间合计"
+        "不超过 20000ms。等不到就在 `log` 里写一句没等到，继续往下走。\n"
+        "  * `save_template`、`update_script`、`save_anchor` 每次调用都要带 "
+        "`expect`：一句话说明这块区域里应该是什么，自检拿它对照。\n"
     ),
-    "script_failure_workflow": (
-        "A script that fails stops at the statement that failed, and that error comes "
-        "back to you with what the matcher saw (`best=`, the `box` it preferred, "
-        "`threshold`). That `threshold` is the bar that match was measured against: a "
-        "circle or diamond template is matched through its alpha mask, which leaves it less "
-        "to go on than a square one, so the two are held to different bars. Find out which "
-        "side is wrong before changing anything:\n"
+    "失败处理": (
+        "脚本失败时停在失败的那条语句上，报错会带着匹配器看到的东西回到你这里"
+        "（`best=`、它偏好的 `box`、`threshold`）。那个 `threshold` 是这次匹配"
+        "被衡量的门槛：圆形或菱形模板是通过 alpha 遮罩匹配的，可用的信息比方形"
+        "模板少，所以两者的门槛不同。先弄清是哪一边错了，再动手改：\n"
         "\n"
-        "0. When the error carries `best=` and `box=`, you may call "
-        "`diagnose_template(bundle, template, error, expect)` first, with the error "
-        "verbatim and the step's `//` comment as `expect`. Act on its verdict: "
-        "`crop_issue` -- re-cut that template from the `shot` it returns, in the "
-        "shape that matches the control, tight around it and nothing behind it, "
-        "then `update_script` and run "
-        "again; `wrong_screen` -- do not re-cut, fix the step before it; "
-        "`inconclusive` -- go on with steps 1 to 3 yourself.\n"
+        "0. 报错里带 `best=` 和 `box=` 时，可以先调 "
+        "`diagnose_template(bundle, template, error, expect)`，报错原样传，"
+        "那一步的 `//` 注释作为 `expect`。按它的结论行动："
+        "`crop_issue`——用它返回的 `shot` 重新裁那个模板，形状符合控件、紧贴控件、"
+        "背后什么都不带，然后 `update_script` 再跑一遍；`wrong_screen`——不要重裁，"
+        "去修它前面那一步；`inconclusive`——你自己按下面 1 到 3 步查。\n"
         "\n"
-        "1. `view_template(bundle, name)` -- what it was looking for (the name is in "
-        "the error's path; `read_script` lists them).\n"
-        "2. `view_crop(region={\"x\":...,\"y\":...,\"w\":...,\"h\":...})` with the error's "
-        "`box`, or `region={\"cx\":...,\"cy\":...,\"r\":...}` with its `circle` -- what is "
-        "there now, at the template's own scale. `screenshot` "
-        "when you need the whole screen instead.\n"
-        "3. Compare both against the failing step's `//` comment: the same control "
-        "looking different (a state you never waited for, a label that changes "
-        "between runs), or nothing answering it at all (the step before it did not "
-        "land, or this is not the screen you thought).\n"
-        "4. Fix the cause once and run it again: `update_script` with that template "
-        "re-cut when the cut is wrong, or a `wait_until` / a longer `ms` when the "
-        "screen simply was not ready. Running the same script again unchanged is not "
-        "a fix.\n"
-        "5. Still failing after that: say what you now think the screen is doing, "
-        "instead of changing another template."
+        "1. `view_template(bundle, name)`——它当时在找什么（名字在报错的路径里；"
+        "`read_script` 会列出来）。\n"
+        "2. `view_crop(region={\"x\":...,\"y\":...,\"w\":...,\"h\":...})`，"
+        "区域用报错里的 `box`，或者用 `region={\"cx\":...,\"cy\":...,\"r\":...}` "
+        "配它的 `circle`——那里现在是什么，按模板自己的尺度。需要整屏时改用 "
+        "`screenshot`。\n"
+        "3. 把两者都和失败那一步的 `//` 注释对照：是同一个控件长得不一样了"
+        "（一个你从没等到的状态、每次运行都会变的文案），还是根本没有东西"
+        "在应它（前一步没落地，或者这根本不是你以为的那个界面）。\n"
+        "4. 把原因修一次，再跑一遍：裁切不对就 `update_script` 换掉那个模板，"
+        "只是界面还没准备好就加一个 `wait_until` 或把 `ms` 加长。"
+        "原样再跑一遍同一个脚本不算修复。\n"
+        "5. 这样还失败：说明你现在认为这个界面在干什么，不要再改另一个模板。"
     ),
-    "graph_workflow": (
-        "A graph is the screens of one game, kept as bundles: anchor `<graph>.<id>` is "
-        "one screen -- its golden.md says what the screen is, its main.ccat answers "
-        "whether it is showing -- and edge `<graph>.<a>-<b>` is the script that moves "
-        "from screen a to screen b. `goto(\"<graph>:<id>\")` walks there over the "
-        "edges, checking both ends of every hop. When the brief is about getting around "
-        "a game, or a goal needs a screen the graph does not have yet, this is the work "
-        "-- and it is this sequence:\n"
+    "图的流程": (
+        "图是一个游戏的各个界面，用 bundle 存：anchor `<graph>.<id>` 是一个界面"
+        "——它的 golden.md 说明这是哪个界面，它的 main.ccat 回答这个界面现在是否"
+        "在显示——边 `<graph>.<a>-<b>` 是从界面 a 走到界面 b 的那个脚本。"
+        "`goto(\"<graph>:<id>\")` 会沿边走进去，每一跳都检查两端。"
+        "当 brief 是要在一个游戏里走动，或者某个目标需要图里还没有的界面时，"
+        "这就是该干的活——顺序如下：\n"
         "\n"
-        "1. `list_scripts`, then `read_graph(<graph>)`. A graph's bundles are tagged "
-        "`[graph <graph>, N anchors, M edges, K actions]`, `[anchor of <graph>, <kind>]`, "
-        "`[edge of <graph>]` and `[action of <graph> on <anchor>]`. A new graph starts at "
-        "anchor `entry`: the screen every run can begin from, normally the desktop.\n"
-        "2. Each screen: `screenshot`, then `save_anchor(graph, anchor, golden, source, "
-        "templates)`, which writes golden.md, main.ccat and the templates in one step. "
-        "It first runs the existing anchors on the latest screenshot: refused with "
-        "`already anchor <id>` means this screen is in the graph -- use that anchor, do "
-        "not save a second one.\n"
-        "3. Each edge: `save_script(\"<graph>.<a>-<b>\", <the movements>)`, then its "
-        "templates with `save_template`. The reply ends with the graph check; fix "
-        "every problem it lists.\n"
-        "4. Verify one edge from screen a with `run_script` and the source "
-        "`run(\"<graph>.<a>-<b>/main.ccat\")`: it checks it starts on a and lands on b. "
-        "Verify a whole path with `run_script` and `goto(\"<graph>:<anchor>\")`; the "
-        "error names the hops it tried and the screen it last saw.\n"
-        "5. Work that starts and ends on the same screen -- it may leave that screen "
-        "briefly -- is an action `{graph}.{anchor}.{action}`, saved with "
-        "`save_script(\"{graph}.{anchor}.{action}\")` and `save_template`. "
-        "`stzb.kucang.claim` is tagged `[action of stzb on kucang]`. Verify with "
-        "`run_script` and `run(\"{graph}.{anchor}.{action}/main.ccat\")`."
+        "1. `list_scripts`，然后 `read_graph(<graph>)`。图的 bundle 会带着标签："
+        "`[graph <graph>, N anchors, M edges, K actions]`、"
+        "`[anchor of <graph>, <kind>]`、`[edge of <graph>]` 和 "
+        "`[action of <graph> on <anchor>]`。新图从 anchor `entry` 开始："
+        "每一次运行都能从那里起步的界面，通常就是桌面。\n"
+        "2. 每个界面：brief 给了帧号就用帧（`save_anchor` 的 `templates[].shot` "
+        "填那个号），没有帧才 `screenshot`；然后一次 "
+        "`save_anchor(graph, anchor, golden, source, templates)` 写好 "
+        "golden.md、main.ccat 和模板。"
+        "它会先在最新截图上跑一遍已有的 anchor：被拒绝并回 `already anchor <id>` "
+        "说明这个界面已经在图里了——用那个 anchor，不要再存一个。\n"
+        "3. 每条边：`save_script(\"<graph>.<a>-<b>\", <那些移动>)`（边已经"
+        "存在时用 `update_script`），再用 "
+        "`save_template` 存它的模板。回复末尾会附上图检查的结果；"
+        "它列出的每个问题都要修。\n"
+        "4. 验证一条边时，同一段 `run_script` 里先 "
+        "`goto(\"<graph>:a\")` 再到它，源码传 "
+        "`run(\"<graph>.<a>-<b>/main.ccat\")`：它会检查起点是 a、终点是 b。"
+        "验证整条路径用 `run_script` 加 `goto(\"<graph>:<anchor>\")`；"
+        "报错会列出它试过的每一跳和最后看到的界面。\n"
+        "5. 起点和终点都在同一个界面上的活——中途可以短暂离开那个界面——是一个 "
+        "action `{graph}.{anchor}.{action}`，用 "
+        "`save_script(\"{graph}.{anchor}.{action}\")` 和 `save_template` 保存。"
+        "`stzb.kucang.claim` 带着 `[action of stzb on kucang]` 标签。"
+        "用 `run_script` 加 `run(\"{graph}.{anchor}.{action}/main.ccat\")` 验证。"
     ),
-    "graph_rules": (
-        "  * The screen a run starts on has anchor id `entry`, even when the brief "
-        "calls it home or desktop. That other name goes in golden.md, not a "
-        "second anchor. With no edges, verify with `goto(\"<graph>:entry\")` "
-        "and say the other name is not an anchor id. `already anchor`, or an "
-        "unreachable anchor, means use the anchor already there or say what "
-        "conflicts; do not delete `entry` and start over.\n"
-        "  * An anchor script only judges: `has`, `if` / `elif` / `else`, `log`, "
-        "`return true` / `return false`. Every anchor runs on every locate, so it never "
-        "acts, and `save_anchor` refuses one that does.\n"
-        "  * An anchor's template is a fixed control on that screen and no other: a "
-        "title, a tab, a button. Every PNG in the bundle is drawn on that anchor in "
-        "the graph editor, so do not save a picture of another screen just to reject "
-        "it. A `has` whose only job is `return false` — another mode of this same "
-        "chrome — does not split the anchor. That mode stays this anchor, and its "
-        "work is an action `{graph}.{anchor}.{action}`, which this handoff may "
-        "create even when it must not change the anchor. Two anchors answering "
-        "true on one screen is a graph that cannot "
-        "navigate: tell them apart by cutting what only this screen shows, never a "
-        "threshold.\n"
-        "  * golden.md is front matter, then one description of the screen: which parts "
-        "are fixed and which vary between runs. `kind: page` (the default) is a screen "
-        "you can stay on; `kind: transient` is a loading or transition screen -- "
-        "somewhere you may be, not somewhere to go, so it gets no edges; `kind: popup` "
-        "with `close: <the bundle that closes it>` is a popup that can cover any "
-        "screen.\n"
-        "  * An edge may branch -- a cold start and a warm start take different paths -- "
-        "but it does not check its own ends and never calls `goto`: the graph checks "
-        "that it starts on a, and gives b 20 s to show up afterwards.\n"
-        "  * An edge that takes longer waits for it itself: `wait_until` on a template "
-        "of b, or `loop` + `wait_until` for a long load.\n"
-        "  * An edge must survive being run twice from either end: it is re-run after a "
-        "replan lands you somewhere unexpected. An edge only ends on a different page. "
-        "Anything that spends a resource or claims a reward belongs in an action, not "
-        "in an edge.\n"
-        "  * An action's script does not call `goto` and does not `at` on its own; it "
-        "may leave the page in between. A task is `goto` to that page, "
-        "`run(\"{graph}.{anchor}.{action}/main.ccat\")`, then a check of the result.\n"
+    "图的规则": (
+        "  * 一次运行起步的那个界面，anchor id 是 `entry`，即使 brief 里把它"
+        "叫作主页或桌面。那个名字写进 golden.md，不要为它开第二个 anchor。"
+        "还没有边时，用 `goto(\"<graph>:entry\")` 验证，并说明那个名字不是 "
+        "anchor id。返回 `already anchor`，或者 anchor 不可达，说明要用已经"
+        "存在的那个 anchor，或者说清冲突在哪里；不要删掉 `entry` 重来。\n"
+        "  * anchor 的脚本只做判断：`has`、`if` / `elif` / `else`、`log`、"
+        "`return true` / `return false`。每一次 locate 都会跑所有 anchor，"
+        "所以它永远不动作，`save_anchor` 也会拒绝会动作的脚本。\n"
+        "  * anchor 的模板是那个界面上固定存在、别的界面没有的控件：一个标题、"
+        "一个标签页、一个按钮。bundle 里每一张 PNG 都会画在编辑器里的这个 "
+        "anchor 上，所以不要为了排除它而存别的界面的图。只为了 `return false` "
+        "而写的 `has`——这份界面框架的另一种模式——不切分 anchor。那个模式仍然"
+        "属于这个 anchor，它的活是一个 action "
+        "`{graph}.{anchor}.{action}`，这次交接即使不能改这个 anchor，也可以"
+        "创建它。两个 anchor 在同一个界面上都回答 true，就是一张走不动的图："
+        "用只有这个界面才有的图把它们分开，绝不要用阈值。\n"
+        "  * golden.md 先是 front matter，然后是对这个界面的一段描述：哪些部分"
+        "固定、哪些每次运行都会变。`kind: page`（默认）是你能停在上面发呆的"
+        "界面；`kind: transient` 是加载或过渡界面——你可能正处在上面，"
+        "但它不是你该去的地方，所以没有边；`kind: popup` 配 "
+        "`close: <关掉它的那个 bundle>`，是可以盖在任何界面上的弹窗。\n"
+        "  * 一条边可以分支——冷启动和热启动走不同的路——但它不检查自己的两端，"
+        "也绝不调用 `goto`：图会检查它从 a 起步，并给 b 20 秒出现的时间。\n"
+        "  * 耗时更长的边自己等：对 b 的模板 `wait_until`，"
+        "加载很久时用 `loop` + `wait_until`。\n"
+        "  * 一条边必须能从任意一端被跑两次：重新规划把你丢到别处之后，"
+        "它会被再跑一遍。一条边只会在另一个页面上结束。任何花资源或领奖励的"
+        "东西都属于 action，不属于边。\n"
+        "  * action 的脚本不调用 `goto`，也不自己 `at`；它中途可以离开页面。"
+        "一个任务就是 `goto` 到那个页面，"
+        "`run(\"{graph}.{anchor}.{action}/main.ccat\")`，然后核对结果。\n"
     ),
 }
 
@@ -340,55 +394,46 @@ def _read_gold_script() -> str:
 
 _example = _read_gold_script()
 if _example:
-    RULES["example_script"] = (
-        "Worked examples that follow every rule above -- an anchor, an edge, an action "
-        "on that anchor, and a task that walks there and runs it. Copy their shapes:\n\n" +
-        _example
-    )
+    RULES["示例"] = "下面这些完整的例子照着它们的写法写：\n\n" + _example
 
 _CCAT_CHEATSHEET = (
-    "The .ccat language. Call `ccat_help` for the full reference; the parts "
-    "that are easy to get wrong:\n"
-    "  * Comments are `//`; semicolons are optional. There are no expressions and no "
-    "runtime variables: `defs` values are substituted while parsing.\n"
-    "  * `tap_at(x, y)` / `swipe_at(...)` take coordinates normalized to [0,1] against "
-    "the screenshot size, not pixels; out of range is an error.\n"
-    "  * Actions: tap(\"a.png\"), tap_at(x, y), tap_offset(\"a.png\", dx, dy), "
-    "swipe(\"a.png\", \"b.png\"), wait(ms), wait_until(\"a.png\", ms) (a timeout is an "
-    "error), log(\"msg\"), home, run(\"other.ccat\").\n"
-    "  * Control flow: if (has(\"a.png\")) { } else { }, elif for a chain, loop(n) "
-    "{ }, do { } while (has(\"a.png\")) (stops hard at 50000 iterations), break, "
-    "return. `if` / `elif` / `while` also take `has(\"a.png\")`, which answers "
-    "whether that template is on screen right now, or one of the statements that "
-    "reports a result (tap, tap_offset, swipe, tap_at, swipe_at, wait_until, "
-    "run), which then runs and picks the branch: a failure is false, while a bare "
-    "tap still fails the script. `return` / `return true` answer true, "
-    "`return false` answers false, a script with no return answers true, and "
-    "`run(...)` hands that answer back.\n"
-    "  * A failing statement stops the script and comes back to you as an error. "
-    "Statements that need a PNG (`tap`, `tap_offset`, `swipe`, `wait_until`) or a `.ccat` "
-    "(`run`) fail when the file is missing; a `has(...)` whose template is missing is "
-    "just false.\n"
-    "  * A graph is the screens of a game: anchor bundles `<graph>.<id>` (golden.md and a "
-    "main.ccat that only judges) and edge bundles `<graph>.<a>-<b>`. "
-    "`goto(\"<graph>:<anchor>\")` walks to an anchor and `at(\"<graph>:<anchor>\")` tests "
-    "whether you are on one, for a branch. A `run` of an edge checks both its ends too.\n"
+    ".ccat 语言。完整参考调 `ccat_help`；下面这些是最容易写错的地方：\n"
+    "  * 注释是 `//`；分号可以省略。没有表达式，也没有运行时变量："
+    "`defs` 的值在解析时就被替换掉。\n"
+    "  * `tap_at(x, y)` / `swipe_at(...)` 的坐标是按截图尺寸归一到 [0,1] 的，"
+    "不是像素；超出范围是错误。\n"
+    "  * 动作：tap(\"a.png\")、tap_at(x, y)、tap_offset(\"a.png\", dx, dy)、"
+    "swipe(\"a.png\", \"b.png\")、wait(ms)、wait_until(\"a.png\", ms)"
+    "（超时是错误）、log(\"msg\")、home、run(\"other.ccat\")。\n"
+    "  * 控制流：if (has(\"a.png\")) { } else { }，连写用 elif，loop(n) { }，"
+    "do { } while (has(\"a.png\"))（50000 次硬性中止），break，return。"
+    "`if` / `elif` / `while` 也可以接 `has(\"a.png\")`，它回答那个模板现在"
+    "是否在屏幕上；或者接一条会报结果的语句（tap、tap_offset、swipe、tap_at、"
+    "swipe_at、wait_until、run），那就先执行它，再按结果选分支：失败算 false，"
+    "而光秃秃的 tap 仍然会让脚本失败。`return` / `return true` 回答 true，"
+    "`return false` 回答 false，没有 return 的脚本回答 true，"
+    "`run(...)` 会把这个回答传回来。\n"
+    "  * 某条语句失败会中止脚本，并作为错误回到你这里。需要 PNG 的语句"
+    "（`tap`、`tap_offset`、`swipe`、`wait_until`）或需要 `.ccat` 的语句"
+    "（`run`）在文件缺失时失败；模板缺失的 `has(...)` 只是 false。\n"
+    "  * 图里：`goto(\"<graph>:<anchor>\")` 走到某个 anchor，"
+    "`at(\"<graph>:<anchor>\")` 测你是不是在某个 anchor 上，用于分支。"
+    "对一条边 `run` 时也会检查它的两端。\n"
 )
 
 
 SCRIPTER_PERSONA = (
-    "You write and fix .ccat bundles for the operator. You never talk to the "
-    "user; your reply is a tool result. The first line is exactly one of "
-    "`saved`, `updated` or `failed`, then one to three sentences on what you "
-    "did and how the run ended. Do the work with the tools before you answer: "
-    "read and write the bundle, cut every template, run it, and fix it from the "
-    "error. The brief is the whole conversation you can see. A constraint that "
-    "is not in it does not exist."
+    "你替 operator 写和修 .ccat bundle。你从不和用户说话；你的回复就是一次"
+    "工具结果。第一行必须恰好是 `saved`、`updated` 或 `failed` 之一"
+    "（这三个词照抄英文，不要翻译），然后用一到三句话说明你做了什么、"
+    "这次运行最后怎么样了。回答之前先用工具把活干完：读和写 bundle、"
+    "把每个模板都裁好、跑一遍、再按报错修好。brief 就是你能看到的全部对话。"
+    "brief 里没有的约束，对你来说不存在。"
 )
 
 SCRIPTER_RULE_NAMES = (
-    "graph_workflow", "graph_rules",
-    "script_workflow", "script_rules", "script_failure_workflow", "example_script",
+    "图的流程", "图的规则",
+    "脚本流程", "脚本规则", "失败处理", "示例",
 )
 
 
@@ -410,8 +455,8 @@ def _no_summary(messages: list) -> str:
         if isinstance(message, ToolMessage):
             last = session.content_text(message.content)
     if not last:
-        return "failed: script agent gave no summary"
-    return "failed: script agent gave no summary\n" + last
+        return "failed: 写脚本的 agent 没有给出总结"
+    return "failed: 写脚本的 agent 没有给出总结\n" + last
 
 
 def run_scripter(args: dict, host_tools: list,
@@ -422,7 +467,8 @@ def run_scripter(args: dict, host_tools: list,
     """
     goal = str(args.get("goal") or "").strip()
     if not goal:
-        return "error: empty goal"
+        return "error: goal 为空"
+    _CALLS.clear()
     brief = brief_of(args)
     with observability.span("author-script", brief) as (callbacks, obs):
         def note(text: str) -> str:
@@ -458,6 +504,11 @@ def run_scripter(args: dict, host_tools: list,
             note("interrupted")
             raise
         except Exception as exc:  # noqa: BLE001 - the operator hears it as a tool error
+            # Traced as well as returned: the operator's next sentence calls this
+            # a "structural error" whoever caused it, and the log otherwise
+            # shows only that the handoff came back with nothing.
+            if os.environ.get("CAMPCAT_LLM_TRACE"):
+                print(f"[handoff] error: {exc}", file=sys.stderr, flush=True)
             return note("error: " + str(exc))
         finally:
             if token is not None:
@@ -466,12 +517,49 @@ def run_scripter(args: dict, host_tools: list,
             note("interrupted")
             raise tools.TurnInterrupted()
         if out.get("error"):
+            # The model raised inside the scripter; the operator only sees the
+            # text, and calls it a "400" whoever caused it. The role sequence
+            # is what a provider's complaint about `tool` is really about.
+            if os.environ.get("CAMPCAT_LLM_TRACE"):
+                print(f"[handoff] scripter error: {out['error']}",
+                      file=sys.stderr, flush=True)
+                print("[handoff] roles: " + _roles(out.get("messages") or []),
+                      file=sys.stderr, flush=True)
             return note("error: " + str(out["error"]))
         reply = (out.get("reply") or "").strip()
         if not reply:
-            own = (out.get("messages") or [])[out.get("input_len") or 0:]
+            own = session.own_since(out.get("messages") or [],
+                                    out.get("turn_mark"))
             return note(_no_summary(own))
         return note(reply)
+
+
+def _roles(messages: list) -> str:
+    """One token per message, with the tool ids that make the pairing legal.
+
+    The first `tool` message whose question is not the message just above it is
+    marked, because that is the one a provider names in a 400.
+    """
+    pending: set[str] = set()
+    out: list[str] = []
+    broken = ""
+    for i, m in enumerate(messages):
+        calls = getattr(m, "tool_calls", None) or []
+        ids = [str(c.get("id")) for c in calls]
+        pending = set(ids) if ids else pending
+        if ids:
+            out.append(f"A{i}({','.join(ids)})")
+            continue
+        if isinstance(m, ToolMessage):
+            out.append(f"T{i}({m.tool_call_id})")
+            if str(m.tool_call_id) not in pending:
+                if not broken:
+                    broken = f"  <-- T{i} follows {out[-2] if len(out) > 1 else 'nothing'}"
+            else:
+                pending.discard(str(m.tool_call_id))
+            continue
+        out.append(f"{type(m).__name__}{i}")
+    return " ".join(out) + (broken or "")
 
 
 def _scripter_build(state: dict) -> dict:
@@ -479,15 +567,15 @@ def _scripter_build(state: dict) -> dict:
     memorier.compact_scripter()
     messages: list[object] = [SystemMessage(content=(
         scripter_prompt() + memorier.scripter_memory_block(session.scripter_memory())
+        + reflector.ledger_block(session.lessons())
     ))]
     messages.extend(session.scripter_history())
     frame = session.latest_frame()
     if frame is not None:
         messages.append(frame)
-    messages.append(HumanMessage(content=state.get("text", "")))
-    # One past the brief, matching `build_messages`: `append_scripter_turn`
-    # writes the brief itself, so the slice must not include it again.
-    return {"messages": messages, "input_len": len(messages)}
+    mark = session.new_mark("brief")
+    messages.append(HumanMessage(content=state.get("text", ""), id=mark))
+    return {"messages": messages, "turn_mark": mark}
 
 
 def _scripter_invoke(state: dict) -> dict:
@@ -500,7 +588,7 @@ def _scripter_invoke(state: dict) -> dict:
     import graph
     fresh = dict(state)
     fresh["reply"] = ""
-    return graph._invoke(fresh, state.get("tools") or [])
+    return graph._invoke(fresh, state.get("tools") or [], subagent.chunk_sink)
 
 
 def _apply_scripter_tools(state: dict) -> dict:
@@ -515,7 +603,11 @@ def _apply_scripter_tools(state: dict) -> dict:
             # The shot this diagnosis takes is the one a re-cut is checked
             # against, so it has to stay in the scripter's messages.
             before = session._LATEST_NUM
-            content = diagnoser.run_diagnoser(args)
+            with subagent.working(
+                    "diagnoser",
+                    f"{args.get('bundle', '')}/{args.get('template', '')}") as run:
+                content = diagnoser.run_diagnoser(args)
+                run.settle(content)
             pics: list = []
             if session._LATEST_NUM != before:
                 frame = session.latest_frame()
@@ -529,7 +621,21 @@ def _apply_scripter_tools(state: dict) -> dict:
                 return refusal, []
         return graph._host_result(name, args)
 
-    results, pictures, interrupted = graph._run_calls(calls, run_one)
+    def record(call: dict) -> tuple[object, list]:
+        """`run_one`, plus a line in the trajectory the reflection reads.
+
+        Recorded after the call so a failure is recorded as one. An interrupt
+        raises before reaching this, which is right: the handoff never finished.
+        """
+        out = run_one(call)
+        _CALLS.append({
+            "name": call.get("name", ""),
+            "args": call.get("args") or {},
+            "failed": str(out[0]).startswith("error:"),
+        })
+        return out
+
+    results, pictures, interrupted = graph._run_calls(calls, record)
     out = {
         "messages": session.demote_pictures(messages + results + pictures),
         "tool_rounds": state.get("tool_rounds", 0) + 1,
@@ -551,7 +657,7 @@ def _scripter_commit(state: dict) -> dict:
         return {}
     session.append_scripter_turn(
         state.get("text", ""),
-        list(state.get("messages") or [])[state.get("input_len") or 0:])
+        session.own_since(state.get("messages") or [], state.get("turn_mark")))
     return {}
 
 

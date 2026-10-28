@@ -16,16 +16,26 @@ from typing import TypedDict
 
 from langchain_core.messages import HumanMessage, SystemMessage
 from langgraph.graph import END, StateGraph
+from concurrent.futures import ThreadPoolExecutor
 
 import models
 import session
+import subagent
 import tools
 
-MAX_ROUNDS = 3
+# A third verdict measured no better than the second, and cost a full pass over
+# the same two pictures; two rounds is where the corrections stop paying.
+MAX_ROUNDS = 2
 
 # One 0..1 scale for the judge's own confidence and any scoring model wired in
-# later: below this, another attempt is worth trying.
-MIN_SCORE = 0.6
+# later: below this, another attempt is worth trying. A 0.4 bought a second look
+# that came back worse, so the extra pass is kept for a real doubt.
+MIN_SCORE = 0.5
+
+# Template checks in one call do not see each other, so they run together. Four
+# is where the wall clock stops improving: each is a ~15 s model round trip, and
+# the host answers one tool call at a time anyway.
+MAX_REVIEWS = 4
 
 # kind, and the shape a single region takes. update_script and save_anchor have
 # one region per template entry, read off that entry's cut.
@@ -37,104 +47,93 @@ REGION_TOOLS = {
 }
 
 EXPECT_DOC = (
-    "One sentence: what this region should contain, e.g. \"the claim button, "
-    "without the panel behind it\". The crop is checked against it before the "
-    "call runs."
+    "一句话：这个区域里应该是什么，例如「领取按钮，不带它下面的面板」。"
+    "调用真正执行之前，裁切会先拿它对照检查。"
 )
 
 _PRESSURE = (
-    "Assume the region is wrong until you have looked for the fault and not "
-    "found it. You did not draw this: a first proposal carries margin, and a "
-    "correction that already ran can overshoot the other way. Name the one "
-    "edge -- left, right, top, bottom, or the shape itself -- most likely to "
-    "be off, and answer ok only if you would ship this exact crop unchanged "
-    "to every later run. A crop you sign off on is reused long after this "
-    "check is gone, so a fault you saw and let pass is the expensive one. "
-    "Adjusting is cheap and is compared, not trusted: a worse try is dropped, "
-    "so there is no reason to accept a crop you would not use yourself. The "
-    "confidence number is not a vote either: a low one buys one more look and "
-    "counts against nothing, while a high one just ends the check."
+    "你看的是别人提议的区域，还没被使用。只做两件事：指出最可能错的那一条边"
+    "——左、右、上、下，或者形状本身——然后决定。给了上一轮的坐标，就在那组"
+    "数字上改，不要重新测量图片：同一个裁切量两遍会得到两个答案。只有明显错"
+    "（切掉了控件、框在别的东西上）才继续 adjust；只是几像素的边距，回答 ok，"
+    "边距交给几何修正。你签字放过的裁切，在这次检查消失很久之后还在被用，所以"
+    "看见了却放过才是贵的那个。置信度不是投票：低的只是多买一次复查，不扣任何"
+    "分。"
 )
 
 REVIEW_PROMPT = (
-    "You check one region another agent proposed, before it is used. You see "
-    "the region cut out at its own size, and a second picture with the region "
-    "drawn on it: the area around it at full resolution, or the whole frame "
-    "scaled down, as the text says. Answer in exactly this form, nothing else:\n"
+    "你在检查别的 agent 提议的一个区域，它还没被使用。你看到两张图：这张区域"
+    "按自身尺寸裁下来的样子，以及把该区域画上去的第二张图——按文字说明，"
+    "可能是它周围的原分辨率邻域，也可能是整帧缩小后的画面。严格按下面的格式"
+    "回答，不要写别的：\n"
     "verdict: ok | adjust | reject\n"
-    "confidence: 0.0-1.0   (how sure you are this region is right; 0 = guessing)\n"
-    "box: {\"x\":..,\"y\":..,\"w\":..,\"h\":..}   (only with adjust; a circle "
-    "region writes circle: {\"cx\":..,\"cy\":..,\"r\":..}; a diamond region "
-    "writes diamond: {\"cx\":..,\"cy\":..,\"rx\":..,\"ry\":..})\n"
-    "reason: one sentence\n"
-    "Use adjust for a small correction of the edges, in the frame's pixels. "
-    "Use reject when the region is on the wrong element or the element is not "
-    "in this frame.\n" + _PRESSURE
+    "confidence: 0.0-1.0   （你对这个区域正确的把握有多大；0 = 纯猜）\n"
+    "box: {\"x\":..,\"y\":..,\"w\":..,\"h\":..}   （只在 adjust 时写；圆形区域写 "
+    "circle: {\"cx\":..,\"cy\":..,\"r\":..}；菱形区域写 "
+    "diamond: {\"cx\":..,\"cy\":..,\"rx\":..,\"ry\":..}）\n"
+    "reason: 一句话\n"
+    "verdict、confidence、reason、box、circle、diamond 这几个键名，以及 "
+    "ok / adjust / reject，都要照抄英文原样，不要翻译。\n"
+    "边只做小修正时用 adjust，坐标用这一帧的像素。区域落在错误的元素上、"
+    "或者这个元素根本不在这帧里，用 reject。\n" + _PRESSURE
 )
 
 _ALTERNATIVE = (
-    "You were not sure last time. Look again and name the strongest "
-    "alternative as `adjust`, switching to circle, diamond or box when the "
-    "control could be another shape. A try may be worse: it is only a "
-    "candidate, and the best of them is picked afterwards."
+    "上一次你没把握。再看一遍，把最强的另一种可能写成 `adjust`，"
+    "控件也可能是别的形状时，就在 circle、diamond、box 之间换。"
+    "这一次可能更差：它只是一个候选，之后会在其中挑最好的。"
 )
 
 PICK_PROMPT = (
-    "You see every attempt for one region, in order: the first proposal and "
-    "any try after it. For each, its cut, then the same region drawn in its "
-    "surroundings. The numbers only name the attempts: a later one is not "
-    "better and not worse than the first. Pick the cut that best matches the "
-    "expectation: the control it names, tight around it, nothing extra, and "
-    "not cut off. Answer in exactly this form:\n"
-    "pick: <the number>\n"
-    "reason: one sentence"
+    "你看到同一个区域的所有尝试，按顺序排列：第一次的提议，以及之后的每一次。"
+    "每一个都先给裁切图，再给把该区域画在周围环境里的图。序号只是用来标识"
+    "哪一次：靠后的既不比第一次好，也不比它差。"
+    "挑出最符合期望的那一个裁切：它指名的控件，贴着它、不多余、也没被切掉。"
+    "严格按下面的格式回答：\n"
+    "pick: <序号>\n"
+    "reason: 一句话\n"
+    "pick 和 reason 这两个键名照抄英文，不要翻译。"
 )
 
 # Shared by the one-crop check and the pick, so the two cannot drift.
 _TEMPLATE_RULES = (
-    "Apply these rules in order and stop at the first that decides. Color and "
-    "how much a crop looks like a button do not count.\n"
-    "1. Text boundary. When the control is text -- a label, a menu row, a "
-    "button caption -- the glyphs are the control: the edges sit on the first "
-    "and the last stroke, and it is a box around exactly those pixels. Not the "
-    "button, pill or panel they sit on, and no 留白 for legibility either.\n"
-    "2. Shape. A round control (圆) keeps only a circle {cx,cy,r}. A "
-    "diamond control (菱形) keeps only a diamond {cx,cy,rx,ry}. A "
-    "rectangular control keeps only a box {x,y,w,h}. While a right shape "
-    "remains, drop the wrong one. A box around a round control is the wrong "
-    "shape. A diamond much wider than it is tall is a box, not a diamond.\n"
-    "3. Clipping. Drop a crop that cuts the control off while a complete one "
-    "remains. A circle is judged by its rim, not the corners outside the disc. "
-    "A diamond is judged by its four vertices, not the corners of its box.\n"
-    "4. Edges. A crop whose edge sits on the control beats one with background "
-    "between the edge and the control (留白). While a flush crop remains, drop "
-    "the ones with that gap.\n"
-    "5. If none sit on the edge, keep the one with the least 留白.\n"
-    "6. If more than one remain, keep the lowest number, the first proposal."
+    "按顺序套用下面的规则，遇到第一条能定的就停。颜色、以及一个裁切看起来"
+    "多像一个按钮，都不算数。\n"
+    "1. 文字边界。控件是文字时——一个标签、一行菜单、一个按钮文案——字形就是"
+    "控件：边落在第一笔和最后一笔上，是一个恰好框住那些像素的方块。"
+    "不是字底下的按钮、胶囊或面板，也不为了可读性留白。\n"
+    "2. 形状。圆形控件（圆）只留 circle {cx,cy,r}。菱形控件（菱形）只留 "
+    "diamond {cx,cy,rx,ry}。矩形控件只留 box {x,y,w,h}。只要还有形状正确的，"
+    "就把错的丢掉。圆形控件外面套方块是错的形状。宽得远超高的菱形，是方块，"
+    "不是菱形。\n"
+    "3. 切边。只要还有完整的一个，就把把控件切掉的那些丢掉。圆看的是它的"
+    "圆弧，不是圆盘外的四个角。菱形看的是它的四个顶点，不是它外接方块的角。\n"
+    "4. 贴边。边正好压在控件上的裁切，胜过硬边与控件之间夹着背景（留白）的"
+    "那个。只要还有贴边的，就把带那道缝的丢掉。\n"
+    "5. 一个都不贴边时，留留白最少的那一个。\n"
+    "6. 还剩多个时，留序号最小的那个，也就是第一次的提议。"
 )
 
 TEMPLATE_PICK_PROMPT = (
-    "You see every attempt for one template, in order: the first proposal and "
-    "any try after it. For each, its cut, then the same region drawn in its "
-    "surroundings. The numbers only name the attempts: a later one is not "
-    "better and not worse than the first.\n"
+    "你看到同一个模板的所有尝试，按顺序排列：第一次的提议，以及之后的每一次。"
+    "每一个都先给裁切图，再给把该区域画在周围环境里的图。序号只是用来标识"
+    "哪一次：靠后的既不比第一次好，也不比它差。\n"
     + _TEMPLATE_RULES +
-    "\nJudge rule 3 (cutting the control off) on the surroundings picture, not "
-    "on the cut alone."
-    "\nAnswer in exactly this form:\n"
-    "pick: <the number>\n"
-    "reason: one sentence naming which rule decided it"
+    "\n第 3 条（把控件切掉）要看周围环境那张图判断，不能只看裁切本身。"
+    "\n严格按下面的格式回答：\n"
+    "pick: <序号>\n"
+    "reason: 一句话，说明是哪一条规则定的\n"
+    "pick 和 reason 这两个键名照抄英文，不要翻译。"
 )
 
 REVIEW_CRITERIA = {
-    "tap": "The region is to be tapped: it must sit on the element the expectation names.",
+    "tap": "这个区域是要被点的：它必须落在期望里点名的那个元素上。",
     "template": (
-        "The region becomes a template.\n" + _TEMPLATE_RULES + "\n"
-        "On this one crop, answer ok only when its shape is right and its edge "
-        "already sits on the control -- on the glyphs, when the control is text. "
-        "Otherwise adjust to that boundary, and "
-        "switch circle, diamond and box when the shape is wrong. Reject only when the "
-        "region is on the wrong element or the element is not in this frame."
+        "这个区域会变成一个模板。\n" + _TEMPLATE_RULES + "\n"
+        "就这一张裁切来看，只有形状对、边也已经压在控件上时（控件是文字时，"
+        "压在字形上）才回答 ok。否则 adjust 到那个边界，形状不对就在 circle、"
+        "diamond、box 之间换。只有区域落在错误的元素上、或者元素根本不在这帧里，"
+        "才用 reject。"
     ),
 }
 
@@ -142,12 +141,12 @@ REVIEW_CRITERIA = {
 def _review_system(kind: str) -> str:
     if kind == "template":
         extra = (
-            "For a template, an adjust may change the shape: write circle: for "
-            "a round control, diamond: for a diamond, and box: for a rectangular one."
+            "模板的 adjust 可以换形状：圆形控件写 circle:，菱形控件写 diamond:，"
+            "矩形控件写 box:。"
         )
     else:
         extra = (
-            "The box, circle or diamond key must be the shape of the region you were given."
+            "box、circle、diamond 这三个键里，用你收到的这个区域本身的形状。"
         )
     return REVIEW_PROMPT + "\n" + extra
 
@@ -162,9 +161,25 @@ _human: tuple | None = None
 # A checked region does not converge across calls: the next look moves the box
 # the previous one just accepted. One acceptance is final for the turn; a
 # rejection may be retried once, and the second rejection ends it.
-_STOP = (" Do not view_crop or save this region again this turn "
-         "unless the tool returned an error.")
-_KEPT = "already checked this turn; kept the previous region." + _STOP
+_STOP = (" 这一轮里不要再 view_crop 或重新保存这个区域，"
+         "除非工具返回了错误。")
+_KEPT = "这一轮已经检查过了，沿用上一次的区域。" + _STOP
+
+
+def _kept(region: dict) -> str:
+    """The reuse note, with the box that reused: the model has to act on it."""
+    return _KEPT + "沿用的是 " + _where(region) + "。"
+
+
+def _where(region: dict) -> str:
+    """A region as the note writes it, in the shape the model has to send back."""
+    if _shape_of(region) == "box":
+        return (f"box {region['x']},{region['y']} "
+                f"{region['w']}x{region['h']}")
+    if _shape_of(region) == "diamond":
+        return (f"diamond rx={region['rx']} ry={region['ry']} "
+                f"at {region['cx']},{region['cy']}")
+    return f"circle r={region['r']} at {region['cx']},{region['cy']}"
 _accepted: dict[str, dict] = {}
 _reject_count: dict[str, int] = {}
 _reject_reason: dict[str, str] = {}
@@ -195,6 +210,7 @@ class ReviewState(TypedDict, total=False):
     frame_size: tuple
     verdict: str
     reason: str
+    last_reason: str
     candidates: list
 
 
@@ -365,15 +381,7 @@ def _moved(shape: str, before: dict, after: dict) -> str:
     if before == after:
         return ""
     # The sent crop may have changed shape, so the note follows `after`.
-    shape = _shape_of(after)
-    if shape == "box":
-        where = (f"box {after['x']},{after['y']} {after['w']}x{after['h']}")
-    elif shape == "diamond":
-        where = (f"diamond rx={after['rx']} ry={after['ry']} "
-                 f"at {after['cx']},{after['cy']}")
-    else:
-        where = (f"circle r={after['r']} at {after['cx']},{after['cy']}")
-    return f"already used {where}.{_STOP}"
+    return f"已经改用 {_where(after)}。{_STOP}"
 
 
 _NUMBER = re.compile(r"[-+]?\d*\.?\d+")
@@ -412,7 +420,7 @@ def _self_check(state: ReviewState, body: str) -> str:
     """
     score = state.get("confidence")
     tag = "" if score is None else f" {score:.2f}"
-    return f"self-check{tag}{'; ' + body if body else ''}"
+    return f"自查{tag}{'；' + body if body else ''}"
 
 
 def _picture(image: str) -> dict:
@@ -439,16 +447,16 @@ def _views(region: dict, shape: str, shot, label: str
     marked_b64 = marked.get("image_b64") or ""
     frame = session.png_size(marked_b64)
     if not frame:
-        return cut, marked_b64, "second picture: the whole frame", (), ""
+        return cut, marked_b64, "第二张图：整帧", (), ""
     box = neighbourhood(_bounds(region, shape), frame)
     context = session.crop_png(marked_b64, box)
     if not context:
         return (cut, marked_b64,
-                f"second picture: the whole {frame[0]}x{frame[1]} frame",
+                f"第二张图：整帧 {frame[0]}x{frame[1]}",
                 frame, "")
-    note = (f"second picture: neighbourhood {box[0]},{box[1]} "
-            f"{box[2]}x{box[3]} of the {frame[0]}x{frame[1]} frame, "
-            f"at full resolution; give coordinates in frame pixels")
+    note = (f"第二张图：{frame[0]}x{frame[1]} 这一帧里 "
+            f"{box[0]},{box[1]} 处 {box[2]}x{box[3]} 的邻域，原分辨率；"
+            f"坐标用帧像素")
     return cut, context, note, frame, ""
 
 
@@ -466,10 +474,11 @@ def review_judge(state: ReviewState) -> dict:
     rounds = state.get("rounds", 0) + 1
     text = (
         f"{REVIEW_CRITERIA[state['kind']]}\n"
-        f"expectation: {state.get('expect') or '(none given)'}\n"
-        f"region: {json.dumps(state['region'], separators=(',', ':'))}\n"
+        f"期望：{state.get('expect') or '（未给出）'}\n"
+        f"区域：{json.dumps(state['region'], separators=(',', ':'))}\n"
+        f"上一轮：{state.get('last_reason') or '（这一轮）'}\n"
         f"{state.get('context_note', '')}"
-    )
+    ) + session.ASK_IN_CHINESE
     alt = _needs_alt(state)
     if alt:
         text += "\n" + _ALTERNATIVE
@@ -482,7 +491,7 @@ def review_judge(state: ReviewState) -> dict:
                 _picture(state.get("crop_b64") or ""),
                 _picture(state.get("context_b64") or ""),
             ]),
-        ])
+        ], subagent.chunk_sink)
     except tools.TurnInterrupted:
         raise
     except Exception as exc:  # noqa: BLE001 - a failed check lets the call through
@@ -497,6 +506,11 @@ def review_judge(state: ReviewState) -> dict:
     if verdict == "adjust" and _inside(region, shape, state.get("frame_size")):
         out["region"] = region
         out["shape"] = shape
+        # The next round corrects these numbers instead of measuring the same
+        # picture again; two readings of one crop never agree.
+        out["last_reason"] = (f"已经改成 "
+                              f"{json.dumps(region, separators=(',', ':'))}，"
+                              f"理由是：{reason}")
         out["candidates"] = list(state.get("candidates") or []) + [
             {"region": region, "note": reason}]
     elif verdict == "adjust":
@@ -517,8 +531,10 @@ def _after_judge(state: ReviewState) -> str:
     if _needs_alt(state):
         return "render"
     # A correction is a candidate, not the answer: the last call picks among
-    # them. One candidate means nothing moved, so there is nothing to pick.
-    if (state.get("verdict") in ("ok", "adjust")
+    # them. One candidate means nothing moved, so there is nothing to pick; and
+    # an `ok` says this box is usable whatever else was tried, so a pick there
+    # would only be the same pictures read one more time.
+    if (state.get("verdict") == "adjust"
             and len(state.get("candidates") or []) > 1):
         return "pick"
     return "end"
@@ -570,24 +586,25 @@ def review_pick(state: ReviewState) -> dict:
         # show, in place of the judge's own guess.
         return {"region": candidates[best]["region"], "verdict": "ok",
                 "confidence": scores[best],
-                "reason": f"scored {scores[best]:.2f}"}
+                "reason": f"打分 {scores[best]:.2f}"}
     lines = [
         REVIEW_CRITERIA[state["kind"]],
-        f"expectation: {state.get('expect') or '(none given)'}",
+        f"期望：{state.get('expect') or '（未给出）'}",
     ]
     pictures = []
     for index, candidate in enumerate(candidates, 1):
         region = candidate["region"]
         cut, context, _, _, error = _views(
-            region, _shape_of(region), shot, f"candidate {index}")
+            region, _shape_of(region), shot, f"候选 {index}")
         if error:
             return {"region": first, "verdict": "ok",
-                    "reason": error or "could not compare"}
+                    "reason": error or "无法比较"}
         pictures += [_picture(cut), _picture(context)]
         lines.append(
-            f"candidate {index}: {json.dumps(region, separators=(',', ':'))}")
-    lines.append("The pictures follow that order: each candidate's cut, then "
-                 "the same region in its surroundings.")
+            f"候选 {index}：{json.dumps(region, separators=(',', ':'))}")
+    lines.append("上面的图按这个顺序排：每个候选先给裁切图，"
+                 "再给同一区域在周围环境里的样子。")
+    lines.append(session.ASK_IN_CHINESE.strip())
     try:
         model = models.build_chat_model()
         prompt = (TEMPLATE_PICK_PROMPT if state.get("kind") == "template"
@@ -596,7 +613,7 @@ def review_pick(state: ReviewState) -> dict:
             SystemMessage(content=prompt),
             HumanMessage(content=[
                 {"type": "text", "text": "\n".join(lines)}, *pictures]),
-        ])
+        ], subagent.chunk_sink)
     except tools.TurnInterrupted:
         raise
     except Exception as exc:  # noqa: BLE001 - an unreadable pick keeps the proposal
@@ -605,7 +622,7 @@ def review_pick(state: ReviewState) -> dict:
     number = parse_pick(text, len(candidates))
     if number is None:
         return {"region": first, "verdict": "ok",
-                "reason": "unreadable pick; kept the first proposal"}
+                "reason": "读不懂这个选择，保留了第一个提议"}
     reason = ""
     for line in text.splitlines():
         if line.strip().lower().startswith("reason:"):
@@ -640,18 +657,26 @@ def _one(kind: str, shape: str, region: dict, shot, expect: str,
     """`(region to send, note, rejection)`. A rejection ends the call."""
     key = (label or "").strip()
     if key and key in _accepted:
-        return dict(_accepted[key]), _KEPT, ""
+        # Name the box: an operator that measured (174,1836) and was told "the
+        # previous region is reused" had no way to tell whether the cache was
+        # right, spent a turn suspecting a bug, and tapped blind.
+        return dict(_accepted[key]), _kept(_accepted[key]), ""
     if key and _reject_count.get(key, 0) >= 2:
         return region, "", _reject_reason[key]
     import graph
-    out = graph.run_subgraph(_graph(), {
-        "kind": kind, "shape": shape, "region": region, "shot": shot,
-        "expect": expect, "label": label or expect, "rounds": 0,
-        "candidates": [{"region": dict(region), "note": "proposal"}],
-    })
+    out = {}
+    # Reported for the operator's own calls too: the check is a model loop of
+    # its own, and the bubble only says how it ended.
+    with subagent.working("region", label or expect) as run:
+        out = graph.run_subgraph(_graph(), {
+            "kind": kind, "shape": shape, "region": region, "shot": shot,
+            "expect": expect, "label": label or expect, "rounds": 0,
+            "candidates": [{"region": dict(region), "note": "proposal"}],
+        })
+        run.settle(out.get("verdict") or "checked")
     verdict = out.get("verdict")
     if verdict == "reject":
-        reason = out.get("reason") or "rejected"
+        reason = out.get("reason") or "已拒绝"
         if key:
             _reject_count[key] = _reject_count.get(key, 0) + 1
             if _reject_count[key] >= 2:
@@ -659,14 +684,14 @@ def _one(kind: str, shape: str, region: dict, shot, expect: str,
             _reject_reason[key] = reason
         return region, "", reason
     if verdict == "skip":
-        return region, f"self-check skipped: {out.get('reason') or 'unreadable'}", ""
+        return region, f"自查跳过：{out.get('reason') or '读不懂'}", ""
     final = out.get("region") or region
     if key:
         _accepted[key] = dict(final)
     body = _moved(shape, region, final)
     if not body and len(out.get("candidates") or []) > 1:
-        body = (f"kept the first of {len(out['candidates'])}: "
-                f"{out.get('reason') or ''}.{_STOP}")
+        body = (f"{len(out['candidates'])} 个候选中保留第一个："
+                f"{out.get('reason') or ''}。{_STOP}")
     return final, _self_check(out, body), ""
 
 
@@ -683,31 +708,55 @@ def _human_repeat(name: str, args: dict) -> bool:
     return True
 
 
+def _review_one(entry: dict) -> tuple[dict, str, str]:
+    """`(kept entry, note, rejection)` for one template entry, cut included."""
+    cut = entry["cut"]
+    final, note, rejected = _one(
+        "template", _shape_of(cut), cut, entry.get("shot"),
+        str(entry.get("expect") or ""), str(entry.get("name") or ""))
+    kept = {key: value for key, value in entry.items() if key != "expect"}
+    kept["cut"] = final
+    return kept, note, rejected
+
+
 def _review_update(args: dict) -> tuple[dict, str, str]:
+    """Check every template in this call, a few at a time.
+
+    Three templates in one `save_anchor` are three independent model round trips
+    and each one takes about 15 s; serial, that was a quarter of a 20-minute run.
+    What bounds the fan-out is that each check is a model call of its own and the
+    host answers one tool call at a time -- `pool.map` keeps the results in
+    submission order, so which template is "first rejected" does not change.
+    """
     notes = []
     templates = []
-    for entry in args.get("templates") or []:
+    rejected_at = ""
+    entries = args.get("templates") or []
+    cuts = [entry for entry in entries
+            if isinstance(entry, dict) and isinstance(entry.get("cut"), dict)]
+    with ThreadPoolExecutor(max_workers=MAX_REVIEWS) as pool:
+        done = list(pool.map(_review_one, cuts))
+    i = 0
+    for entry in entries:
         if not isinstance(entry, dict) or not isinstance(entry.get("cut"), dict):
             templates.append(
                 {key: value for key, value in entry.items() if key != "expect"}
                 if isinstance(entry, dict) else entry)
             continue
-        cut = entry["cut"]
-        shape = _shape_of(cut)
-        final, note, rejected = _one(
-            "template", shape, cut, entry.get("shot"),
-            str(entry.get("expect") or ""), str(entry.get("name") or ""))
+        kept, note, rejected = done[i]
+        i += 1
         if rejected:
             name = entry.get("name") or ""
-            return args, "", f"{name}: {rejected}" if name else rejected
-        kept = {key: value for key, value in entry.items() if key != "expect"}
-        kept["cut"] = final
+            rejected_at = f"{name}: {rejected}" if name else rejected
+            break
         templates.append(kept)
         if note:
             notes.append(note)
+    if rejected_at:
+        return args, "", rejected_at
     out = _strip(args)
     out["templates"] = templates
-    return out, "; ".join(notes), ""
+    return out, "；".join(notes), ""
 
 
 def review(name: str, args: dict) -> tuple[dict, str, str]:

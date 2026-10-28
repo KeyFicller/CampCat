@@ -41,6 +41,9 @@ _TOOL_WAIT = False
 _CLOSED = False
 _CURRENT_RID: Any = None
 
+# Held while writing one encoded line, so threads cannot interleave a frame.
+_EMIT_LOCK = threading.Lock()
+
 
 def set_current_rid(rid: Any) -> None:
     """Record the id of the request being served; tool calls echo it."""
@@ -53,8 +56,12 @@ def get_current_rid() -> Any:
 
 
 def emit(msg: dict) -> None:
-    sys.stdout.write(protocol.encode(msg) + "\n")
-    sys.stdout.flush()
+    # One line at a time, whole: two threads writing to stdout would interleave
+    # mid-line and the host would read a frame it cannot decode. A tool call and
+    # the review it runs now happen on their own threads.
+    with _EMIT_LOCK:
+        sys.stdout.write(protocol.encode(msg) + "\n")
+        sys.stdout.flush()
 
 
 def _pump(stream: TextIO) -> None:
@@ -83,9 +90,14 @@ def start_reader() -> None:
 
 
 def set_tool_wait(on: bool) -> None:
-    """Say whether `call_cpp` is waiting, so an interrupt reaches it."""
+    """Say whether a `call_cpp` is waiting, so an interrupt reaches it.
+
+    A count, not a flag: template checks run on their own threads, and one of
+    them finishing must not tell the reader that nobody is waiting while
+    another still is.
+    """
     global _TOOL_WAIT
-    _TOOL_WAIT = on
+    _TOOL_WAIT = _TOOL_WAIT + 1 if on else max(0, _TOOL_WAIT - 1)
 
 
 def stop_requested() -> bool:

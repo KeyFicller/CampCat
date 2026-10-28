@@ -29,6 +29,24 @@ constexpr char k_mono_regular[] = "campcat/sources/cpp/assets/fonts/JetBrainsMon
 /// overshoot is what closes the rest of the gap.
 constexpr float k_cjk_scale = 1.20F;
 
+/// Faces merged after the bundled CJK subset to fill in what a GB2312 subset
+/// cannot draw: every symbol block, Extension A, compatibility ideographs and
+/// the hanzi outside GB2312.
+///
+/// The bundled subset is tried first for the hanzi it does have, because it is
+/// the only face guaranteed to be there. ImGui skips a codepoint an earlier
+/// merge already provided, so this second face adds only the remainder and
+/// nothing is rasterized twice.
+///
+/// Only a system face carries those glyphs: Arial Unicode has them all bar
+/// Extension A and a few rare ideographs. Measured for the four CJK faces
+/// (two 16px, one 16px mono, one 18px): 92k glyphs against 29k before, and the
+/// atlas grows from 4096x4096 to 4096x16384 -- 256 MB once uploaded as RGBA,
+/// with ~0.35 s added to the first frame. Dropping a face from this merge is
+/// the whole cost curve, so a machine short on VRAM should drop one.
+constexpr char k_wide_face[] =
+    "/System/Library/Fonts/Supplemental/Arial Unicode.ttf";
+
 /// Indexed by `font_role`. Written once by `fonts_init`, read-only after.
 ImFont *s_font[6] = {};
 
@@ -67,6 +85,15 @@ void fonts_init() {
     //
     // Asking for a codepoint the face does not carry is harmless: the subset in
     // `campcat/sources/cpp/assets/fonts/` has the common arrows, not every one of the 112 slots.
+    //
+    // The blocks after it are the ones a model's Chinese actually reaches and
+    // ChineseFull leaves out: circled numbers (①②), box drawing, geometric
+    // shapes (●■▲◆), symbols and dingbats (★✓✗), letterlike (™℃), number
+    // forms (ⅠⅡ), math (≈≤≠), CJK radicals and strokes, Extension A, the tail
+    // of the BMP ideographs past 0x9FAF, compatibility ideographs (豈), and
+    // the vertical and small form variants. Circled numbers and geometric
+    // shapes are what a list in a reply is drawn with, so their absence was
+    // showing up as "?" mid-sentence.
     static const std::vector<ImWchar> cjk_ranges = [&io] {
         std::vector<ImWchar> r;
         for (const ImWchar *p = io.Fonts->GetGlyphRangesChineseFull();
@@ -74,8 +101,25 @@ void fonts_init() {
             r.push_back(p[0]);
             r.push_back(p[1]);
         }
-        r.push_back(0x2190); // Arrows
-        r.push_back(0x21FF);
+        static const ImWchar wide[] = {
+            0x2190, 0x21FF, // Arrows
+            0x2100, 0x214F, // Letterlike Symbols
+            0x2150, 0x218F, // Number Forms
+            0x2200, 0x22FF, // Mathematical Operators
+            0x2460, 0x24FF, // Enclosed Alphanumerics
+            0x2500, 0x259F, // Box Drawing, Block Elements
+            0x25A0, 0x25FF, // Geometric Shapes
+            0x2600, 0x27BF, // Miscellaneous Symbols, Dingbats
+            0x2E80, 0x2FDF, // CJK Radicals Supplement, Kangxi Radicals
+            0x31C0, 0x31EF, // CJK Strokes
+            0x3400, 0x4DBF, // CJK Extension A
+            0x9FB0, 0x9FFF, // the rest of the BMP ideographs
+            0xF900, 0xFAFF, // CJK Compatibility Ideographs
+            0xFE10, 0xFE6F, // vertical, compatibility and small form variants
+        };
+        for (unsigned i = 0; i < sizeof(wide) / sizeof(wide[0]); i++) {
+            r.push_back(wide[i]);
+        }
         r.push_back(0); // zero-terminated, as ImGui requires
         r.push_back(0);
         return r;
@@ -102,10 +146,9 @@ void fonts_init() {
     // MergeMode appends to the font added just before it, so each merge is
     // issued right after its own base font.
     //
-    // `_cjk` is false for the 20px title only: the full set at 20px doubles the
-    // atlas to 4096x16384 (+320 MB RSS, +128 MB VRAM) for strings that are all
-    // ASCII today. A Chinese title would draw "?"; add the merge then if it
-    // becomes worth that.
+    // `_cjk` is false for the 20px title only: Chinese would draw "?" there,
+    // and a title that is ASCII today does not pay for the atlas (4096x16384
+    // with this merge, against 4096x4096 without).
     auto load_font = [&io](const char *_path, float _size, bool _cjk, int _face,
                            const ImWchar *_ranges = nullptr) -> ImFont * {
         // AddFontFromFileTTF asserts on a missing file, and that assert is live
@@ -134,6 +177,14 @@ void fonts_init() {
                                          cjk_ranges.data());
             break;
         }
+        std::error_code wide_ec;
+        if (!std::filesystem::exists(k_wide_face, wide_ec)) {
+            return font;
+        }
+        ImFontConfig fill;
+        fill.MergeMode = true;
+        io.Fonts->AddFontFromFileTTF(k_wide_face, _size * k_cjk_scale, &fill,
+                                     cjk_ranges.data());
         return font;
     };
 

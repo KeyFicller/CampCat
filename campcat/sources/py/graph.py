@@ -15,11 +15,13 @@ from langgraph.graph import END, StateGraph
 
 import agent.memorier as memorier
 import agent.operator as operator
+import agent.reflector as reflector
 import agent.region_review as region_review
 import agent.scripter as scripter
 import models
 import observability
 import session
+import subagent
 import tools
 
 # Model rounds allowed in one request. The C++ host caps dispatches on its
@@ -42,10 +44,9 @@ def rounds_of(raw: object) -> int:
 # Said to the model once the rounds above are spent. With the tools withdrawn it
 # otherwise reaches for one anyway and writes the call into its answer as text.
 NO_TOOLS_NOTE = (
-    "The tool budget for this request is exhausted. Answer in plain text now and "
-    "do not emit any tool call markup."
+    "这次请求的工具额度已经用完。现在只用纯文本回答，"
+    "不要再输出任何工具调用的标记。"
 )
-
 
 class TurnState(TypedDict, total=False):
     text: str       # request: this turn's instruction
@@ -53,7 +54,7 @@ class TurnState(TypedDict, total=False):
     memory: str     # request: long-term notes, read off disk by the host
     messages: list  # built by build_messages
     tool_rounds: int
-    input_len: int  # built by build_messages: where this turn's own messages start
+    turn_mark: str  # built by build_messages: id of the message this turn starts at
     reply: str      # response: model output
     turns: int      # response: turns retained in the conversation
     max_model_rounds: int  # request: per-turn round cap; default MAX_MODEL_ROUNDS
@@ -71,8 +72,11 @@ def precheck(state: TurnState) -> dict:
     session.start_turn()
     text = (state.get("text") or "").strip()
     if not text:
-        return {"error": "empty request"}
-    return {"text": text}
+        return {"error": "请求为空"}
+    # Here, not in `build_messages`: `commit` stores this same text, so the
+    # history keeps the sentence the model was actually given. Dropping it from
+    # history would put the divergence point at the end of every user turn.
+    return {"text": text + session.ASK_IN_CHINESE}
 
 
 def compact(state: TurnState) -> dict:
@@ -92,16 +96,18 @@ def build_messages(state: TurnState) -> dict:
     frame = session.latest_frame()
     if frame is not None:
         messages.append(frame)
-    messages.append(HumanMessage(content=state.get("text", "")))
-    return {"messages": messages, "input_len": len(messages)}
+    mark = session.new_mark("turn")
+    messages.append(HumanMessage(content=state.get("text", ""), id=mark))
+    return {"messages": messages, "turn_mark": mark}
 
 
-def _invoke(state: TurnState, offered: list) -> dict:
+def _invoke(state: TurnState, offered: list, on_chunk=None) -> dict:
     """One model turn against `offered`.
 
     The schemas are passed to bind_tools with `expect` added on region tools;
     the check strips it before the host sees the call. The operator and the
-    scripter share this; each passes its own table.
+    scripter share this; each passes its own table and its own `on_chunk` -- the
+    operator's stream is the parent graph's, a subagent's goes to its window.
     """
     offered = region_review.with_expect(offered)
     cap = state.get("max_model_rounds", MAX_MODEL_ROUNDS)
@@ -122,7 +128,7 @@ def _invoke(state: TurnState, offered: list) -> dict:
         model_input.append(HumanMessage(content=NO_TOOLS_NOTE))
 
     try:
-        response = models.streamed(model, model_input)
+        response = models.streamed(model, model_input, on_chunk)
     except tools.TurnInterrupted:
         # Not an error: the host has the next message already. The turn commits
         # what finished and stops, like a stop inside the tool batch.
@@ -138,8 +144,7 @@ def _invoke(state: TurnState, offered: list) -> dict:
         # Tools are gone and the model said nothing usable, so say that rather
         # than showing an empty bubble the user would read as a hang. An empty
         # text on a normal round is just a round that only called tools.
-        text = "The tool budget for this request is exhausted and the model gave " \
-               "no text answer."
+        text = "这次请求的工具额度已经用完，而模型没有给出文字回答。"
     # Accumulated across rounds: the UI streams every round's text, so keeping
     # only the last one would make the reply shrink when the turn completes.
     # A model that announces a tool call and then answers is the common case.
@@ -180,7 +185,7 @@ def _host_result(name: str, args: dict) -> tuple[object, list]:
     """One host tool. Pictures stay out of the result list; the caller appends them."""
     args, note, rejected = region_review.review(name, args)
     if rejected:
-        return "error: self-check rejected this region: " + rejected, []
+        return "error: 自查否掉了这个区域：" + rejected, []
     # Said before the call because the approval gate, which comes first, is
     # where the score helps: the host's own note on this call cannot carry it.
     if note:
@@ -272,8 +277,8 @@ def run_tools(state: TurnState) -> dict:
             # prompt alone. Refused rather than run: one agent, one pair of
             # tools, is the point of the flag -- and a stray call must not
             # start the scripter or drive the device behind it.
-            return ("error: only " + ", ".join(sorted(operator.SOLO))
-                    + " are available right now; " + name + " is not", [])
+            return ("error: 这一轮只能用 " + ", ".join(sorted(operator.SOLO))
+                    + "；不能用 " + name, [])
         if name == operator.AUTHOR_SCRIPT_NAME:
             # The screen belongs to the device. A shot the scripter took is the
             # one a later tap in this turn is checked against, so the operator
@@ -281,8 +286,22 @@ def run_tools(state: TurnState) -> dict:
             # propagates, and the calls after this one are filled in by
             # `_run_calls`.
             before = session._LATEST_NUM
-            content = scripter.run_scripter(
-                args, host_tools, state.get("max_model_rounds", MAX_MODEL_ROUNDS))
+            with subagent.working("scripter",
+                                  args.get("goal") or "") as run:
+                content = scripter.run_scripter(
+                    args, host_tools,
+                    state.get("max_model_rounds", MAX_MODEL_ROUNDS))
+                # After the handoff, where its trajectory and the operator's
+                # round count are both still in hand; neither survives the
+                # return. The body serves every *later* handoff's scripter; the
+                # head rides back on this result, for the operator who is the
+                # only one that can change how the next handoff is split.
+                content = str(content)
+                head, body = reflector.reflect(
+                    scripter.calls(), state.get("tool_rounds", 0), content)
+                session.add_lessons(body)
+                run.settle(content)
+                content += reflector.directive(head, body)
             pics: list = []
             if session._LATEST_NUM != before:
                 frame = session.latest_frame()
@@ -328,7 +347,8 @@ def commit(state: TurnState) -> dict:
     if state.get("error"):
         return {"turns": session.size()}
     session.append_turn(state.get("text", ""),
-                        list(state.get("messages") or [])[state.get("input_len") or 0:])
+                        session.own_since(state.get("messages") or [],
+                                          state.get("turn_mark")))
     return {"turns": session.size()}
 
 

@@ -11,6 +11,7 @@ Usage:
 
 from __future__ import annotations
 
+import os
 import pathlib
 import sys
 import time
@@ -141,6 +142,13 @@ def main(argv: list[str]) -> int:
         print(f"[sidecar] loaded {applied} var(s) from .env", file=sys.stderr)
     # After the env file, or Langfuse builds its client without credentials.
     observability.start()
+    if os.environ.get("CAMPCAT_STACK_DUMP"):
+        # A spin inside a model loop leaves no log line behind. With this set,
+        # `kill -USR1 <pid>` prints every thread's Python stack to stderr.
+        import faulthandler
+        import signal
+
+        faulthandler.register(signal.SIGUSR1, all_threads=True)
     # One thread owns stdin from here on: a model call blocks for tens of
     # seconds, and a stop has to be seen while it does.
     transport.start_reader()

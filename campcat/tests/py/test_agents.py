@@ -6,6 +6,7 @@ and how an `author_script` brief is spelled.
 
 import agent.operator as operator
 import agent.scripter as scripter
+import session
 
 HOST_NAMES = (
     "screenshot view_shot view_template view_crop tight_crop mark tap start_emulator "
@@ -95,29 +96,66 @@ def test_author_script_schema_comes_from_the_tool():
     assert params["required"] == ["goal"]
     assert list(params["properties"]) == [
         "goal", "steps", "bundle", "shots", "last_error", "fix"]
-    assert params["properties"]["steps"]["type"] == "string"
+    step = params["properties"]["steps"]
+    assert step["type"] == "array"
+    assert list(step["items"]["properties"]) == [
+        "shot", "screen", "did", "region", "expect", "result"]
+    # One row is one frame, and a screen it stood on: the rest may be blank.
+    assert step["items"]["required"] == ["shot", "screen"]
+    assert step["items"]["properties"]["shot"]["type"] == "integer"
+    assert "description" not in step["items"]       # no docstring, it costs tokens
     assert params["properties"]["shots"]["items"]["type"] == "integer"
     assert params["properties"]["fix"]["type"] == "boolean"
-    assert "omit" in params["properties"]["bundle"]["description"]
+    assert "留空" in params["properties"]["bundle"]["description"]
+
+
+def test_brief_renders_a_structured_step():
+    ask = session.ASK_IN_CHINESE
+    text = scripter.brief_of({"goal": "签到", "steps": [
+        {"shot": 4, "screen": "任务页", "did": "点「签到」",
+         "region": "box 640,1295 160x100", "expect": "白色「签到」两字",
+         "result": "按钮变灰"},
+        {"shot": 5, "screen": "任务页", "did": "观察"},
+    ]})
+    assert "steps（每行：帧号 | 界面 | 做了什么 | 最终区域 | 该有什么 | 结果" in text
+    assert ("1. #4 | 任务页 | 点「签到」 | box 640,1295 160x100 | "
+            "白色「签到」两字 | 按钮变灰") in text
+    assert "2. #5 | 任务页 | 观察 | - | - | -" in text
+    assert text.endswith(ask)
+
+
+def test_brief_takes_free_text_steps_as_they_are():
+    # A model that writes a paragraph where rows were asked for loses nothing:
+    # its lines go through, and the six-column legend is left off with them.
+    text = scripter.brief_of({"goal": "签到", "steps": "- screen #3: 内政\n\n- tap 政策"})
+    assert "steps:\n- screen #3: 内政\n- tap 政策" in text
+    assert "每行：帧号" not in text
+
+
+def test_brief_survives_a_shot_it_cannot_read():
+    text = scripter.brief_of({"goal": "g", "steps": [{"screen": "x", "shot": "?"}, {}]})
+    assert "1. - | x | - | - | - | -" in text
+    assert "2. " not in text                  # the empty entry is not a step
 
 
 def test_brief_keeps_only_the_fields_that_were_given():
+    ask = session.ASK_IN_CHINESE
     full = scripter.brief_of({
         "goal": "签到",
         "bundle": "daily",
         "shots": [3, 4],
         "last_error": "best=0.61",
     })
-    assert full == "goal: 签到\nbundle: daily\nshots: 3 4\nlast_error: best=0.61"
-    assert scripter.brief_of({"goal": "签到"}) == "goal: 签到"
+    assert full == "goal: 签到\nbundle: daily\nshots: 3 4\nlast_error: best=0.61" + ask
+    assert scripter.brief_of({"goal": "签到"}) == "goal: 签到" + ask
     assert scripter.brief_of({
         "goal": "签到", "bundle": "", "shots": [], "last_error": "",
-    }) == "goal: 签到"
-    assert scripter.brief_of({"goal": "签到", "shots": "3"}) == "goal: 签到"
-    assert scripter.brief_of({"goal": "签到", "fix": True}) == "goal: 签到\nfix: true"
-    assert scripter.brief_of({"goal": "签到", "fix": "true"}) == "goal: 签到"
-    assert scripter.brief_of({"goal": "签到", "fix": False}) == "goal: 签到"
+    }) == "goal: 签到" + ask
+    assert scripter.brief_of({"goal": "签到", "shots": "3"}) == "goal: 签到" + ask
+    assert scripter.brief_of({"goal": "签到", "fix": True}) == "goal: 签到\nfix: true" + ask
+    assert scripter.brief_of({"goal": "签到", "fix": "true"}) == "goal: 签到" + ask
+    assert scripter.brief_of({"goal": "签到", "fix": False}) == "goal: 签到" + ask
     assert scripter.brief_of({
         "goal": "签到", "steps": "- screen #3: 内政\n- tap 政策: box 1,2 3x4",
-    }) == "goal: 签到\nsteps:\n- screen #3: 内政\n- tap 政策: box 1,2 3x4"
-    assert scripter.brief_of({"goal": "签到", "steps": " \n "}) == "goal: 签到"
+    }) == "goal: 签到\nsteps:\n- screen #3: 内政\n- tap 政策: box 1,2 3x4" + ask
+    assert scripter.brief_of({"goal": "签到", "steps": " \n "}) == "goal: 签到" + ask

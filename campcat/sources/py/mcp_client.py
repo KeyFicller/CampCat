@@ -65,9 +65,9 @@ TIMEOUT = httpx2.Timeout(30.0, read=600.0)
 # One question, one picture, one word -- the same bar the sidecar's `consult`
 # holds a script's `ask` to. A wrong guess picks a wrong branch.
 ASK_SYSTEM = (
-    "You answer one yes/no question about an Android screenshot. Look only at "
-    "the picture. Reply with exactly one word: yes, no, or unsure. Answer "
-    "unsure when the picture does not show enough to decide; never guess."
+    "你回答关于一张 Android 截图的一个是/否问题。只看图片。"
+    "只回一个词，照抄英文原样：yes、no 或 unsure。"
+    "图片里显示的信息不足以判断时，回答 unsure；永远不要猜。"
 )
 
 

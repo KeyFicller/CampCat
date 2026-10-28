@@ -152,7 +152,7 @@ def test_model_error_is_inconclusive(monkeypatch):
         "tap: image not found /lib/b/btn.png (best=0.612 box=10,20,30,40 threshold=0.800)",
         fail=True,
     )
-    assert "model error:" in text.split("reason: ", 1)[1]
+    assert "模型出错：" in text.split("reason: ", 1)[1]
 
 
 def test_scripter_intercepts_diagnose_and_keeps_host_clean(monkeypatch):
