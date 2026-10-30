@@ -17,7 +17,7 @@ import session
 
 # The model sees one screenshot and one question. "unsure" is the way out: a
 # wrong yes or no picks a wrong branch, and the script would rather stop.
-_SYSTEM = (
+SYSTEM = (
     "你回答关于一张 Android 截图的一个是/否问题。只看图片。"
     "只回一个词，照抄英文原样：yes、no 或 unsure。"
     "图片里显示的信息不足以判断时，回答 unsure；永远不要猜。"
@@ -25,8 +25,14 @@ _SYSTEM = (
 
 
 def parse_answer(text: str) -> str:
-    """'yes' / 'no' / '' -- strict, because a guess picks a branch."""
-    word = (text or "").strip().strip(".").lower()
+    """'yes' / 'no' / '' -- strict, because a guess picks a branch.
+
+    A wrapped word (`Yes。`, `**yes**`) is still that word. Anything after it
+    is a sentence, and a sentence is a guess.
+    """
+    word = (text or "").strip().lower()
+    word = word.strip("*_`")
+    word = word.strip("。．.!！")
     return word if word in ("yes", "no") else ""
 
 
@@ -40,7 +46,7 @@ def answer(req: dict) -> dict:
             rid, False, error="问题或图片为空")
     try:
         reply: Any = models.build_chat_model().invoke([
-            SystemMessage(content=_SYSTEM),
+            SystemMessage(content=SYSTEM),
             HumanMessage(content=session._shot_content(question, image)),
         ])
     except Exception as exc:  # noqa: BLE001 - the script stops, the loop lives

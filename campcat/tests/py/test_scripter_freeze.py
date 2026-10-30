@@ -82,6 +82,22 @@ def test_the_gate_stops_the_host(monkeypatch):
     assert calls == ["update_script"]
 
 
+def test_a_handoff_is_capped_below_the_turn(monkeypatch):
+    monkeypatch.setattr(
+        tools, "call_cpp", lambda *a, **k: {"ok": True, "text": "none yet"})
+    seen = {}
+
+    def run(compiled, state, callbacks=None):
+        seen["cap"] = state["max_model_rounds"]
+        return {"reply": "saved x"}
+
+    monkeypatch.setattr(graph, "run_subgraph", run)
+    assert scripter.run_scripter({"goal": "签到"}, [], 1000) == "saved x"
+    assert seen["cap"] == scripter.HANDOFF_MAX_ROUNDS
+    assert scripter.run_scripter({"goal": "签到"}, [], 12) == "saved x"
+    assert seen["cap"] == 12
+
+
 def test_a_handoff_opens_its_own_span(monkeypatch):
     opened = []
 

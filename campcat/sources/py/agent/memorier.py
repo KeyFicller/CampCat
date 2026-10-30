@@ -252,6 +252,25 @@ def _without_orphan_tools(messages: list) -> list:
     return kept
 
 
+def _paired(messages: list) -> list:
+    """A history a provider will accept.
+
+    Drops a tool result whose call was cut, and a trailing call the host never
+    answered. Either one is a 400 on the next request. A finished round stays.
+    """
+    kept = _without_orphan_tools(messages)
+    while kept:
+        calls = getattr(kept[-1], "tool_calls", None) or []
+        if not calls:
+            break
+        answered = {str(getattr(m, "tool_call_id", "")) for m in kept
+                    if isinstance(m, ToolMessage)}
+        if all(str(c.get("id") or "") in answered for c in calls):
+            break
+        kept.pop()
+    return kept
+
+
 def _middleware():
     """Summarizes older turns once the request approaches the budget.
 

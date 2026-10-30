@@ -1,7 +1,8 @@
 """Check a region against its own crop before the host acts on it.
 
-One model call per round, with no tools: the crop at full size, and the area
-around it. A region the check is not sure about gets one more look, asked for
+One model call per round: the crop at full size, and the area around it.
+The call returns a Review or a Pick, which is what the next round branches on.
+A region the check is not sure about gets one more look, asked for
 the strongest alternative it can see. Every attempt is only a candidate: the
 last call sees each one's cut and the surroundings it sits in, picks the best,
 and a pick that cannot be read keeps the first proposal. A check that cannot
@@ -12,9 +13,10 @@ from __future__ import annotations
 
 import json
 import re
-from typing import TypedDict
+from typing import Literal, TypedDict
 
 from langchain_core.messages import HumanMessage, SystemMessage
+from pydantic import BaseModel, Field, ValidationError, field_validator
 from langgraph.graph import END, StateGraph
 from concurrent.futures import ThreadPoolExecutor
 
@@ -64,18 +66,11 @@ _PRESSURE = (
 REVIEW_PROMPT = (
     "你在检查别的 agent 提议的一个区域，它还没被使用。你看到两张图：这张区域"
     "按自身尺寸裁下来的样子，以及把该区域画上去的第二张图——按文字说明，"
-    "可能是它周围的原分辨率邻域，也可能是整帧缩小后的画面。严格按下面的格式"
-    "回答，不要写别的：\n"
-    "verdict: ok | adjust | reject\n"
-    "confidence: 0.0-1.0   （你对这个区域正确的把握有多大；0 = 纯猜）\n"
-    "box: {\"x\":..,\"y\":..,\"w\":..,\"h\":..}   （只在 adjust 时写；圆形区域写 "
-    "circle: {\"cx\":..,\"cy\":..,\"r\":..}；菱形区域写 "
-    "diamond: {\"cx\":..,\"cy\":..,\"rx\":..,\"ry\":..}）\n"
-    "reason: 一句话\n"
-    "verdict、confidence、reason、box、circle、diamond 这几个键名，以及 "
-    "ok / adjust / reject，都要照抄英文原样，不要翻译。\n"
-    "边只做小修正时用 adjust，坐标用这一帧的像素。区域落在错误的元素上、"
-    "或者这个元素根本不在这帧里，用 reject。\n" + _PRESSURE
+    "可能是它周围的原分辨率邻域，也可能是整帧缩小后的画面。"
+    "调用 Review 回答。\n"
+    "边只做小修正时 verdict 用 adjust，坐标用这一帧的像素，写进 box、circle、"
+    "diamond 中的一个。区域落在错误的元素上、或者这个元素根本不在这帧里，"
+    "用 reject。\n" + _PRESSURE
 )
 
 _ALTERNATIVE = (
@@ -89,10 +84,7 @@ PICK_PROMPT = (
     "每一个都先给裁切图，再给把该区域画在周围环境里的图。序号只是用来标识"
     "哪一次：靠后的既不比第一次好，也不比它差。"
     "挑出最符合期望的那一个裁切：它指名的控件，贴着它、不多余、也没被切掉。"
-    "严格按下面的格式回答：\n"
-    "pick: <序号>\n"
-    "reason: 一句话\n"
-    "pick 和 reason 这两个键名照抄英文，不要翻译。"
+    "调用 Pick 回答。pick 是序号，从 1 开始。"
 )
 
 # Shared by the one-crop check and the pick, so the two cannot drift.
@@ -120,10 +112,7 @@ TEMPLATE_PICK_PROMPT = (
     "哪一次：靠后的既不比第一次好，也不比它差。\n"
     + _TEMPLATE_RULES +
     "\n第 3 条（把控件切掉）要看周围环境那张图判断，不能只看裁切本身。"
-    "\n严格按下面的格式回答：\n"
-    "pick: <序号>\n"
-    "reason: 一句话，说明是哪一条规则定的\n"
-    "pick 和 reason 这两个键名照抄英文，不要翻译。"
+    "\n调用 Pick 回答。pick 是序号，从 1 开始。reason 说明是哪一条规则定的。"
 )
 
 REVIEW_CRITERIA = {
@@ -141,12 +130,13 @@ REVIEW_CRITERIA = {
 def _review_system(kind: str) -> str:
     if kind == "template":
         extra = (
-            "模板的 adjust 可以换形状：圆形控件写 circle:，菱形控件写 diamond:，"
-            "矩形控件写 box:。"
+            "模板的 adjust 可以换形状：圆形控件只填 circle，菱形只填 diamond，"
+            "矩形只填 box。"
         )
     else:
         extra = (
-            "box、circle、diamond 这三个键里，用你收到的这个区域本身的形状。"
+            "box、circle、diamond 里只填你收到的这个区域本身的形状，"
+            "另外两个留空。"
         )
     return REVIEW_PROMPT + "\n" + extra
 
@@ -261,52 +251,97 @@ def with_expect(offered: list) -> list:
     return out
 
 
-def parse_review(text: str, shape: str, *, kind: str = "tap"
-                 ) -> tuple[str, dict | None, str, str]:
-    """`(verdict, region, reason, shape)`. Anything off the form is `skip`.
+# Bound by hand so `streamed` can still stop between chunks. A bad call is
+# `skip`, which lets the original region through: a failed check must not reject.
+class Review(BaseModel):
+    """对一个还没被使用的区域的检查。"""
 
-    A template adjust may name either shape; the key on that line is the new
-    one. A tap must repeat the shape it was given.
-    """
-    lines = [line.strip() for line in text.strip().splitlines() if line.strip()]
-    if not lines or not lines[0].startswith("verdict:"):
-        return "skip", None, text.strip(), shape
-    verdict = lines[0].split(":", 1)[1].strip()
-    if verdict not in ("ok", "adjust", "reject"):
-        return "skip", None, text.strip(), shape
-    region = None
-    reason = ""
-    for line in lines[1:]:
-        if line.startswith("reason:"):
-            reason = line.split(":", 1)[1].strip()
-        elif line.startswith(("box:", "circle:", "diamond:")):
-            key, raw = line.split(":", 1)
-            if kind != "template" and key != shape:
-                return "skip", None, text.strip(), shape
-            try:
-                region = json.loads(raw)
-            except json.JSONDecodeError:
-                return "skip", None, text.strip(), shape
-            if not isinstance(region, dict):
-                return "skip", None, text.strip(), shape
-            shape = key
-    if verdict == "adjust" and not isinstance(region, dict):
-        return "skip", None, text.strip(), shape
-    return verdict, region, reason, shape
+    verdict: Literal["ok", "adjust", "reject"] = Field(
+        description=(
+            "ok 放过，adjust 小修正，reject 落在错误的元素上或根本不在这帧里。"
+            "取值照抄英文。"
+        ))
+    confidence: float = Field(
+        default=1.0,
+        description="对这个区域正确的把握，0 到 1。0 是纯猜。低的只是多买一次复查。")
+    reason: str = Field(default="", description="一句话。")
+    box: dict | None = Field(
+        default=None, description="矩形 {x,y,w,h}，这一帧的像素。adjust 时三选一。")
+    circle: dict | None = Field(default=None, description="圆 {cx,cy,r}。")
+    diamond: dict | None = Field(default=None, description="菱形 {cx,cy,rx,ry}。")
 
-
-def parse_pick(text: str, count: int) -> int | None:
-    """The 1-based crop a pick names, or None when the line is missing or off."""
-    for line in text.strip().splitlines():
-        line = line.strip()
-        if not line.lower().startswith("pick:"):
-            continue
+    @field_validator("confidence", mode="before")
+    @classmethod
+    def _clamp(cls, value):
         try:
-            number = int(line.split(":", 1)[1].strip())
-        except ValueError:
-            return None
-        return number if 1 <= number <= count else None
-    return None
+            number = float(value)
+        except (TypeError, ValueError):
+            return 1.0
+        if number != number:  # NaN
+            return 1.0
+        return min(1.0, max(0.0, number))
+
+
+class Pick(BaseModel):
+    """在几次尝试里选一个。"""
+
+    pick: int = Field(description="序号，从 1 开始。")
+    reason: str = Field(default="", description="一句话。模板检查要写明是哪一条规则定的。")
+
+
+def _filled(got: Review) -> list[tuple[str, dict]]:
+    found = []
+    for name in ("box", "circle", "diamond"):
+        region = getattr(got, name)
+        if isinstance(region, dict) and region:
+            found.append((name, region))
+    return found
+
+
+def _from_review(reply, shape: str, *, kind: str = "tap"
+                 ) -> tuple[str, dict | None, str, str, float]:
+    """`(verdict, region, reason, shape, confidence)`. Off-schema is `skip`.
+
+    A tap must keep the shape it was given. A template adjust may switch shape.
+    More than one shape, or an adjust with none, is skip.
+    """
+    raw = session.content_text(getattr(reply, "content", "") or "").strip()
+    calls = getattr(reply, "tool_calls", None) or []
+    if not calls:
+        return "skip", None, raw or "读不懂", shape, 1.0
+    args = calls[0].get("args") or {}
+    try:
+        got = Review.model_validate(args)
+    except ValidationError:
+        return "skip", None, raw or str(args), shape, 1.0
+    filled = _filled(got)
+    if len(filled) > 1:
+        return "skip", None, got.reason or raw or "读不懂", shape, got.confidence
+    region = None
+    new_shape = shape
+    if len(filled) == 1:
+        new_shape, region = filled[0]
+        if kind != "template" and new_shape != shape:
+            return "skip", None, got.reason or raw or "读不懂", shape, got.confidence
+    if got.verdict != "adjust":
+        return got.verdict, None, got.reason, shape, got.confidence
+    if region is None:
+        return "skip", None, got.reason or raw or "读不懂", shape, got.confidence
+    return "adjust", region, got.reason, new_shape, got.confidence
+
+
+def _from_pick(reply, count: int) -> tuple[int | None, str]:
+    """The 1-based crop a Pick names, or `(None, "")` when it cannot be read."""
+    calls = getattr(reply, "tool_calls", None) or []
+    if not calls:
+        return None, ""
+    try:
+        got = Pick.model_validate(calls[0].get("args") or {})
+    except ValidationError:
+        return None, ""
+    if not 1 <= got.pick <= count:
+        return None, ""
+    return got.pick, got.reason
 
 
 def remember_human_region(content: str) -> None:
@@ -382,20 +417,6 @@ def _moved(shape: str, before: dict, after: dict) -> str:
         return ""
     # The sent crop may have changed shape, so the note follows `after`.
     return f"已经改用 {_where(after)}。{_STOP}"
-
-
-_NUMBER = re.compile(r"[-+]?\d*\.?\d+")
-
-
-def _confidence(text: str) -> float:
-    """The judge's own 0..1 score, clamped; 1.0 when it did not give one."""
-    for line in text.splitlines():
-        if line.strip().lower().startswith("confidence:"):
-            found = _NUMBER.search(line.split(":", 1)[1])
-            if found is None:
-                return 1.0
-            return min(1.0, max(0.0, float(found.group())))
-    return 1.0
 
 
 def _needs_alt(state: ReviewState) -> bool:
@@ -483,7 +504,8 @@ def review_judge(state: ReviewState) -> dict:
     if alt:
         text += "\n" + _ALTERNATIVE
     try:
-        model = models.build_chat_model()
+        model = models.build_chat_model().bind_tools(
+            [Review], tool_choice="any")
         response = models.streamed(model, [
             SystemMessage(content=_review_system(state["kind"])),
             HumanMessage(content=[
@@ -496,11 +518,10 @@ def review_judge(state: ReviewState) -> dict:
         raise
     except Exception as exc:  # noqa: BLE001 - a failed check lets the call through
         return {"verdict": "skip", "reason": str(exc), "rounds": rounds}
-    answer = session.content_text(getattr(response, "content", response))
-    verdict, region, reason, shape = parse_review(
-        answer, state["shape"], kind=state["kind"])
+    verdict, region, reason, shape, confidence = _from_review(
+        response, state["shape"], kind=state["kind"])
     out: dict = {"verdict": verdict, "reason": reason, "rounds": rounds,
-                 "confidence": _confidence(answer)}
+                 "confidence": confidence}
     if alt:
         out["tried_alt"] = True
     if verdict == "adjust" and _inside(region, shape, state.get("frame_size")):
@@ -606,7 +627,7 @@ def review_pick(state: ReviewState) -> dict:
                  "再给同一区域在周围环境里的样子。")
     lines.append(session.ASK_IN_CHINESE.strip())
     try:
-        model = models.build_chat_model()
+        model = models.build_chat_model().bind_tools([Pick], tool_choice="any")
         prompt = (TEMPLATE_PICK_PROMPT if state.get("kind") == "template"
                   else PICK_PROMPT)
         response = models.streamed(model, [
@@ -618,15 +639,10 @@ def review_pick(state: ReviewState) -> dict:
         raise
     except Exception as exc:  # noqa: BLE001 - an unreadable pick keeps the proposal
         return {"region": first, "verdict": "ok", "reason": str(exc)}
-    text = session.content_text(getattr(response, "content", response))
-    number = parse_pick(text, len(candidates))
+    number, reason = _from_pick(response, len(candidates))
     if number is None:
         return {"region": first, "verdict": "ok",
                 "reason": "读不懂这个选择，保留了第一个提议"}
-    reason = ""
-    for line in text.splitlines():
-        if line.strip().lower().startswith("reason:"):
-            reason = line.split(":", 1)[1].strip()
     return {"region": candidates[number - 1]["region"], "verdict": "ok",
             "reason": reason}
 

@@ -5,44 +5,58 @@ Two halves, kept apart on purpose. The counts are arithmetic: a repeated
 model to report it invites it to invent one. Only the sentence about where the
 work went in circles needs a model.
 
-Nothing here outlives the process: the notes sit in `session` and are read by
-the next handoff's prompt. The host's own consolidation still owns the disk.
+Nothing here outlives the process: the notes sit in `session` and are read on
+the next handoff's brief, not in its system prefix. The host's own
+consolidation still owns the disk.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import sys
 
 from langchain_core.messages import HumanMessage, SystemMessage
+from pydantic import BaseModel, Field, ValidationError
 
 import models
 import observability
 import session
 
-# Longest a note may be. It is prepended to the scripter's prompt, so it is
-# sent on every round of every later handoff until it is replaced.
+# Longest a note may be. It rides on the next handoff's brief, so a new note
+# does not rewrite the system prefix the provider caches.
 MAX_CHARS = 1200
 
 # Longest the trajectory may be before it goes to the model. A busy handoff
 # makes 70-plus calls; the tail is what explains the outcome, so the head goes.
 MAX_TRAJECTORY = 6000
 
+class Lessons(BaseModel):
+    """这次交接留给下一次的笔记。没有值得写的就把 notes 留空。"""
+
+    notes: list[str] = Field(
+        default_factory=list,
+        description=(
+            "最多四条。每条只写这次交接里能看出来的东西："
+            "哪一步绕了弯、哪个控件反复没定位上、哪个名字被重试过。"
+            "不要复述数字、当前界面、用户偏好，也不要写已经存进 bundle 的流程。"
+        ))
+
+
 INSTRUCTIONS = (
     "你要为一个写 Android 设备脚本的助手总结刚结束的一次交接。"
     "给你的是这次交接的轨迹：它调了哪些工具、结果如何，以及它最后的答复。\n"
     "\n"
-    "只写这次交接里能看出来的东西，每条一行，最多四条：\n"
+    "调用 Lessons。notes 里只写这次交接里能看出来的东西，最多四条：\n"
     "- 哪一步明显绕了弯，下次该怎么做\n"
     "- 哪个界面或控件的定位反复没过，下次先从哪儿下手\n"
     "- 哪个 bundle、模板或命名被重试过，下次一次写对的要点\n"
     "\n"
     "不要复述数字（已经有人算好了）、不要写当前界面、不要写用户偏好，"
-    "不要写已经存进 bundle 的流程。没有值得写的就什么都不输出。\n"
+    "不要写已经存进 bundle 的流程。没有值得写的就把 notes 留空。\n"
     "\n"
-    "只输出这些行，别的什么都不要：没有开场白、没有代码围栏、没有标题，"
-    f"总长不超过 {MAX_CHARS} 个字符。"
+    f"notes 拼起来总长不超过 {MAX_CHARS} 个字符。"
 )
 
 FRAME = (
@@ -79,8 +93,18 @@ def metrics(calls: list[dict], operator_rounds: int) -> dict:
             reads += 1
     # The hint rides along because two calls to the same tool with different
     # arguments are two repeats, and the line then named the same tool twice.
-    top = [(key.split("{", 1)[0] + hints[key], n)
-           for key, n in counts.items() if n > 1]
+    # A long argument is left out of the hint, so two of those still collide;
+    # a short hash of the key splits them without pasting the body in.
+    labeled = [(key, key.split("{", 1)[0] + hints[key], n)
+               for key, n in counts.items() if n > 1]
+    clashes = {}
+    for _, label, _ in labeled:
+        clashes[label] = clashes.get(label, 0) + 1
+    top = []
+    for key, label, n in labeled:
+        if clashes[label] > 1:
+            label += "#" + hashlib.sha1(key.encode()).hexdigest()[:4]
+        top.append((label, n))
     return {
         "calls": len(calls), "failed": failed,
         "writes": writes, "reads": reads, "operator_rounds": operator_rounds,
@@ -118,6 +142,20 @@ def summary(m: dict) -> str:
     return line
 
 
+def _notes_of(answer) -> str:
+    """The Lessons call, or the plain text when the model did not call it."""
+    calls = getattr(answer, "tool_calls", None) or []
+    if calls:
+        try:
+            got = Lessons.model_validate(calls[0].get("args") or {})
+        except ValidationError:
+            pass
+        else:
+            return "\n".join(part.strip() for part in got.notes if str(part).strip())
+    return session.strip_tool_markup(
+        session.content_text(getattr(answer, "content", answer))).strip()
+
+
 def reflect(calls: list[dict], operator_rounds: int,
             reply: str) -> tuple[str, str]:
     """(head, body). The head is counted here; the body is what the model saw.
@@ -135,7 +173,8 @@ def reflect(calls: list[dict], operator_rounds: int,
     m = metrics(calls, operator_rounds)
     head = summary(m)
     try:
-        model = models.build_chat_model()
+        model = models.build_chat_model().bind_tools(
+            [Lessons], tool_choice="any")
         with observability.turn("reflect") as callbacks:
             answer = model.invoke([
                 SystemMessage(content=INSTRUCTIONS),
@@ -147,8 +186,7 @@ def reflect(calls: list[dict], operator_rounds: int,
     except Exception as exc:  # noqa: BLE001 - a missed note, never fatal
         print(f"[sidecar] reflection skipped: {exc}", file=sys.stderr)
         return "", ""
-    text = session.strip_tool_markup(
-        session.content_text(getattr(answer, "content", answer))).strip()
+    text = _notes_of(answer)
     if not text:
         return "", ""
     body = text[:MAX_CHARS]
@@ -165,16 +203,19 @@ def _trajectory(calls: list[dict]) -> str:
     for call in calls:
         args = json.dumps(call.get("args") or {}, ensure_ascii=False)[:120]
         mark = "失败" if call.get("failed") else "ok"
+        error = str(call.get("error") or "")
+        if error:
+            mark += " " + error
         lines.append(f"{call.get('name')} {args} -> {mark}")
     joined = "\n".join(lines)
     return joined if len(joined) <= MAX_TRAJECTORY else joined[-MAX_TRAJECTORY:]
 
 
 def ledger_block(notes: list[str]) -> str:
-    """The ledger as a paragraph of the scripter's prompt, newest first.
+    """The ledger appended to the brief, newest first.
 
-    Empty in, empty out: with no notes the prompt is byte-identical to what it
-    was before this feature existed, which keeps the provider's cache warm.
+    Empty in, empty out: with no notes the brief is unchanged. The block stays
+    off the system message so a new note does not bust the prefix cache.
     """
     kept = [note.strip() for note in notes if note.strip()]
     if not kept:

@@ -11,9 +11,12 @@ import os
 import re
 import sys
 from pathlib import Path
+from typing import Literal
 
-from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
+from langchain_core.utils.function_calling import convert_to_openai_tool
 from langgraph.graph import END, StateGraph
+from pydantic import BaseModel, Field, ValidationError
 
 import agent.diagnoser as diagnoser
 import agent.memorier as memorier
@@ -52,11 +55,27 @@ def _name(tool: dict) -> str | None:
     return name if isinstance(name, str) else None
 
 
+class Handoff(BaseModel):
+    """这次交接的结果。干完再调用，调用后这一轮就结束。"""
+
+    status: Literal["saved", "updated", "failed"] = Field(
+        description=(
+            "saved 写好了新的，updated 改好了已有的，failed 没做成。"
+            "取值照抄英文。"
+        ))
+    summary: str = Field(
+        default="",
+        description="一到三句：做了什么，这次运行最后怎么样。")
+
+
+HANDOFF_TOOL = convert_to_openai_tool(Handoff)
+
+
 def scripter_tools(host_tools: list) -> list:
-    """Host tools the scripter may call, in the host's order, then diagnose_template."""
+    """Host tools the scripter may call, then diagnose_template and Handoff."""
     offered = SCRIPTER_ONLY | SHARED
     return [tool for tool in host_tools if _name(tool) in offered] + [
-        diagnoser.DIAGNOSE_TEMPLATE]
+        diagnoser.DIAGNOSE_TEMPLATE, HANDOFF_TOOL]
 
 
 # The order the renderer writes a step in; the legend quotes it.
@@ -424,11 +443,11 @@ _CCAT_CHEATSHEET = (
 
 SCRIPTER_PERSONA = (
     "你替 operator 写和修 .ccat bundle。你从不和用户说话；你的回复就是一次"
-    "工具结果。第一行必须恰好是 `saved`、`updated` 或 `failed` 之一"
-    "（这三个词照抄英文，不要翻译），然后用一到三句话说明你做了什么、"
-    "这次运行最后怎么样了。回答之前先用工具把活干完：读和写 bundle、"
-    "把每个模板都裁好、跑一遍、再按报错修好。brief 就是你能看到的全部对话。"
-    "brief 里没有的约束，对你来说不存在。"
+    "工具结果。干完之后调用 Handoff 收尾：status 是 `saved`、`updated` 或 "
+    "`failed` 之一（这三个词照抄英文，不要翻译），summary 用一到三句话说明"
+    "你做了什么、这次运行最后怎么样了。回答之前先用工具把活干完：读和写 bundle、"
+    "把每个模板都裁好、跑一遍、再按报错修好。之前交接的记录只作参考。"
+    "这次要产出什么，只看最后这份 brief。brief 里没有的约束，对你来说不存在。"
 )
 
 SCRIPTER_RULE_NAMES = (
@@ -459,6 +478,11 @@ def _no_summary(messages: list) -> str:
     return "failed: 写脚本的 agent 没有给出总结\n" + last
 
 
+# A handoff past this is the loop a repeated failure also stops. The observed
+# p90 is 44 rounds; the turn cap is 1000 and starts over on every handoff.
+HANDOFF_MAX_ROUNDS = 60
+
+
 def run_scripter(args: dict, host_tools: list,
                  max_model_rounds: int | None = None) -> str:
     """Run the scripter to the end and return the text the operator should see.
@@ -477,8 +501,11 @@ def run_scripter(args: dict, host_tools: list,
             return text
 
         token = None
+        begun = False
         try:
             import graph
+            graph.begin_fail_counts()
+            begun = True
             if handoff_may_change(args):
                 token = arm_freeze(None)
             else:
@@ -489,6 +516,7 @@ def run_scripter(args: dict, host_tools: list,
                     bundle_names_of(str(listed.get("text") or ""))))
             if max_model_rounds is None:
                 max_model_rounds = graph.MAX_MODEL_ROUNDS
+            max_model_rounds = min(max_model_rounds, HANDOFF_MAX_ROUNDS)
             state = {
                 "text": brief,
                 "tools": scripter_tools(host_tools),
@@ -513,6 +541,9 @@ def run_scripter(args: dict, host_tools: list,
         finally:
             if token is not None:
                 disarm_freeze(token)
+            if begun:
+                import graph
+                graph.end_fail_counts()
         if out.get("interrupted"):
             note("interrupted")
             raise tools.TurnInterrupted()
@@ -567,14 +598,17 @@ def _scripter_build(state: dict) -> dict:
     memorier.compact_scripter()
     messages: list[object] = [SystemMessage(content=(
         scripter_prompt() + memorier.scripter_memory_block(session.scripter_memory())
-        + reflector.ledger_block(session.lessons())
     ))]
-    messages.extend(session.scripter_history())
+    messages.extend(memorier._paired(session.scripter_history()))
     frame = session.latest_frame()
     if frame is not None:
         messages.append(frame)
     mark = session.new_mark("brief")
-    messages.append(HumanMessage(content=state.get("text", ""), id=mark))
+    # Lessons ride on the brief, not the system prefix: a new note would
+    # otherwise make every earlier handoff miss the provider's cache.
+    messages.append(HumanMessage(
+        content=state.get("text", "") + reflector.ledger_block(session.lessons()),
+        id=mark))
     return {"messages": messages, "turn_mark": mark}
 
 
@@ -596,9 +630,22 @@ def _apply_scripter_tools(state: dict) -> dict:
     messages = list(state.get("messages") or [])
     calls = getattr(messages[-1], "tool_calls", None) or []
 
+    done: list[str] = []
+
     def run_one(call: dict) -> tuple[object, list]:
         name = call.get("name", "")
         args = call.get("args") or {}
+        if name == "Handoff":
+            # The host has no such tool. A valid call is the handoff's result;
+            # a bad one is an error the model can correct on the next round.
+            try:
+                got = Handoff.model_validate(args)
+            except ValidationError:
+                return "error: Handoff 的 status 只能是 saved、updated 或 failed", []
+            text = got.status if not got.summary.strip() else (
+                got.status + "\n" + got.summary.strip())
+            done.append(text)
+            return text, []
         if name == diagnoser.DIAGNOSE_TEMPLATE_NAME:
             # The shot this diagnosis takes is the one a re-cut is checked
             # against, so it has to stay in the scripter's messages.
@@ -628,10 +675,13 @@ def _apply_scripter_tools(state: dict) -> dict:
         raises before reaching this, which is right: the handoff never finished.
         """
         out = run_one(call)
+        text = str(out[0])
+        failed = text.startswith("error:")
         _CALLS.append({
             "name": call.get("name", ""),
             "args": call.get("args") or {},
-            "failed": str(out[0]).startswith("error:"),
+            "failed": failed,
+            "error": text[:150] if failed else "",
         })
         return out
 
@@ -640,24 +690,32 @@ def _apply_scripter_tools(state: dict) -> dict:
         "messages": session.demote_pictures(messages + results + pictures),
         "tool_rounds": state.get("tool_rounds", 0) + 1,
     }
+    if done:
+        out["reply"] = done[-1]
+        out["finished"] = True
     if interrupted:
         out["interrupted"] = True
     return out
 
 
 def _route_after_scripter_tools(state: dict) -> str:
-    if state.get("interrupted"):
+    if state.get("interrupted") or state.get("finished"):
         return "scripter_commit"
     return "scripter_invoke"
 
 
 def _scripter_commit(state: dict) -> dict:
-    """Keep the handoff only when the scripter's model call succeeded."""
+    """Keep the rounds that finished. A handoff that died before any did not."""
+    import graph
+    own = session.own_since(state.get("messages") or [], state.get("turn_mark"))
     if state.get("error"):
+        kept = memorier._paired(own)
+        if kept:
+            session.append_scripter_turn(
+                state.get("text", ""),
+                kept + [AIMessage(content=graph.stopped_note(state["error"]))])
         return {}
-    session.append_scripter_turn(
-        state.get("text", ""),
-        session.own_since(state.get("messages") or [], state.get("turn_mark")))
+    session.append_scripter_turn(state.get("text", ""), own)
     return {}
 
 

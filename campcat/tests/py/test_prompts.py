@@ -21,6 +21,9 @@ def test_scripter_prompt_keeps_the_cheatsheet():
     text = scripter.scripter_prompt()
     assert "wait_until" in text
     assert "saved" in text
+    assert "Handoff" in text
+    assert "之前交接的记录只作参考" in text
+    assert "只看最后这份 brief" in text
     # The graph half: the workflow that builds one, and the language it uses.
     assert "save_anchor" in text
     assert "golden.md" in text
@@ -156,6 +159,8 @@ def test_ordinary_prompt_still_offers_the_whole_device():
     text = operator.operator_prompt()
     assert text.startswith(operator.OPERATOR_PERSONA)
     assert operator.SOLO_PERSONA not in text
+    assert "历史里还没有脚本列表时，先调 `list_scripts`" in text
+    assert "不要为了这件事再截一张图" in text
 
 
 def test_every_prompt_that_proposes_a_region_shares_the_rules():

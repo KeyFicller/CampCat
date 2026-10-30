@@ -26,6 +26,17 @@ def test_a_result_whose_question_was_cut_is_dropped():
     assert [type(m) for m in kept] == [HumanMessage, AIMessage]
 
 
+def test_a_trailing_call_with_no_result_is_dropped():
+    kept = memorier._paired([
+        _ask("a"),
+        ToolMessage(content="ok", tool_call_id="a"),
+        _ask("b"),
+    ])
+
+    assert [type(m) for m in kept] == [AIMessage, ToolMessage]
+    assert kept[1].tool_call_id == "a"
+
+
 def test_a_result_with_its_question_above_it_stays():
     kept = memorier._without_orphan_tools([
         _ask("a"),

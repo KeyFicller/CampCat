@@ -9,7 +9,7 @@ import graph
 import models
 import session
 import tools
-from langchain_core.messages import AIMessage, ToolMessage
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
 # 8x8 red PNG. A fake payload makes the model's message normalizer hang.
 _PNG = (
@@ -67,6 +67,38 @@ def test_handoff_runs_scripter_tools_and_returns_text(monkeypatch, scripted):
         session.content_text(m.content) for m in session.scripter_history())
 
 
+def test_a_handoff_tool_is_the_return(monkeypatch, scripted):
+    calls, text, _ = _drive(monkeypatch, scripted, [
+        AIMessage(content="", tool_calls=[
+            _call("author_script", {"goal": "签到"}, "a")]),
+        AIMessage(content="", tool_calls=[_call("save_script", {}, "s")]),
+        AIMessage(content="", tool_calls=[_call(
+            "Handoff", {"status": "saved", "summary": "写好了签到"}, "h")]),
+        AIMessage(content="Done."),
+    ])
+
+    assert calls == ["list_scripts", "save_script"]
+    assert _tool_messages()[0].content == "saved\n写好了签到"
+    assert "Done." in text
+    assert "写好了签到" not in text
+
+
+def test_a_bad_handoff_does_not_finish(monkeypatch, scripted):
+    calls, text, _ = _drive(monkeypatch, scripted, [
+        AIMessage(content="", tool_calls=[
+            _call("author_script", {"goal": "签到"}, "a")]),
+        AIMessage(content="", tool_calls=[_call(
+            "Handoff", {"status": "nope", "summary": "x"}, "h")]),
+        AIMessage(content="saved anyway"),
+        AIMessage(content="Done."),
+    ])
+
+    assert calls == ["list_scripts"]
+    assert "Handoff" not in calls
+    assert _tool_messages()[0].content == "saved anyway"
+    assert "Done." in text
+
+
 def test_handoff_carries_the_operator_steps(monkeypatch, scripted):
     _drive(monkeypatch, scripted, [
         AIMessage(content="", tool_calls=[
@@ -115,6 +147,34 @@ def test_same_batch_keeps_tool_message_order(monkeypatch, scripted):
     kept = _tool_messages()
     assert [m.tool_call_id for m in kept] == ["t", "a"]
     assert [m.content for m in kept] == ["tap ok", "saved x"]
+
+
+def test_a_scripter_error_keeps_the_rounds_that_finished(monkeypatch, scripted):
+    session.reset()
+    made = {"n": 0}
+
+    def build(**_):
+        made["n"] += 1
+        if made["n"] == 1:
+            return scripted([AIMessage(content="", tool_calls=[
+                _call("author_script", {"goal": "签到"}, "a")])])
+        if made["n"] == 2:
+            return scripted([AIMessage(content="", tool_calls=[
+                _call("save_script", {}, "s")])])
+        if made["n"] == 3:
+            raise RuntimeError("boom")
+        return scripted([AIMessage(content="Done.")])
+
+    monkeypatch.setattr(tools, "call_cpp", lambda name, args: {"ok": True, "text": "ok"})
+    monkeypatch.setattr(models, "build_chat_model", build)
+    out = {}
+    list(graph.stream_turn({"text": "write it", "tools": [], "memory": ""}, out))
+
+    kept = session.scripter_history()
+    assert [type(m) for m in kept] == [
+        HumanMessage, AIMessage, ToolMessage, AIMessage]
+    assert kept[2].tool_call_id == "s"
+    assert "boom" in kept[-1].content
 
 
 def test_scripter_model_error_stays_in_the_tool_result(monkeypatch, scripted):
@@ -247,6 +307,33 @@ def test_empty_goal_skips_the_model(monkeypatch, scripted):
     assert _tool_messages()[0].content == "error: goal 为空"
 
 
+def test_a_failed_tool_is_recorded_with_its_error(monkeypatch, scripted):
+    import agent.scripter as scripter
+
+    session.reset()
+
+    def fake_call_cpp(name, args):
+        if name == "save_script":
+            return {"ok": False, "error": "name exists"}
+        return {"ok": True, "text": name + " ok"}
+
+    monkeypatch.setattr(tools, "call_cpp", fake_call_cpp)
+    model = scripted([
+        AIMessage(content="", tool_calls=[
+            _call("author_script", {"goal": "签到"}, "a")]),
+        AIMessage(content="", tool_calls=[_call("save_script", {}, "s")]),
+        AIMessage(content="failed no"),
+        AIMessage(content="Done."),
+    ])
+    monkeypatch.setattr(models, "build_chat_model", lambda **_: model)
+    out = {}
+    list(graph.stream_turn({"text": "write it", "tools": [], "memory": ""}, out))
+
+    failed = [c for c in scripter.calls() if c["name"] == "save_script"]
+    assert failed[0]["failed"] is True
+    assert failed[0]["error"] == "error: name exists"
+
+
 def test_scripter_reply_strips_dsml(monkeypatch, scripted):
     _drive(monkeypatch, scripted, [
         AIMessage(content="", tool_calls=[
@@ -299,8 +386,13 @@ def test_the_note_reaches_the_next_scripter_prompt(monkeypatch, scripted):
     ])
 
     built = scripter._scripter_build({"text": "brief"})
+    session.add_lessons("另一条。")
+    again = scripter._scripter_build({"text": "brief"})
 
-    assert "别再看同一帧。" in built["messages"][0].content
+    assert built["messages"][0].content == again["messages"][0].content
+    assert "别再看同一帧。" not in built["messages"][0].content
+    assert "别再看同一帧。" in built["messages"][-1].content
+    assert "另一条。" in again["messages"][-1].content
 
 
 def test_scripter_silent_after_tools(monkeypatch, scripted):

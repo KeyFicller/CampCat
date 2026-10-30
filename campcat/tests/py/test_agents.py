@@ -44,16 +44,17 @@ def test_operator_and_scripter_split_the_host_table():
 
     assert _names(operator_table) == OPERATOR_NAMES
     assert "view_template" not in _names(operator_table)
-    assert len(scripter_table) == 16
+    assert len(scripter_table) == 17
     assert _names(scripter_table) == [
         name for name in HOST_NAMES
         if name in scripter.SCRIPTER_ONLY | scripter.SHARED
-    ] + ["diagnose_template"]
+    ] + ["diagnose_template", "Handoff"]
     assert set(_names(scripter_table)) == (
-        scripter.SCRIPTER_ONLY | scripter.SHARED | {"diagnose_template"})
+        scripter.SCRIPTER_ONLY | scripter.SHARED | {"diagnose_template", "Handoff"})
     assert "diagnose_template" not in _names(operator_table)
+    assert "Handoff" not in _names(operator_table)
     covered = (set(_names(operator_table)) | set(_names(scripter_table))) - {
-        "author_script", "diagnose_template"}
+        "author_script", "diagnose_template", "Handoff"}
     assert covered == set(HOST_NAMES) - scripter.HIDDEN
     assert "mark" not in _names(operator_table)
     assert "mark" not in _names(scripter_table)
@@ -64,7 +65,7 @@ def test_operator_and_scripter_split_the_host_table():
 def test_unknown_tool_stays_with_the_operator():
     host = [_tool("future_tool")]
     assert _names(operator.operator_tools(host)) == ["future_tool", "author_script"]
-    assert _names(scripter.scripter_tools(host)) == ["diagnose_template"]
+    assert _names(scripter.scripter_tools(host)) == ["diagnose_template", "Handoff"]
 
 
 def test_operator_only_keeps_what_a_sample_needs():
@@ -83,7 +84,8 @@ def test_nameless_tool_stays_with_the_operator():
     operator_table = operator.operator_tools([nameless])
     assert operator_table[0] is nameless
     assert _names(operator_table) == ["author_script"]
-    assert _names(scripter.scripter_tools([nameless])) == ["diagnose_template"]
+    assert _names(scripter.scripter_tools([nameless])) == [
+        "diagnose_template", "Handoff"]
 
 
 def test_author_script_schema_comes_from_the_tool():

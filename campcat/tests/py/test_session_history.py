@@ -5,6 +5,8 @@ first.
 """
 
 import agent.memorier as memorier
+import agent.scripter as scripter
+import graph
 import models
 import session
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
@@ -94,6 +96,67 @@ def test_memorize_ignores_scripter_history(monkeypatch):
     assert notes == "## Preferences\nkept"
     assert "operator said hello" in seen["text"]
     assert "scripter secret handoff" not in seen["text"]
+
+
+def test_a_failed_turn_keeps_the_rounds_that_finished():
+    session.reset()
+    mark = session.new_mark("turn")
+    graph.commit({
+        "text": "go",
+        "turn_mark": mark,
+        "error": "provider 500",
+        "messages": [
+            HumanMessage(content="go", id=mark),
+            AIMessage(content="", tool_calls=[
+                {"name": "tap", "args": {}, "id": "c1"}]),
+            ToolMessage(content="tapped", tool_call_id="c1"),
+            AIMessage(content="", tool_calls=[
+                {"name": "screenshot", "args": {}, "id": "c2"}]),
+        ],
+    })
+
+    kept = session.history()
+    assert [type(m) for m in kept] == [
+        HumanMessage, AIMessage, ToolMessage, AIMessage]
+    assert kept[2].content == "tapped"
+    assert kept[2].tool_call_id == kept[1].tool_calls[0]["id"] == "c1"
+    assert "provider 500" in kept[-1].content
+    assert "c2" not in [
+        c["id"] for m in kept for c in (getattr(m, "tool_calls", None) or [])]
+
+
+def test_a_failure_before_any_round_records_nothing():
+    session.reset()
+    mark = session.new_mark("turn")
+    graph.commit({
+        "text": "go",
+        "turn_mark": mark,
+        "error": "400",
+        "messages": [HumanMessage(content="go", id=mark)],
+    })
+
+    assert session.history() == []
+
+
+def test_a_request_drops_an_orphan_tool_result():
+    session.reset()
+    session.append_turn("hi", [
+        ToolMessage(content="stray", tool_call_id="nope"),
+        AIMessage(content="ok"),
+    ])
+    built = graph.build_messages({"text": "next", "memory": ""})
+
+    assert "stray" not in [
+        session.content_text(m.content) for m in built["messages"]]
+
+    session.reset()
+    session.append_scripter_turn("old", [
+        ToolMessage(content="stray", tool_call_id="nope"),
+    ])
+    built = scripter._scripter_build({"text": "brief"})
+
+    assert "stray" not in [
+        session.content_text(m.content) for m in built["messages"]]
 
 
 def test_append_scripter_turn_drops_image_bytes():

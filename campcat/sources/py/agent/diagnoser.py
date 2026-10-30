@@ -7,9 +7,10 @@ stay in this call; only the screenshot it takes is registered as a frame.
 from __future__ import annotations
 
 import re
-from typing import TypedDict
+from typing import Literal, TypedDict
 
 from langchain_core.messages import HumanMessage, SystemMessage
+from pydantic import BaseModel, Field, ValidationError
 from langgraph.graph import END, StateGraph
 
 import models
@@ -61,21 +62,24 @@ DIAGNOSE_TEMPLATE = {
 JUDGE_PROMPT = (
     "一个脚本因为某个模板没匹配上而失败了。你看到三张图：它要找的模板、"
     "匹配器最看好的那个位置上的屏幕（与模板同尺度），以及整屏。"
-    "判断是哪一边错了，严格按下面的格式回答：\n"
-    "verdict: crop_issue | wrong_screen | inconclusive\n"
-    "reason: 你在模板和屏幕上分别看到了什么，一到两句\n"
-    "fix: 一句话说明该改什么\n"
-    "verdict、reason、fix 这三个键名，以及 crop_issue / wrong_screen / "
-    "inconclusive 三个取值，都要照抄英文原样，不要翻译。\n"
-    "crop_issue：这个控件就在这个屏幕上，但模板里还框进了背景或旁边的元素，"
-    "或者边没贴准。wrong_screen：这个屏幕上根本没有这个控件。"
-    "inconclusive：你判断不了。圆形模板的四个角是透明的，不算背景。"
+    "调用 Diagnosis 回答。圆形模板的四个角是透明的，不算背景。"
 )
+
+# Bound by hand so `streamed` can still stop between chunks.
+class Diagnosis(BaseModel):
+    """模板没匹配上的原因。"""
+
+    verdict: Literal["crop_issue", "wrong_screen", "inconclusive"] = Field(
+        description=(
+            "crop_issue：控件就在这个屏幕上，但模板框进了背景或旁边的元素，"
+            "或者边没贴准。wrong_screen：这个屏幕上根本没有这个控件。"
+            "inconclusive：判断不了。取值照抄英文。"
+        ))
+    reason: str = Field(description="在模板和屏幕上分别看到了什么，一到两句。")
+    fix: str = Field(description="一句话说明该改什么。")
 
 _MATCH = re.compile(
     r"\(best=([\d.]+) box=(-?\d+),(-?\d+),(\d+),(\d+) threshold=([\d.]+)\)")
-_VERDICT_LINE = re.compile(
-    r"verdict:\s*(crop_issue|wrong_screen|inconclusive)\s*$")
 
 
 class DiagnoseState(TypedDict, total=False):
@@ -110,21 +114,20 @@ def parse_match(error: str, template: str) -> dict | None:
     }
 
 
-def parse_diagnosis(text: str) -> tuple[str, str, str]:
-    """`(verdict, reason, fix)`. A bad first line is inconclusive, text kept."""
-    lines = text.splitlines()
-    first = lines[0].strip() if lines else ""
-    found = _VERDICT_LINE.match(first)
-    if found is None:
-        return "inconclusive", text, ""
-    reason = ""
-    fix = ""
-    for line in lines[1:]:
-        if line.startswith("reason:"):
-            reason = line[len("reason:"):].strip()
-        elif line.startswith("fix:"):
-            fix = line[len("fix:"):].strip()
-    return found.group(1), reason, fix
+def _from_reply(reply) -> dict:
+    """The Diagnosis call, or inconclusive with whatever text came back."""
+    raw = session.content_text(getattr(reply, "content", "") or "")
+    calls = getattr(reply, "tool_calls", None) or []
+    if calls:
+        args = calls[0].get("args") or {}
+        try:
+            got = Diagnosis.model_validate(args)
+        except ValidationError:
+            if not raw:
+                raw = str(args)
+        else:
+            return {"verdict": got.verdict, "reason": got.reason, "fix": got.fix}
+    return {"verdict": "inconclusive", "reason": raw, "fix": ""}
 
 
 def _host_fail(reply: dict, shot: int = 0) -> dict:
@@ -189,7 +192,9 @@ def diagnose_judge(state: DiagnoseState) -> dict:
             "image_url": {"url": f"data:{session.MIME};base64,{image}"},
         })
     try:
-        reply = models.streamed(models.build_chat_model(), [
+        model = models.build_chat_model().bind_tools(
+            [Diagnosis], tool_choice="any")
+        reply = models.streamed(model, [
             SystemMessage(content=JUDGE_PROMPT),
             HumanMessage(content=content),
         ], subagent.chunk_sink)
@@ -201,15 +206,17 @@ def diagnose_judge(state: DiagnoseState) -> dict:
             "reason": "模型出错：" + str(exc),
             "fix": "",
         }
-    raw = reply.content if isinstance(reply.content, str) else str(reply.content)
-    return {"reason": raw}
+    return _from_reply(reply)
 
 
 def diagnose_finish(state: DiagnoseState) -> dict:
     if state.get("verdict"):
         return {}
-    verdict, reason, fix = parse_diagnosis(state.get("reason") or "")
-    return {"verdict": verdict, "reason": reason, "fix": fix}
+    return {
+        "verdict": "inconclusive",
+        "reason": state.get("reason") or "",
+        "fix": "",
+    }
 
 
 def _after_parse(state: DiagnoseState) -> str:

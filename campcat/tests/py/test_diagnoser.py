@@ -23,6 +23,27 @@ _CROP = (
 )
 
 
+def _diagnosis(verdict="crop_issue", reason="r", fix="f"):
+    return AIMessage(content="", tool_calls=[{
+        "name": "Diagnosis",
+        "args": {"verdict": verdict, "reason": reason, "fix": fix},
+        "id": "dx",
+    }])
+
+
+def test_only_the_three_verdicts_fit():
+    got = diagnoser.Diagnosis.model_validate(
+        {"verdict": "crop_issue", "reason": "边没贴", "fix": "收紧"})
+    assert (got.verdict, got.reason, got.fix) == ("crop_issue", "边没贴", "收紧")
+    try:
+        diagnoser.Diagnosis.model_validate(
+            {"verdict": "maybe", "reason": "r", "fix": "f"})
+    except Exception as exc:
+        assert type(exc).__name__ == "ValidationError"
+    else:
+        raise AssertionError("maybe was accepted")
+
+
 def _png(w, h):
     buf = io.BytesIO()
     Image.new("RGB", (w, h), (30, 30, 30)).save(buf, "PNG")
@@ -59,8 +80,7 @@ def setup_function():
 
 
 def _run(monkeypatch, error, template="btn", bundle="b", screen=None,
-         verdict="verdict: crop_issue\nreason: r\nfix: f", fail=False,
-         template_error=None, interrupt_on=None):
+         reply=None, fail=False, template_error=None, interrupt_on=None):
     calls = []
     big = screen if screen is not None else _PNG
 
@@ -76,7 +96,7 @@ def _run(monkeypatch, error, template="btn", bundle="b", screen=None,
         return {"ok": True, "text": "ok", "image_b64": image}
 
     monkeypatch.setattr(tools, "call_cpp", fake)
-    model = _Seeing(ScriptedModel(responses=[AIMessage(content=verdict)]), fail)
+    model = _Seeing(ScriptedModel(responses=[reply or _diagnosis()]), fail)
     monkeypatch.setattr(models, "build_chat_model", lambda **_: model)
     text = diagnoser.run_diagnoser({
         "bundle": bundle, "template": template, "error": error, "expect": "the button",
@@ -140,7 +160,7 @@ def test_bad_model_output_is_inconclusive_with_raw_text(monkeypatch):
     _, _, text = _run(
         monkeypatch,
         "tap: image not found /lib/b/btn.png (best=0.612 box=10,20,30,40 threshold=0.800)",
-        verdict="maybe the crop",
+        reply=AIMessage(content="maybe the crop"),
     )
     assert text.startswith("verdict: inconclusive\n")
     assert "maybe the crop" in text
@@ -175,7 +195,7 @@ def test_scripter_intercepts_diagnose_and_keeps_host_clean(monkeypatch):
             },
             "id": "d",
         }]),
-        AIMessage(content="verdict: crop_issue\nreason: r\nfix: f"),
+        _diagnosis(),
         AIMessage(content="failed: the cut is loose"),
         AIMessage(content="Done."),
     ]))

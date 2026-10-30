@@ -7,10 +7,11 @@ screenshots -- lives in `session.py`.
 
 from __future__ import annotations
 
+import json
 import sys
 from typing import Iterator, TypedDict
 
-from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langgraph.graph import END, StateGraph
 
 import agent.memorier as memorier
@@ -29,6 +30,13 @@ import tools
 # rounds plus their model latencies, or a long turn dies on "sidecar timed out"
 # instead. Both caps move together.
 MAX_MODEL_ROUNDS = 1000
+# The third identical failure in a row is not a retry the model will invent
+# its way out of. Two are enough to report; the next one is refused.
+_FAIL_LIMIT = 2
+_FUSE_TEXT = "error: 同一调用已连续失败 3 次，停止重试，如实报告"
+# A module list, not a context var: LangGraph runs the tool node in a copy of
+# the context, so a var set while building the turn never reaches the call.
+_FAIL_STACK: list[dict] = [{}]
 
 
 def rounds_of(raw: object) -> int:
@@ -61,6 +69,7 @@ class TurnState(TypedDict, total=False):
     operator_only: bool  # request: operator alone, screenshot and tap only
     error: str
     interrupted: bool  # the user sent a new message; commit, then stop
+    finished: bool  # scripter: a Handoff call ended this handoff
 
 
 def precheck(state: TurnState) -> dict:
@@ -70,6 +79,7 @@ def precheck(state: TurnState) -> dict:
     never turns into a paid round trip.
     """
     session.start_turn()
+    reset_fail_counts()
     text = (state.get("text") or "").strip()
     if not text:
         return {"error": "请求为空"}
@@ -92,7 +102,7 @@ def build_messages(state: TurnState) -> dict:
             + memorier.memory_block(state.get("memory") or "")
         )
     ]
-    messages.extend(session.history())
+    messages.extend(memorier._paired(session.history()))
     frame = session.latest_frame()
     if frame is not None:
         messages.append(frame)
@@ -169,6 +179,10 @@ def run_subgraph(compiled, state: dict, callbacks=None) -> dict:
     to its own span. Otherwise the parent's are copied. The whole config joins
     the two runs, and a picture coming back then stalls the parent's stream.
     Outside a graph there is no config, and that is fine.
+
+    The context var is cleared for the call. LangGraph merges it into the
+    config it was given, so the parent's handler and this span's handler both
+    recorded every generation.
     """
     if callbacks is None:
         from langgraph.config import get_config
@@ -176,9 +190,14 @@ def run_subgraph(compiled, state: dict, callbacks=None) -> dict:
             callbacks = get_config().get("callbacks")
         except Exception:  # noqa: BLE001 - outside a graph there is no config
             callbacks = None
-    if callbacks:
+    if not callbacks:
+        return compiled.invoke(state)
+    from langchain_core.runnables.config import var_child_runnable_config
+    token = var_child_runnable_config.set(None)
+    try:
         return compiled.invoke(state, {"callbacks": callbacks})
-    return compiled.invoke(state)
+    finally:
+        var_child_runnable_config.reset(token)
 
 
 def _host_result(name: str, args: dict) -> tuple[object, list]:
@@ -218,20 +237,62 @@ def _interrupted_from(calls: list, start: int) -> list:
     ]
 
 
+def reset_fail_counts() -> None:
+    """Drop every streak. One operator turn starts clean."""
+    _FAIL_STACK[:] = [{}]
+
+
+def begin_fail_counts() -> None:
+    """A fresh streak for one handoff, so it does not inherit the operator's."""
+    _FAIL_STACK.append({})
+
+
+def end_fail_counts() -> None:
+    if len(_FAIL_STACK) > 1:
+        _FAIL_STACK.pop()
+
+
+def _fail_counts() -> dict:
+    return _FAIL_STACK[-1]
+
+
+def _fail_key(call: dict) -> str:
+    name = str(call.get("name") or "")
+    args = json.dumps(call.get("args") or {}, sort_keys=True,
+                      ensure_ascii=False, default=str)
+    return name + "\0" + args
+
+
 def _run_calls(calls: list, run_one) -> tuple[list, list, bool]:
     """Run `calls` until one is interrupted.
 
     `run_one(call)` returns `(content, pictures)` or raises `TurnInterrupted`.
     An interrupt fills that call and every call after it, and stops the batch.
+    The same call with the same error, twice in a row, is not run a third time.
     """
     results: list = []
     pictures: list = []
+    counts = _fail_counts()
     for index, call in enumerate(calls):
-        try:
-            content, pics = run_one(call)
-        except tools.TurnInterrupted:
-            results.extend(_interrupted_from(calls, index))
-            return results, pictures, True
+        key = _fail_key(call)
+        seen = counts.get(key)
+        if seen is not None and seen[1] >= _FAIL_LIMIT:
+            content, pics = _FUSE_TEXT, []
+        else:
+            try:
+                content, pics = run_one(call)
+            except tools.TurnInterrupted:
+                results.extend(_interrupted_from(calls, index))
+                return results, pictures, True
+            text = content if isinstance(content, str) else ""
+            if text.startswith("error:"):
+                prefix = text[:80]
+                if seen is not None and seen[0] == prefix:
+                    counts[key] = (prefix, seen[1] + 1)
+                else:
+                    counts[key] = (prefix, 1)
+            elif key in counts:
+                counts.pop(key, None)
         results.append(ToolMessage(content=content, tool_call_id=call.get("id", "")))
         pictures.extend(pics)
     return results, pictures, False
@@ -300,7 +361,7 @@ def run_tools(state: TurnState) -> dict:
                 head, body = reflector.reflect(
                     scripter.calls(), state.get("tool_rounds", 0), content)
                 session.add_lessons(body)
-                run.settle(content)
+                run.settle(content, ok=not content.startswith(("failed", "error:")))
                 content += reflector.directive(head, body)
             pics: list = []
             if session._LATEST_NUM != before:
@@ -337,18 +398,32 @@ def route_after_invoke(state: TurnState) -> str:
     return "run_tools"
 
 
-def commit(state: TurnState) -> dict:
-    """Record the turn on success.
+def stopped_note(error: object) -> str:
+    """One line saying why a turn stopped, short enough to keep."""
+    reason = " ".join(str(error).split())
+    if len(reason) > 200:
+        reason = reason[:199] + "…"
+    return "上一轮因 " + reason + " 中断"
 
-    A failed turn is deliberately not recorded, so retrying cannot pollute the
-    context with a broken exchange. Nothing is trimmed here: `compact` owns
+
+def commit(state: TurnState) -> dict:
+    """Record the turn.
+
+    A failed turn still keeps the rounds whose calls have results: the device
+    already moved, and dropping those leaves the next turn guessing where it
+    is. The round that raised is not among them. A turn that failed before any
+    round finished is not recorded. Nothing is trimmed here: `compact` owns
     that, and only once the budget is reached.
     """
+    own = session.own_since(state.get("messages") or [], state.get("turn_mark"))
     if state.get("error"):
+        kept = memorier._paired(own)
+        if kept:
+            session.append_turn(
+                state.get("text", ""),
+                kept + [AIMessage(content=stopped_note(state["error"]))])
         return {"turns": session.size()}
-    session.append_turn(state.get("text", ""),
-                        session.own_since(state.get("messages") or [],
-                                          state.get("turn_mark")))
+    session.append_turn(state.get("text", ""), own)
     return {"turns": session.size()}
 
 

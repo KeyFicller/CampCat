@@ -850,8 +850,7 @@ constexpr int k_default_swipe_ms = 300;
 [[= js::image_result]][[= js::doc{
     .text = js::str(
         "新截一张设备屏幕的图并给它编号。脚本停下来提问时，用它看问题说的是"
-        "哪个界面。想确认设备停在哪个界面，有 locate 就先用它：一行就回答，"
-        "不出图。要看更早的帧，不要用它——view_shot 会在不替换当前屏幕的前提"
+        "哪个界面。要看更早的帧，不要用它——view_shot 会在不替换当前屏幕的前提"
         "下做到。")}]] std::string
     screenshot() {
     adb_api &adb = require_adb();
@@ -2372,7 +2371,8 @@ tool_reply dispatch(std::string_view _name, std::string_view _args_json) {
     // number behind for the next call to report as its own.
     g_last_shot = 0;
     if (g_ctx.adb_busy && g_ctx.adb_busy()) {
-        out.error = "adb busy: an automation cycle is running";
+        out.error = "adb busy: an automation cycle is running; "
+                    "stop calling device tools and tell the user";
         return out;
     }
     const nlohmann::json args =

@@ -45,6 +45,7 @@ from mcp import Client, types
 from mcp.client import ClientRequestContext
 from mcp.client.streamable_http import streamable_http_client
 
+import consult
 import models
 
 URL = os.environ.get("CAMPCAT_MCP_URL", "http://127.0.0.1:8787/mcp")
@@ -61,15 +62,6 @@ HIDDEN_FROM_MODEL = {"screenshot"}
 # own default is a 5-second read, and a timeout there surfaces as a bare
 # `CancelledError` from the transport's task group, not as `ReadTimeout`.
 TIMEOUT = httpx2.Timeout(30.0, read=600.0)
-
-# One question, one picture, one word -- the same bar the sidecar's `consult`
-# holds a script's `ask` to. A wrong guess picks a wrong branch.
-ASK_SYSTEM = (
-    "你回答关于一张 Android 截图的一个是/否问题。只看图片。"
-    "只回一个词，照抄英文原样：yes、no 或 unsure。"
-    "图片里显示的信息不足以判断时，回答 unsure；永远不要猜。"
-)
-
 
 def _refused(error: BaseException) -> bool:
     """A port nobody is listening on yet, however the transport wrapped it.
@@ -183,10 +175,10 @@ async def answer(
         if block.type == "image":
             content.insert(0, _picture(block))
     reply = await models.build_chat_model().ainvoke(
-        [SystemMessage(content=ASK_SYSTEM), HumanMessage(content=content)]
+        [SystemMessage(content=consult.SYSTEM), HumanMessage(content=content)]
     )
-    word = message_text(reply.content).strip().strip(".").lower()
-    if word not in ("yes", "no"):
+    word = consult.parse_answer(message_text(reply.content))
+    if not word:
         # A guess picks a branch the user may not want; a cancelled run says the
         # screen did not show enough, which is what happened.
         print(f"  ask: {params.message} -> unsure, cancelling", flush=True)

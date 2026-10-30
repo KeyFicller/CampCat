@@ -217,5 +217,36 @@ def test_a_handoff_reports_the_scripter(monkeypatch, scripted):
     assert ("tool", "scripter") in pairs
     assert ("tool_end", "scripter") in pairs
     assert pairs[-1] == ("end", "scripter")
+    assert events[-1]["ok"] is True
     assert "save_script" in " ".join(m.get("text", "") for m in events)
     assert subagent.current.get() is None
+
+
+def test_a_failed_handoff_ends_the_window_as_failed(monkeypatch, scripted):
+    import graph
+    import session
+
+    session.reset()
+    sent = []
+    monkeypatch.setattr(transport, "emit", sent.append)
+
+    def fake_read():
+        call = [m for m in sent if m["type"] == "tool_call"][-1]
+        return {"type": "tool_result", "call_id": call["call_id"],
+                "ok": True, "text": "ok"}
+
+    monkeypatch.setattr(transport, "read_message", fake_read)
+    model = scripted([
+        AIMessage(content="", tool_calls=[{
+            "name": "author_script", "args": {"goal": "签到"}, "id": "a"}]),
+        AIMessage(content="failed no"),
+        AIMessage(content="Done."),
+    ])
+    monkeypatch.setattr(models, "build_chat_model", lambda **_: model)
+    out = {}
+    list(graph.stream_turn({"text": "write it", "tools": [], "memory": ""}, out))
+
+    end = [m for m in _events(sent)
+           if m["event"] == "end" and m["agent"] == "scripter"]
+    assert end[-1]["ok"] is False
+    assert end[-1]["text"].startswith("failed")

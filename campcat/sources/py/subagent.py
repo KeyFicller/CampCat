@@ -47,9 +47,11 @@ class _Run:
 
     def __init__(self) -> None:
         self.summary = ""
+        self.ok = True
 
-    def settle(self, text: object) -> None:
+    def settle(self, text: object, *, ok: bool = True) -> None:
         self.summary = line(text)
+        self.ok = ok
 
 
 @contextlib.contextmanager
@@ -70,7 +72,7 @@ def working(agent: str, goal: object = "") -> Iterator[_Run]:
         run.summary = line(f"{type(exc).__name__}: {exc}")
         raise
     finally:
-        event("end", agent=agent, ok=ok, text=run.summary)
+        event("end", agent=agent, ok=ok and run.ok, text=run.summary)
         current.reset(token)
 
 

@@ -2,6 +2,7 @@
 
 import base64
 import io
+import json
 import threading
 import time
 
@@ -30,16 +31,49 @@ def test_a_diamond_is_not_read_as_a_circle():
     assert region_review._inside(region, "diamond", (100, 80))
     assert not region_review._inside(
         {"cx": 90, "cy": 40, "rx": 10, "ry": 5}, "diamond", (100, 80))
-    verdict, got, _, shape = region_review.parse_review(
-        'verdict: adjust\n'
-        'diamond: {"cx":50,"cy":40,"rx":8,"ry":5}\n'
-        "reason: tight",
+    verdict, got, _, shape, _ = region_review._from_review(
+        _review(verdict="adjust",
+                diamond={"cx": 50, "cy": 40, "rx": 8, "ry": 5},
+                reason="tight"),
         "diamond",
         kind="template",
     )
     assert verdict == "adjust"
     assert shape == "diamond"
     assert got == {"cx": 50, "cy": 40, "rx": 8, "ry": 5}
+
+
+def _review(**args):
+    return AIMessage(content="", tool_calls=[{
+        "name": "Review", "args": args, "id": "rv"}])
+
+
+def _pick(number, reason=""):
+    return AIMessage(content="", tool_calls=[{
+        "name": "Pick", "args": {"pick": number, "reason": reason}, "id": "pk"}])
+
+
+def test_a_review_is_the_tool_call_and_prose_is_not():
+    verdict, got, reason, shape, score = region_review._from_review(
+        _review(verdict="adjust", box=dict(BOX), reason="tight"), "box")
+    assert (verdict, got, reason, shape) == ("adjust", BOX, "tight", "box")
+    assert score == 1.0
+    _, _, _, _, score = region_review._from_review(
+        _review(verdict="ok", confidence=1.5, reason="fine"), "box")
+    assert score == 1.0
+    skipped, *_ = region_review._from_review(
+        _review(verdict="adjust", box=dict(BOX),
+                circle={"cx": 1, "cy": 1, "r": 1}, reason="both"),
+        "box", kind="template")
+    assert skipped == "skip"
+    prose, _, reason, _, _ = region_review._from_review(
+        AIMessage(content="我先看了裁切。\nverdict: adjust\n"), "box")
+    assert prose == "skip"
+    assert "我先看了裁切" in reason
+    assert region_review._from_pick(_pick(2, "second"), 3) == (2, "second")
+    assert region_review._from_pick(_pick(9), 3)[0] is None
+    assert region_review._from_pick(
+        AIMessage(content="先看了三个。\npick: 2\n"), 3)[0] is None
 
 
 def _png(w, h):
@@ -135,6 +169,42 @@ def _drive(monkeypatch, responses, args, name="tap", host=None, images=None,
 
 
 def _say(text):
+    """Line-protocol fixtures become the Review or Pick call the judge reads."""
+    args = {}
+    pick = None
+    pick_reason = ""
+    saw_verdict = False
+    for line in text.splitlines():
+        line = line.strip()
+        if line.startswith("verdict:"):
+            args["verdict"] = line.split(":", 1)[1].strip()
+            saw_verdict = True
+        elif line.startswith("confidence:"):
+            args["confidence"] = line.split(":", 1)[1].strip()
+        elif line.startswith("reason:"):
+            value = line.split(":", 1)[1].strip()
+            if saw_verdict:
+                args["reason"] = value
+            else:
+                pick_reason = value
+        elif line.startswith(("box:", "circle:", "diamond:")):
+            key, raw = line.split(":", 1)
+            args[key] = json.loads(raw)
+        elif line.lower().startswith("pick:"):
+            pick = line.split(":", 1)[1].strip()
+    if saw_verdict:
+        args.setdefault("reason", "")
+        return AIMessage(content="", tool_calls=[{
+            "name": "Review", "args": args, "id": "rv"}])
+    if pick is not None:
+        try:
+            number = int(pick)
+        except ValueError:
+            return AIMessage(content=text)
+        return AIMessage(content="", tool_calls=[{
+            "name": "Pick",
+            "args": {"pick": number, "reason": pick_reason},
+            "id": "pk"}])
     return AIMessage(content=text)
 
 
@@ -162,7 +232,6 @@ def test_adjust_then_ok_sends_the_new_region_and_says_so(monkeypatch):
         _call("tap", {"region": dict(BOX), "expect": "btn"}),
         _say('verdict: adjust\nbox: {"x":2,"y":2,"w":3,"h":3}\nreason: tight'),
         _say("verdict: ok\nreason: fine"),
-        _say("pick: 2\nreason: tighter"),
         _say("Done."),
     ], None)
     assert calls[-1] == ("tap", {"region": {"x": 2, "y": 2, "w": 3, "h": 3}})
@@ -621,7 +690,6 @@ def test_a_low_confidence_ok_gets_one_more_look(monkeypatch):
         _say('verdict: adjust\nbox: {"x":2,"y":2,"w":3,"h":3}\n'
              "confidence: 0.7\nreason: tighter"),
         _say("verdict: ok\nconfidence: 0.9\nreason: fine"),
-        _say("pick: 1\nreason: the first"),
         _say("Done."),
     ], None)
     texts = [review.content[0]["text"] for review in _reviews(model)]

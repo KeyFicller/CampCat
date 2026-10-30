@@ -84,6 +84,31 @@ def test_a_long_argument_is_left_out_of_the_hint():
     assert "kind:" not in line
 
 
+def test_two_long_repeats_of_one_tool_stay_apart():
+    body_a = "x" * 40
+    body_b = "y" * 40
+    line = reflector.summary(reflector.metrics([
+        _call("save_anchor", {"golden": body_a}),
+        _call("save_anchor", {"golden": body_a}),
+        _call("save_anchor", {"golden": body_b}),
+        _call("save_anchor", {"golden": body_b}),
+    ], operator_rounds=0))
+
+    assert body_a not in line and body_b not in line
+    named = [part for part in line.split("，") if "save_anchor" in part]
+    assert len(named) == 2
+    assert named[0] != named[1]
+
+
+def test_a_failure_keeps_its_error_text():
+    text = reflector._trajectory([{
+        "name": "rename_script", "args": {"name": "old"}, "failed": True,
+        "error": "error: name exists",
+    }])
+
+    assert "error: name exists" in text
+
+
 def test_a_handoff_that_called_nothing_gets_no_note(monkeypatch):
     monkeypatch.setattr(models, "build_chat_model",
                         lambda **_: (_ for _ in ()).throw(AssertionError))
@@ -102,6 +127,34 @@ def test_the_head_is_the_numbers_and_the_body_is_the_lesson(
     assert head.startswith("这次交接：2 次调用")
     assert "我多看了两次同一帧。" in body
     assert "2 次调用" not in body
+
+
+def test_a_lessons_call_is_the_note():
+    answer = AIMessage(content="ignore", tool_calls=[{
+        "name": "Lessons",
+        "args": {"notes": ["先看清再裁。", "  "]},
+        "id": "n",
+    }])
+    assert reflector._notes_of(answer) == "先看清再裁。"
+    empty = AIMessage(content="still prose", tool_calls=[{
+        "name": "Lessons", "args": {"notes": []}, "id": "n"}])
+    assert reflector._notes_of(empty) == ""
+    assert reflector._notes_of(AIMessage(content="纯文字也算")) == "纯文字也算"
+
+
+def test_a_lessons_call_becomes_the_body(monkeypatch, scripted):
+    monkeypatch.setattr(models, "build_chat_model", lambda **_: scripted([
+        AIMessage(content="", tool_calls=[{
+            "name": "Lessons",
+            "args": {"notes": ["先看清再裁。"]},
+            "id": "n",
+        }])
+    ]))
+
+    head, body = _real_reflect([_call("view_shot")], 0, "done")
+
+    assert body == "先看清再裁。"
+    assert "这次交接" in head
 
 
 def test_the_body_is_capped(monkeypatch, scripted):

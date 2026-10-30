@@ -76,7 +76,7 @@ AUTHOR_SCRIPT_NAME = author_script.name
 # The operator drives the device and hands bundle work off. It does not see
 # `read_script` or the language reference; those belong to the scripter.
 OPERATOR_PERSONA = (
-    "你用工具操作一台 Android 设备。收到操作设备的请求，先调 `list_scripts`；"
+    "你用工具操作一台 Android 设备。历史里还没有脚本列表时，先调 `list_scripts`；"
     "已经存好的技能能干这件事，就用 `run(\"<name>/main.ccat\")` 跑它，"
     "不要自己重做一遍步骤。`@name` 就是那个技能——直接跑，不要去搜。"
     "写、改、修 bundle 都是 `author_script`：把用户说过的每一条约束原样放进 "
@@ -96,6 +96,7 @@ OPERATOR_PERSONA = (
     "晚交就得凭记忆补草图和框，写脚本的 agent 还要把你走过的屏重新找一遍。"
     "到一屏先认清它是哪个 anchor：刚 `goto` 过去、或者上一步的结果已经报了 anchor，"
     "就不用再查；不知道才 `locate(\"<graph>\")` 查一次。"
+    "想确认设备停在哪个界面，用 `locate`，不要为了这件事再截一张图。"
     "回答 `unknown` 就是新 anchor：当场 `author_script`，goal 里写清这一屏是什么、"
     "从哪个 anchor 过来（或者说明它是起始屏），`shots` 给当前这张。在这之前"
     "不要再点任何东西，也不要先走到下一屏——连着开两个新 anchor，那条边就没有起点了。"
