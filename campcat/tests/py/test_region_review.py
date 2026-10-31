@@ -74,6 +74,15 @@ def test_a_review_is_the_tool_call_and_prose_is_not():
     assert region_review._from_pick(_pick(9), 3)[0] is None
     assert region_review._from_pick(
         AIMessage(content="先看了三个。\npick: 2\n"), 3)[0] is None
+    verdict, got, reason, shape, score = region_review._from_review(
+        AIMessage(content=(
+            '{"verdict":"adjust","confidence":0.4,"reason":"tight",'
+            '"box":{"x":2,"y":2,"w":3,"h":3}}')),
+        "box")
+    assert (verdict, got, reason, shape, score) == (
+        "adjust", {"x": 2, "y": 2, "w": 3, "h": 3}, "tight", "box", 0.4)
+    assert region_review._from_pick(
+        AIMessage(content='{"pick":2,"reason":"second"}'), 3) == (2, "second")
 
 
 def _png(w, h):
@@ -825,3 +834,97 @@ def test_a_half_scored_or_broken_scorer_falls_back_to_the_model(monkeypatch):
     calls, model, _ = _drive(monkeypatch, list(script), None)
     assert calls[-1][1]["region"] == BOX
     assert [review for review in _reviews(model) if len(review.content) > 3]
+
+
+class _Bound:
+    model_fields = {"extra_body": None}
+
+    def __init__(self):
+        self.kind = ""
+        self.kwargs = {}
+
+    def bind(self, **kwargs):
+        self.kind = "json"
+        self.kwargs = kwargs
+        return self
+
+    def bind_tools(self, tools, **kwargs):
+        self.kind = "tool"
+        self.kwargs = kwargs
+        return self
+
+
+def test_thinking_deepseek_binds_json_not_a_tool(monkeypatch):
+    monkeypatch.delenv("CAMPCAT_LLM_THINKING", raising=False)
+    monkeypatch.setattr(models, "_SELECTED", "deepseek")
+    model = _Bound()
+    assert models.bind_schema(model, region_review.Review) is model
+    assert model.kind == "json"
+    assert model.kwargs == {"response_format": {"type": "json_object"}}
+
+    monkeypatch.setenv("CAMPCAT_LLM_THINKING", "off")
+    model = _Bound()
+    models.bind_schema(model, region_review.Review)
+    assert model.kind == "tool"
+    assert model.kwargs["tool_choice"] == "any"
+
+    monkeypatch.delenv("CAMPCAT_LLM_THINKING", raising=False)
+    monkeypatch.setattr(models, "_SELECTED", "qwen")
+    model = _Bound()
+    models.bind_schema(model, region_review.Review)
+    assert model.kind == "tool"
+
+
+def test_a_template_reuses_the_tap_box_until_the_handoff_ends(monkeypatch):
+    session._LATEST_NUM = 5
+    seen = []
+    adjusted = {"x": 2, "y": 2, "w": 3, "h": 3}
+    other = {"x": 9, "y": 9, "w": 9, "h": 9}
+
+    def run(_compiled, state):
+        seen.append(state["kind"])
+        if state["expect"] == "不要":
+            return {"verdict": "reject", "reason": "no"}
+        return {"verdict": "adjust", "region": dict(adjusted), "reason": "tight"}
+
+    monkeypatch.setattr(graph, "run_subgraph", run)
+    final, _, rejected = region_review.review(
+        "tap", {"region": dict(BOX), "expect": "不要"})
+    assert rejected
+    assert final["region"] == BOX
+    again, _, rejected = region_review.review("save_template", {
+        "region": dict(BOX), "shot": 5, "expect": "没点中", "name": "no.png"})
+    assert rejected == ""
+    assert again["region"] == adjusted
+    assert seen == ["tap", "template"]
+
+    final, _, rejected = region_review.review(
+        "tap", {"region": dict(BOX), "expect": "按钮"})
+    assert rejected == ""
+    assert final["region"] == adjusted
+    reused, note, rejected = region_review.review("save_template", {
+        "region": dict(BOX), "shot": 5, "expect": "另一句", "name": "a.png"})
+    assert rejected == ""
+    assert reused["region"] == adjusted
+    assert "已经检查过了" in note
+    same, _, _ = region_review.review("save_template", {
+        "region": dict(adjusted), "shot": 5, "expect": "改过的", "name": "b.png"})
+    assert same["region"] == adjusted
+    assert seen == ["tap", "template", "tap"]
+
+    region_review.review("save_template", {
+        "region": dict(BOX), "shot": 4, "expect": "换帧", "name": "c.png"})
+    region_review.review("save_template", {
+        "region": dict(other), "shot": 5, "expect": "换框", "name": "d.png"})
+    assert seen == ["tap", "template", "tap", "template", "template"]
+
+    region_review.end_handoff()
+    region_review.review("save_template", {
+        "region": dict(adjusted), "shot": 5, "expect": "下一轮", "name": "e.png"})
+    assert seen[-1] == "template"
+
+    region_review.review("tap", {"region": dict(BOX), "expect": "再点"})
+    region_review.begin_turn()
+    region_review.review("save_template", {
+        "region": dict(adjusted), "shot": 5, "expect": "新请求", "name": "f.png"})
+    assert seen[-2:] == ["tap", "template"]

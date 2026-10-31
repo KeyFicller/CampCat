@@ -140,6 +140,8 @@ def test_a_lessons_call_is_the_note():
         "name": "Lessons", "args": {"notes": []}, "id": "n"}])
     assert reflector._notes_of(empty) == ""
     assert reflector._notes_of(AIMessage(content="纯文字也算")) == "纯文字也算"
+    assert reflector._notes_of(
+        AIMessage(content='{"notes":["先看清再裁。"]}')) == "先看清再裁。"
 
 
 def test_a_lessons_call_becomes_the_body(monkeypatch, scripted):

@@ -62,7 +62,8 @@ DIAGNOSE_TEMPLATE = {
 JUDGE_PROMPT = (
     "一个脚本因为某个模板没匹配上而失败了。你看到三张图：它要找的模板、"
     "匹配器最看好的那个位置上的屏幕（与模板同尺度），以及整屏。"
-    "调用 Diagnosis 回答。圆形模板的四个角是透明的，不算背景。"
+    "用 json 回答。例如 {\"verdict\":\"crop_issue\",\"reason\":\"一句话\","
+    "\"fix\":\"一句话\"}。圆形模板的四个角是透明的，不算背景。"
 )
 
 # Bound by hand so `streamed` can still stop between chunks.
@@ -117,9 +118,8 @@ def parse_match(error: str, template: str) -> dict | None:
 def _from_reply(reply) -> dict:
     """The Diagnosis call, or inconclusive with whatever text came back."""
     raw = session.content_text(getattr(reply, "content", "") or "")
-    calls = getattr(reply, "tool_calls", None) or []
-    if calls:
-        args = calls[0].get("args") or {}
+    args = models.schema_args(reply)
+    if args is not None:
         try:
             got = Diagnosis.model_validate(args)
         except ValidationError:
@@ -192,8 +192,7 @@ def diagnose_judge(state: DiagnoseState) -> dict:
             "image_url": {"url": f"data:{session.MIME};base64,{image}"},
         })
     try:
-        model = models.build_chat_model().bind_tools(
-            [Diagnosis], tool_choice="any")
+        model = models.bind_schema(models.build_chat_model(), Diagnosis)
         reply = models.streamed(model, [
             SystemMessage(content=JUDGE_PROMPT),
             HumanMessage(content=content),

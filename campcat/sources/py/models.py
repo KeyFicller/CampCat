@@ -173,6 +173,55 @@ class _ReasoningChatOpenAI(ChatOpenAI):
         return out
 
 
+def thinking_on() -> bool:
+    """False only when a run asked for no reasoning. The default is on."""
+    return _env("CAMPCAT_LLM_THINKING").lower() not in {"off", "0", "false"}
+
+
+def _provider_name() -> str:
+    return _SELECTED or _setting("CAMPCAT_LLM_PROVIDER", DEFAULT_PROVIDER)
+
+
+def _deepseek_thinking() -> bool:
+    """DeepSeek thinking rejects a forced tool. JSON mode does not send one.
+
+    langchainjs#11389 would pick this inside `withStructuredOutput` for a
+    reasoning model. It is not merged, and that wrapper returns only after
+    the call, so a stop could not land between chunks. Name the choice here.
+    """
+    return _provider_name() == "deepseek" and thinking_on()
+
+
+def bind_schema(model, schema):
+    """Bind one schema. A thinking DeepSeek gets JSON mode, not a tool."""
+    fields = getattr(type(model), "model_fields", {})
+    if _deepseek_thinking() and "extra_body" in fields:
+        return model.bind(response_format={"type": "json_object"})
+    bind_tools = getattr(model, "bind_tools", None)
+    if bind_tools is None:
+        return model
+    return bind_tools([schema], tool_choice="any")
+
+
+def schema_args(reply) -> dict | None:
+    """The schema payload: a tool call, or a JSON object in the content."""
+    calls = getattr(reply, "tool_calls", None) or []
+    if calls:
+        args = calls[0].get("args") or {}
+        return args if isinstance(args, dict) else None
+    raw = session.content_text(getattr(reply, "content", "") or "").strip()
+    if not raw.startswith("{"):
+        start, end = raw.find("{"), raw.rfind("}")
+        if start < 0 or end <= start:
+            return None
+        raw = raw[start:end + 1]
+    try:
+        got = json.loads(raw)
+    except json.JSONDecodeError:
+        return None
+    return got if isinstance(got, dict) else None
+
+
 def _chat_model(name: str, max_tokens: int, *, context: bool = False):
     """Build a chat model for the selected provider.
 
@@ -190,9 +239,9 @@ def _chat_model(name: str, max_tokens: int, *, context: bool = False):
         raise RuntimeError(f"{provider['key_env']} is not set (put it in .env)")
     # `CAMPCAT_LLM_THINKING=off` asks for a faster, dumber run: a smoke test
     # cares about the tool calls, and nobody is reading the reasoning.
-    quiet = _env("CAMPCAT_LLM_THINKING").lower() in {"off", "0", "false"}
     base_url = _setting(provider["base_url_env"], provider["base_url"])
-    extra_body = provider["thinking_off"] if quiet else provider["extra_body"]
+    extra_body = (provider["thinking_off"] if not thinking_on()
+                  else provider["extra_body"])
     prefix, _, bare = name.partition(":")
     if prefix == "openai":
         # Built here rather than through `init_chat_model` so the reasoning

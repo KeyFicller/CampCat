@@ -48,7 +48,8 @@ INSTRUCTIONS = (
     "你要为一个写 Android 设备脚本的助手总结刚结束的一次交接。"
     "给你的是这次交接的轨迹：它调了哪些工具、结果如何，以及它最后的答复。\n"
     "\n"
-    "调用 Lessons。notes 里只写这次交接里能看出来的东西，最多四条：\n"
+    "用 json 回答。例如 {\"notes\":[\"一条\"]}。"
+    "notes 里只写这次交接里能看出来的东西，最多四条：\n"
     "- 哪一步明显绕了弯，下次该怎么做\n"
     "- 哪个界面或控件的定位反复没过，下次先从哪儿下手\n"
     "- 哪个 bundle、模板或命名被重试过，下次一次写对的要点\n"
@@ -144,10 +145,10 @@ def summary(m: dict) -> str:
 
 def _notes_of(answer) -> str:
     """The Lessons call, or the plain text when the model did not call it."""
-    calls = getattr(answer, "tool_calls", None) or []
-    if calls:
+    args = models.schema_args(answer)
+    if isinstance(args, dict) and "notes" in args:
         try:
-            got = Lessons.model_validate(calls[0].get("args") or {})
+            got = Lessons.model_validate(args)
         except ValidationError:
             pass
         else:
@@ -173,8 +174,7 @@ def reflect(calls: list[dict], operator_rounds: int,
     m = metrics(calls, operator_rounds)
     head = summary(m)
     try:
-        model = models.build_chat_model().bind_tools(
-            [Lessons], tool_choice="any")
+        model = models.bind_schema(models.build_chat_model(), Lessons)
         with observability.turn("reflect") as callbacks:
             answer = model.invoke([
                 SystemMessage(content=INSTRUCTIONS),

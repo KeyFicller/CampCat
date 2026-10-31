@@ -502,6 +502,7 @@ def run_scripter(args: dict, host_tools: list,
 
         token = None
         begun = False
+        entered = False
         try:
             import graph
             graph.begin_fail_counts()
@@ -526,6 +527,7 @@ def run_scripter(args: dict, host_tools: list,
             # This span's callbacks, not the parent's whole config: joining the
             # two Pregel runs makes a picture coming back stall the parent's
             # stream.
+            entered = True
             out = graph.run_subgraph(
                 _scripter_graph(), state, callbacks or None)
         except tools.TurnInterrupted:
@@ -544,6 +546,9 @@ def run_scripter(args: dict, host_tools: list,
             if begun:
                 import graph
                 graph.end_fail_counts()
+            if entered:
+                import agent.region_review as region_review
+                region_review.end_handoff()
         if out.get("interrupted"):
             note("interrupted")
             raise tools.TurnInterrupted()

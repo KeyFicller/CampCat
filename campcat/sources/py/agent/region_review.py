@@ -67,7 +67,8 @@ REVIEW_PROMPT = (
     "你在检查别的 agent 提议的一个区域，它还没被使用。你看到两张图：这张区域"
     "按自身尺寸裁下来的样子，以及把该区域画上去的第二张图——按文字说明，"
     "可能是它周围的原分辨率邻域，也可能是整帧缩小后的画面。"
-    "调用 Review 回答。\n"
+    "用 json 回答。例如 {\"verdict\":\"ok\",\"confidence\":1,"
+    "\"reason\":\"一句话\",\"box\":null,\"circle\":null,\"diamond\":null}\n"
     "边只做小修正时 verdict 用 adjust，坐标用这一帧的像素，写进 box、circle、"
     "diamond 中的一个。区域落在错误的元素上、或者这个元素根本不在这帧里，"
     "用 reject。\n" + _PRESSURE
@@ -84,7 +85,7 @@ PICK_PROMPT = (
     "每一个都先给裁切图，再给把该区域画在周围环境里的图。序号只是用来标识"
     "哪一次：靠后的既不比第一次好，也不比它差。"
     "挑出最符合期望的那一个裁切：它指名的控件，贴着它、不多余、也没被切掉。"
-    "调用 Pick 回答。pick 是序号，从 1 开始。"
+    "用 json 回答。例如 {\"pick\":1,\"reason\":\"一句话\"}"
 )
 
 # Shared by the one-crop check and the pick, so the two cannot drift.
@@ -112,7 +113,7 @@ TEMPLATE_PICK_PROMPT = (
     "哪一次：靠后的既不比第一次好，也不比它差。\n"
     + _TEMPLATE_RULES +
     "\n第 3 条（把控件切掉）要看周围环境那张图判断，不能只看裁切本身。"
-    "\n调用 Pick 回答。pick 是序号，从 1 开始。reason 说明是哪一条规则定的。"
+    "\n用 json 回答。例如 {\"pick\":1,\"reason\":\"第 1 条\"}"
 )
 
 REVIEW_CRITERIA = {
@@ -173,6 +174,36 @@ def _where(region: dict) -> str:
 _accepted: dict[str, dict] = {}
 _reject_count: dict[str, int] = {}
 _reject_reason: dict[str, str] = {}
+# A tap this operator stretch already accepted, keyed by (frame, box). The
+# scripter of this same handoff reuses it; the next stretch must not.
+_tap_boxes: dict[tuple, dict] = {}
+
+
+def _box_key(region: dict) -> str:
+    return json.dumps(region, sort_keys=True, separators=(",", ":"),
+                      ensure_ascii=False)
+
+
+def _recall_tap(shot, region: dict) -> dict | None:
+    """The box a tap on this frame already accepted, or None."""
+    if isinstance(shot, bool) or not isinstance(shot, int) or shot <= 0:
+        return None
+    found = _tap_boxes.get((shot, _box_key(region)))
+    return dict(found) if found is not None else None
+
+
+def _remember_tap(shot, proposed: dict, accepted: dict) -> None:
+    """Remember both the asked box and the one that was sent."""
+    if isinstance(shot, bool) or not isinstance(shot, int) or shot <= 0:
+        return
+    kept = dict(accepted)
+    _tap_boxes[(shot, _box_key(accepted))] = kept
+    _tap_boxes[(shot, _box_key(proposed))] = kept
+
+
+def end_handoff() -> None:
+    """Drop tap boxes. The next operator stretch is a new round."""
+    _tap_boxes.clear()
 
 
 def begin_turn() -> None:
@@ -182,6 +213,7 @@ def begin_turn() -> None:
     _accepted.clear()
     _reject_count.clear()
     _reject_reason.clear()
+    _tap_boxes.clear()
 
 
 class ReviewState(TypedDict, total=False):
@@ -306,10 +338,9 @@ def _from_review(reply, shape: str, *, kind: str = "tap"
     More than one shape, or an adjust with none, is skip.
     """
     raw = session.content_text(getattr(reply, "content", "") or "").strip()
-    calls = getattr(reply, "tool_calls", None) or []
-    if not calls:
+    args = models.schema_args(reply)
+    if args is None:
         return "skip", None, raw or "读不懂", shape, 1.0
-    args = calls[0].get("args") or {}
     try:
         got = Review.model_validate(args)
     except ValidationError:
@@ -332,11 +363,11 @@ def _from_review(reply, shape: str, *, kind: str = "tap"
 
 def _from_pick(reply, count: int) -> tuple[int | None, str]:
     """The 1-based crop a Pick names, or `(None, "")` when it cannot be read."""
-    calls = getattr(reply, "tool_calls", None) or []
-    if not calls:
+    args = models.schema_args(reply)
+    if not args:
         return None, ""
     try:
-        got = Pick.model_validate(calls[0].get("args") or {})
+        got = Pick.model_validate(args)
     except ValidationError:
         return None, ""
     if not 1 <= got.pick <= count:
@@ -504,8 +535,7 @@ def review_judge(state: ReviewState) -> dict:
     if alt:
         text += "\n" + _ALTERNATIVE
     try:
-        model = models.build_chat_model().bind_tools(
-            [Review], tool_choice="any")
+        model = models.bind_schema(models.build_chat_model(), Review)
         response = models.streamed(model, [
             SystemMessage(content=_review_system(state["kind"])),
             HumanMessage(content=[
@@ -627,7 +657,7 @@ def review_pick(state: ReviewState) -> dict:
                  "再给同一区域在周围环境里的样子。")
     lines.append(session.ASK_IN_CHINESE.strip())
     try:
-        model = models.build_chat_model().bind_tools([Pick], tool_choice="any")
+        model = models.bind_schema(models.build_chat_model(), Pick)
         prompt = (TEMPLATE_PICK_PROMPT if state.get("kind") == "template"
                   else PICK_PROMPT)
         response = models.streamed(model, [
@@ -671,6 +701,13 @@ def _graph():
 def _one(kind: str, shape: str, region: dict, shot, expect: str,
          label: str) -> tuple[dict, str, str]:
     """`(region to send, note, rejection)`. A rejection ends the call."""
+    # A template cut that is the box a tap on this same frame already accepted
+    # is not a new proposal. The frame number is required: the same digits on
+    # a later screenshot are different pixels.
+    if kind == "template":
+        reused = _recall_tap(shot, region)
+        if reused is not None:
+            return reused, _kept(reused), ""
     key = (label or "").strip()
     if key and key in _accepted:
         # Name the box: an operator that measured (174,1836) and was told "the
@@ -704,6 +741,9 @@ def _one(kind: str, shape: str, region: dict, shot, expect: str,
     final = out.get("region") or region
     if key:
         _accepted[key] = dict(final)
+    if kind == "tap":
+        # shot is omitted on a tap; the check ran against the newest frame.
+        _remember_tap(session._LATEST_NUM, region, final)
     body = _moved(shape, region, final)
     if not body and len(out.get("candidates") or []) > 1:
         body = (f"{len(out['candidates'])} 个候选中保留第一个："

@@ -2,6 +2,7 @@
 
 import contextlib
 
+import agent.region_review as region_review
 import graph
 import observability
 import session
@@ -142,3 +143,21 @@ def test_a_failed_listing_does_not_start_the_scripter(monkeypatch):
     monkeypatch.setattr(graph, "run_subgraph", lambda *a, **k: {"reply": "saved x"})
     assert scripter.run_scripter({"goal": "签到", "fix": True}, []) == "saved x"
     assert seen == []
+
+
+def test_a_handoff_drops_tap_boxes_once_it_starts(monkeypatch):
+    region_review._tap_boxes[(5, "k")] = {"x": 1}
+    monkeypatch.setattr(
+        tools, "call_cpp", lambda *a, **k: {"ok": False, "error": "down"})
+    assert scripter.run_scripter({"goal": "签到"}, []) == "error: down"
+    assert region_review._tap_boxes[(5, "k")] == {"x": 1}
+
+    def run(*_args, **_kwargs):
+        assert region_review._tap_boxes[(5, "k")] == {"x": 1}
+        return {"reply": "done"}
+
+    monkeypatch.setattr(
+        tools, "call_cpp", lambda *a, **k: {"ok": True, "text": "none yet"})
+    monkeypatch.setattr(graph, "run_subgraph", run)
+    assert scripter.run_scripter({"goal": "签到"}, []) == "done"
+    assert region_review._tap_boxes == {}
