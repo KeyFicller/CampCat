@@ -7,9 +7,10 @@ stay in this call; only the screenshot it takes is registered as a frame.
 from __future__ import annotations
 
 import re
-from typing import Literal, TypedDict
+from typing import Annotated, Literal, TypedDict
 
 from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.tools import tool
 from pydantic import BaseModel, Field, ValidationError
 from langgraph.graph import END, StateGraph
 
@@ -18,46 +19,26 @@ import session
 import subagent
 import tools
 
-DIAGNOSE_TEMPLATE_NAME = "diagnose_template"
+# Not in the C++ registry. The scripter's tool loop intercepts this name; this
+# body is not called. Defaults keep every argument but these three out of the
+# schema's `required`.
+@tool
+def diagnose_template(
+    bundle: Annotated[str, Field(description="模板所在的 bundle。")],
+    template: Annotated[str, Field(description="模板名；.png 可以省略。")],
+    error: Annotated[str, Field(description=(
+        "run_script 的失败原文。里面必须有 best=… box=x,y,w,h threshold=…。"))],
+    expect: Annotated[str, Field(description=(
+        "这一步期望看到什么，通常就是它的 // 注释。"))] = "",
+) -> str:
+    """判断一个模板为什么匹配失败：看模板本身、匹配器最佳位置处的屏幕、以及
+    整屏。返回 crop_issue、wrong_screen 或 inconclusive，以及应该拿哪张截图
+    重新裁。把 run_script 的报错原样传进来。
+    """
+    raise RuntimeError("diagnose_template is dispatched by the scripter")
 
-DIAGNOSE_TEMPLATE = {
-    "type": "function",
-    "function": {
-        "name": DIAGNOSE_TEMPLATE_NAME,
-        "description": (
-            "判断一个模板为什么匹配失败：看模板本身、匹配器最佳位置处的屏幕、"
-            "以及整屏。返回 crop_issue、wrong_screen 或 inconclusive，"
-            "以及应该拿哪张截图重新裁。把 run_script 的报错原样传进来。"
-        ),
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "bundle": {
-                    "type": "string",
-                    "description": "模板所在的 bundle。",
-                },
-                "template": {
-                    "type": "string",
-                    "description": "模板名；.png 可以省略。",
-                },
-                "error": {
-                    "type": "string",
-                    "description": (
-                        "run_script 的失败原文。里面必须有 "
-                        "best=… box=x,y,w,h threshold=…。"
-                    ),
-                },
-                "expect": {
-                    "type": "string",
-                    "description": (
-                        "这一步期望看到什么，通常就是它的 // 注释。"
-                    ),
-                },
-            },
-            "required": ["bundle", "template", "error"],
-        },
-    },
-}
+
+DIAGNOSE_TEMPLATE_NAME = diagnose_template.name
 
 JUDGE_PROMPT = (
     "一个脚本因为某个模板没匹配上而失败了。你看到三张图：它要找的模板、"

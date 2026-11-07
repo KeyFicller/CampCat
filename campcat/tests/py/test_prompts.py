@@ -2,6 +2,7 @@
 
 import agent.operator as operator
 import agent.region_review as region_review
+import agent.solo as solo
 import agent.scripter as scripter
 from agent.region_rules import REGION_RULES
 
@@ -144,8 +145,8 @@ def test_prompt_override_covers_only_the_operator(monkeypatch):
 def test_solo_prompt_is_its_own_persona():
     # Appending a note to a persona that names eight tools leaves the model
     # reading about tools it does not have; solo gets its own text instead.
-    text = operator.operator_prompt(True)
-    assert text.startswith(operator.SOLO_PERSONA)
+    text = solo.prompt()
+    assert text.startswith(solo.SOLO_PERSONA)
     assert operator.OPERATOR_PERSONA not in text
     for gone in ("author_script", "run_script", "list_scripts", "read_graph",
                  "locate"):
@@ -158,7 +159,7 @@ def test_solo_prompt_is_its_own_persona():
 def test_ordinary_prompt_still_offers_the_whole_device():
     text = operator.operator_prompt()
     assert text.startswith(operator.OPERATOR_PERSONA)
-    assert operator.SOLO_PERSONA not in text
+    assert solo.SOLO_PERSONA not in text
     assert "历史里还没有脚本列表时，先调 `list_scripts`" in text
     assert "不要为了这件事再截一张图" in text
 
@@ -168,7 +169,7 @@ def test_every_prompt_that_proposes_a_region_shares_the_rules():
     # prompt is how the proposer and the check start disagreeing about what a
     # good region is.
     assert REGION_RULES in operator.operator_prompt()
-    assert REGION_RULES in operator.operator_prompt(True)
+    assert REGION_RULES in solo.prompt()
     assert REGION_RULES in scripter.scripter_prompt()
     assert "宽得远超高的菱形" in region_review.REVIEW_CRITERIA["template"]
 

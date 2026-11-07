@@ -75,7 +75,7 @@ def scripter_tools(host_tools: list) -> list:
     """Host tools the scripter may call, then diagnose_template and Handoff."""
     offered = SCRIPTER_ONLY | SHARED
     return [tool for tool in host_tools if _name(tool) in offered] + [
-        diagnoser.DIAGNOSE_TEMPLATE, HANDOFF_TOOL]
+        diagnoser.diagnose_template, HANDOFF_TOOL]
 
 
 # The order the renderer writes a step in; the legend quotes it.

@@ -5,6 +5,7 @@ and how an `author_script` brief is spelled.
 """
 
 import agent.operator as operator
+import agent.solo as solo
 import agent.scripter as scripter
 import session
 
@@ -70,7 +71,7 @@ def test_unknown_tool_stays_with_the_operator():
 
 def test_operator_only_keeps_what_a_sample_needs():
     host = [_tool(name) for name in HOST_NAMES]
-    table = operator.operator_tools(host, solo=True)
+    table = solo.tools(host)
     # Exactly what a training sample needs: look at the screen, act on a
     # region, boot a device that is down, get back to a known screen. A handoff
     # or a saved-script run would put a second agent in the sample.

@@ -19,6 +19,7 @@ import agent.operator as operator
 import agent.reflector as reflector
 import agent.region_review as region_review
 import agent.scripter as scripter
+import agent.solo as solo
 import models
 import observability
 import session
@@ -98,7 +99,8 @@ def build_messages(state: TurnState) -> dict:
     """The model input: prompt, conversation, the last screen, this turn's text."""
     messages: list[object] = [
         SystemMessage(
-            content=operator.operator_prompt(bool(state.get("operator_only")))
+            content=(solo.prompt() if state.get("operator_only")
+                     else operator.operator_prompt())
             + memorier.memory_block(state.get("memory") or "")
         )
     ]
@@ -168,8 +170,9 @@ def _invoke(state: TurnState, offered: list, on_chunk=None) -> dict:
 
 def invoke(state: TurnState) -> dict:
     """The operator's model turn: every host tool except the scripter's own."""
-    return _invoke(state, operator.operator_tools(
-        state.get("tools") or [], bool(state.get("operator_only"))))
+    host = state.get("tools") or []
+    offered = solo.tools(host) if state.get("operator_only") else operator.operator_tools(host)
+    return _invoke(state, offered)
 
 
 def run_subgraph(compiled, state: dict, callbacks=None) -> dict:
@@ -333,12 +336,11 @@ def run_tools(state: TurnState) -> dict:
     def run_one(call: dict) -> tuple[object, list]:
         name = call.get("name", "")
         args = call.get("args") or {}
-        if state.get("operator_only") and name not in operator.SOLO:
+        if state.get("operator_only") and name not in solo.SOLO:
             # Not offered this turn, so this is the model calling from the
-            # prompt alone. Refused rather than run: one agent, one pair of
-            # tools, is the point of the flag -- and a stray call must not
-            # start the scripter or drive the device behind it.
-            return ("error: 这一轮只能用 " + ", ".join(sorted(operator.SOLO))
+            # prompt alone. Refused rather than run: a stray call must not
+            # start the scripter or drive the device behind the sample.
+            return ("error: 这一轮只能用 " + ", ".join(sorted(solo.SOLO))
                     + "；不能用 " + name, [])
         if name == operator.AUTHOR_SCRIPT_NAME:
             # The screen belongs to the device. A shot the scripter took is the

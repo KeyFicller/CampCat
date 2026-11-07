@@ -133,25 +133,6 @@ OPERATOR_PERSONA = (
     "用户只是提问时，回答问题就行。"
 )
 
-# Said instead of `OPERATOR_PERSONA` when the host records training samples: it
-# names the two tools that exist, and what a region is for, so a redraw is a
-# correction the model can learn from rather than a guess at a coordinate.
-SOLO_PERSONA = (
-    "你只用四个工具操作一台 Android 设备：`screenshot`、`tap`、`go_home` 和 "
-    "`start_emulator`。你不能跑已保存的脚本，也不能写脚本；不要提出或尝试这类"
-    "操作。先截屏（否则你看不到屏幕），每一次 tap 之前都要看过截图。"
-    "`tap` 只指定一个区域——方块 `{x,y,w,h}`、圆 `{cx,cy,r}` 或菱形 "
-    "`{cx,cy,rx,ry}`，全部用你正在看的那张截图的像素——点击落在区域中心。\n"
-    + REGION_RULES +
-    "压到背景上的框就是用户要重画的。用户重画了你的区域时，以他画的为准："
-    "照它点，下次也照它的样子画。改变了界面的操作之后要重新截屏，不要自己"
-    "猜结果。必须从已知界面开始的流程，以 `go_home` 开头：它回到桌面并关掉"
-    "所有最近打开的应用。模拟器没启动时截屏会失败并说明原因；"
-    "`start_emulator` 会启动它并一直阻塞到实例就绪，所以这一条要单独调用——"
-    "同一轮里的截屏会先执行，那时还在启动，也会失败。用户只是提问时，"
-    "回答问题就行。"
-)
-
 _RULES = {
     "自主": (
         "直接动手，不要反问。该走下一步就走，不要停在一个你自己动手就能解决的"
@@ -179,11 +160,6 @@ _RULES = {
 
 _RULE_NAMES = ("自主", "格式")
 
-# The tools `solo` leaves: look at the screen, act on a region, boot a device
-# that is down, and get back to a known screen. Named here rather than derived,
-# because this list is what a training sample may contain.
-SOLO = frozenset({"screenshot", "tap", "start_emulator", "go_home"})
-
 
 def _rules(names: tuple[str, ...]) -> str:
     """One `## name` block per rule."""
@@ -198,25 +174,21 @@ def _name(tool: dict) -> str | None:
     return name if isinstance(name, str) else None
 
 
-def operator_tools(host_tools: list, solo: bool = False) -> list:
-    """Host tools the operator may call, plus the handoff tool.
+def shared_rules() -> str:
+    """The blocks appended after either persona."""
+    return _rules(_RULE_NAMES)
 
-    `solo` is what the host asks for while it records training samples: the
-    operator drives alone, and with only the tools a sample needs -- look at the
-    screen, then act on a region. Everything else is withheld, including the
-    handoff, so one agent's regions are all a sample can contain.
-    """
+
+def operator_tools(host_tools: list) -> list:
+    """Host tools the operator may call, plus the handoff tool."""
     hidden = scripter.SCRIPTER_ONLY | scripter.HIDDEN
     kept = [tool for tool in host_tools if _name(tool) not in hidden]
-    if solo:
-        return [tool for tool in kept if _name(tool) in SOLO]
     return kept + [author_script]
 
 
-def operator_prompt(solo: bool = False) -> str:
+def operator_prompt() -> str:
     """Who the operator is. An env override replaces the whole thing, cheatsheet included."""
     override = models._env("CAMPCAT_LLM_SYSTEM_PROMPT")
     if override:
         return override
-    persona = SOLO_PERSONA if solo else OPERATOR_PERSONA
-    return persona + "\n\n" + _rules(_RULE_NAMES)
+    return OPERATOR_PERSONA + "\n\n" + shared_rules()

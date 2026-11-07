@@ -58,6 +58,7 @@ def test_instructions_name_the_sections():
     assert "Device & skills" not in memorier.MEMORY_INSTRUCTIONS
     assert "密码" in memorier.MEMORY_INSTRUCTIONS
     assert "## 坑" in memorier.SCRIPTER_MEMORY_INSTRUCTIONS
+    assert "## 风格" in memorier.SCRIPTER_MEMORY_INSTRUCTIONS
     assert "bundle" in memorier.SCRIPTER_MEMORY_INSTRUCTIONS
     assert memorier.scripter_memory_block("  ") == ""
     assert "你在之前会话里留下的坑" in memorier.scripter_memory_block("sign_in.png lies")
