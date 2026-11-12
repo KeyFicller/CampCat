@@ -13,12 +13,14 @@ add_executable(test_campcat_core cpp/test_approval_gate.cpp
                                  cpp/test_graph_tools.cpp
                                  cpp/test_llm_host.cpp
                                  cpp/test_llm_protocol.cpp
+                                 cpp/test_llm_prompt_queue.cpp
                                  cpp/test_mumu_wait.cpp
                                  cpp/test_recents_packages.cpp
                                  cpp/test_region_record.cpp
                                  cpp/test_script_bridge.cpp
                                  cpp/test_shapes.cpp
-                                 cpp/test_smoke.cpp)
+                                 cpp/test_smoke.cpp
+                                 cpp/test_workspace_selection.cpp)
 # `src` is on the path for `llm_tool_schema.h` alone: the tool schemas are what
 # the model is handed, so asserting on them means reading the header that builds
 # them, and that header is deliberately not public.

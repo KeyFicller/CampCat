@@ -31,11 +31,14 @@ void llm_panel_shutdown_finish();
  * @param[in,out] _st Shell state, which owns the emulator launch the tools may
  * ask for.
  * @param[in,out] _cfg Shell snapshot (adb paths + llm settings).
- * @param[in] _adb_busy True while automation owns ADB, which makes the device
- * tools refuse instead of contending with it.
  */
-void llm_panel_draw_panel(campcat::shell_state &_st, campcat::app_config &_cfg,
-                          bool _adb_busy);
+void llm_panel_draw_panel(campcat::shell_state &_st, campcat::app_config &_cfg);
+
+/// Update the worker's UI state even while another page is selected.
+void llm_panel_tick(bool _adb_busy);
+
+/// Persistent agent status and Stop. Returns true to open its LLM page.
+bool llm_panel_draw_task_bar(bool _on_llm_page);
 
 /**
  * @brief What the LLM page is doing, for the shell's status chip.

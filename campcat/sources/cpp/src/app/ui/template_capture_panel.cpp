@@ -328,6 +328,9 @@ void template_capture_panel_draw(campcat::app_config &_cfg,
     ImGui::SameLine();
     help_marker("Template File Name");
 
+    // The file name and the shape are two decisions, not one row of controls.
+    ImGui::Spacing();
+
     // Switching shape drops the selection: what was drawn as one shape must not
     // be saved as the other.
     if (ImGui::RadioButton("Box##adb_tpl_shape",

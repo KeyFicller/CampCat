@@ -18,7 +18,7 @@ constexpr size_t k_max_scroll_lines = 2000;
 
 /// Whether the log is expanded. Read by `log_panel_open` before the nav block
 /// is drawn, flipped by the header's icon button.
-bool g_open = true;
+bool g_open = false;
 
 /// How wide the chevron is drawn inside its square button, in pixels. Smaller
 /// than the button so the frame stays visible around it.

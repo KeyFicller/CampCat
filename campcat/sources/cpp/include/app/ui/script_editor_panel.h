@@ -3,6 +3,10 @@
 #include <filesystem>
 #include <string_view>
 
+namespace campcat {
+struct workspace_selection;
+}
+
 /// Width of the script list column, which sits beside the conversation rather
 /// than taking height off it.
 inline constexpr float k_script_list_w = 180.0F;
@@ -13,12 +17,11 @@ inline constexpr float k_script_list_w = 180.0F;
 inline constexpr const char *k_script_drag_payload = "campcat_script";
 
 /**
- * @brief Draw the script list column, and every script window that is open.
+ * @brief Draw the script list column for the shared workspace selection.
  *
- * The column starts with a graph combo. Under it, that graph's anchors are
- * listed as Nodes and its edges as Edges. Double-clicking a row opens that
- * script for viewing and editing; each script gets its own window, so opening a
- * second one never costs unsaved edits.
+ * The graph chosen in the workspace toolbar has its anchors listed as Nodes
+ * and its edges as Edges. Double-clicking a row opens that
+ * script for viewing and editing; each script keeps its own editor buffer.
  *
  * @param[in] _script_dir The bundle root, the same directory the script tools
  * work in (`<config_home>`).
@@ -27,11 +30,15 @@ inline constexpr const char *k_script_drag_payload = "campcat_script";
  * minus this" the way ImGui reads a size.
  */
 void script_editor_panel_draw(const std::filesystem::path &_script_dir,
-                              float _list_w, float _list_h);
+                              float _list_w, float _list_h,
+                              campcat::workspace_selection &_selection);
+
+/// Description and template evidence for the selected skill, without running it.
+void script_editor_inspector_draw(const std::filesystem::path &_script_dir,
+                                  std::string_view _name);
 
 /**
- * @brief Open one bundle's editor window, the same window a double-click in the
- * list opens.
+ * @brief Open and select a bundle's editor, as a double-click in the list does.
  *
  * For callers that know which bundle they want without showing the list, such
  * as the Script page's path box. A bundle already open keeps its unsaved text.
@@ -43,14 +50,19 @@ void script_editor_open(const std::filesystem::path &_script_dir,
                         std::string_view _name);
 
 /**
- * @brief Draw every open script window, and drop the ones closed since the last
- * call.
+ * @brief Draw open editors as floating windows when docking is unavailable.
  *
- * Split out of script_editor_panel_draw so a page that has no list -- the
- * Script page -- can still show the windows it opens. Each editor carries the
- * bundle root it was opened from, so this needs no directory of its own.
+ * Called centrally once per frame so editors remain visible on every page.
+ * Each editor carries its bundle root. Switching layout keeps its buffer.
  */
-void script_editor_draw_windows();
+void script_editor_draw_windows(bool _docked);
+
+/// Open editors and pending requests to select one in the workspace sidebar.
+bool script_editor_has_open();
+bool script_editor_focus_requested();
+
+/// Draw the same buffers as tabs in the workspace sidebar.
+void script_editor_draw_docked();
 
 /// @brief Release the preview textures and close the editors. Must run before
 /// the GL context goes away.

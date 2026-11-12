@@ -1,6 +1,7 @@
 #pragma once
 
 #include "ccat_driver/ccat_script_profile.h"
+#include "app/workspace_selection.h"
 #include "core/app_config.h"
 #include "core/log_buffer.h"
 #include "core/mumu_launcher.h"
@@ -98,6 +99,7 @@ public:
     void close_launched_mumu();
 
     const std::filesystem::path cfg_path;
+    workspace_selection workspace;
 
     log_buffer log_lines;
     std::deque<std::string> log_scroll;

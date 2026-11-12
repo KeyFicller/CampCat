@@ -11,6 +11,7 @@
 #include "core/mumu_launcher.h"
 
 #include "app/shell_state.h"
+#include "app/llm_prompt_queue.h"
 
 #include "app/ui/activity_status.h"
 #include "app/ui/fonts.h"
@@ -167,8 +168,7 @@ std::atomic<bool> g_resetting{false};
 /// UI then marks that message as the turn in flight.
 std::atomic<bool> g_promote{false};
 /// Latest message the user sent while a turn was running. Empty when none.
-std::mutex g_queue_mu;
-std::string g_next_prompt;
+campcat::llm_prompt_queue g_prompts;
 /// True while the worker is consolidating memory rather than answering a turn.
 /// Only changes the Send button's tooltip. A message sent during the pass
 /// discards the notes.
@@ -540,15 +540,6 @@ const ImVec4 k_primary_lo{0.200F, 0.341F, 0.463F, 1.0F};
 constexpr float k_bubble_frac = 0.72F;
 constexpr float k_bubble_rounding = 6.0F;
 
-/// Width cap for the approval preview. Wider than a plain screenshot thumbnail
-/// because the user has to judge a highlighted box before allowing a tap.
-constexpr float k_approval_max_w = 420.0F;
-
-/// Bounding side of a staged box's thumbnail in the send bar. Small on purpose:
-/// it confirms "this is what I am about to send", it is not for judging the
-/// element.
-constexpr float k_stage_thumb_side = 96.0F;
-
 /// A tool image is decoded at no more than this width. A full frame is ~10 MB
 /// of texture, and turns are kept, so a whole conversation of them would not
 /// fit in VRAM. The bubble draws it far smaller than this anyway.
@@ -890,14 +881,10 @@ void post_turn(campcat::llm_result _res) {
 /// The message the user sent while a turn was running, if there is one.
 /// Clears the interrupt flag: the message is about to become a turn of its own.
 std::optional<std::string> take_queued() {
-    std::lock_guard<std::mutex> lk(g_queue_mu);
-    if (g_next_prompt.empty()) {
-        return std::nullopt;
-    }
-    std::string prompt = std::move(g_next_prompt);
-    g_next_prompt.clear();
+    // Clear before taking: Stop must not lose its interrupt between taking a
+    // queued message and starting that message's request.
     g_host.clear_interrupt();
-    return prompt;
+    return g_prompts.take();
 }
 
 /// Run `_prompt`, then any message the user sends while it runs. One thread:
@@ -958,6 +945,8 @@ void start_turn(campcat::shell_state &_st, const campcat::app_config &_cfg,
     if (g_thread.joinable()) {
         g_thread.join();
     }
+    g_prompts.restart();
+    g_host.clear_interrupt();
     g_running.store(true);
     // The whole snapshot, by value: the script tools need the interpreter's
     // config (`tool_context::cfg`), and `_cfg` is a per-frame copy in the
@@ -999,6 +988,8 @@ void start_memorize(campcat::shell_state &_st,
     if (g_thread.joinable()) {
         g_thread.join();
     }
+    g_prompts.restart();
+    g_host.clear_interrupt();
     g_running.store(true);
     g_memorizing.store(true);
     g_thread = std::thread([st = &_st, cfg_snapshot = _cfg]() {
@@ -1029,6 +1020,8 @@ void start_reset(std::filesystem::path _config_home, std::string _provider) {
     if (g_thread.joinable()) {
         g_thread.join();
     }
+    g_prompts.restart();
+    g_host.clear_interrupt();
     g_running.store(true);
     g_resetting.store(true);
     g_thread = std::thread([config_home = std::move(_config_home),
@@ -1131,6 +1124,9 @@ void send_current(campcat::shell_state &_st, campcat::app_config &_cfg) {
 /// Show `_prompt` now and stop the turn in flight at its next tool. A second
 /// send before that tool replaces the message; the earlier one is not sent.
 void queue_prompt(std::string _prompt) {
+    if (!g_prompts.replace(_prompt)) {
+        return;
+    }
     if (llm_turn *live = in_flight_turn()) {
         live->frozen = true;
     }
@@ -1138,12 +1134,21 @@ void queue_prompt(std::string _prompt) {
         queued->user_text = _prompt;
     } else {
         append_user_turn(std::move(_prompt), true);
-        // append moved from the parameter; the queue still needs the text.
-        _prompt = g_turns.back().user_text;
     }
-    {
-        std::lock_guard<std::mutex> lk(g_queue_mu);
-        g_next_prompt = std::move(_prompt);
+    g_host.request_interrupt();
+    campcat::llm::request_script_stop();
+    campcat::llm::request_emulator_stop();
+    g_host.release_approval();
+}
+
+void request_task_stop() {
+    if (g_prompts.stop()) {
+        if (llm_turn *queued = queued_turn()) {
+            queued->queued = false;
+            queued->pending = false;
+            queued->interrupted = true;
+            queued->ok = true;
+        }
     }
     g_host.request_interrupt();
     campcat::llm::request_script_stop();
@@ -1301,21 +1306,6 @@ bool sync_approval_texture(const campcat::llm_approval &_a) {
 /// supersampled and INTER_AREA'd down. White on an alpha channel is the shape
 /// `load_icon` uploads.
 constexpr char k_gear_path[] = "campcat/sources/cpp/assets/icons/gear.png";
-
-/// The paper plane on Send. White on purpose, like the gear: `load_icon` hands
-/// back a glyph the draw call tints, so an enabled button shows it in the text
-/// colour and a disabled one in that colour faded -- `BeginDisabled` scales the
-/// alpha that `GetColorU32` hands back, so the icon fades with the button
-/// instead of staying lit.
-///
-/// Drawn rather than designed, like the gear: two triangles sharing an apex at
-/// (29,16), the wings swept back to (4,4) and (4,28), notched at (12,16), all
-/// 8x supersampled and INTER_AREA'd down.
-constexpr char k_send_path[] = "campcat/sources/cpp/assets/icons/send.png";
-
-/// How wide the plane is drawn inside its square button, in pixels. The same
-/// box the gear uses, so the two square buttons carry equally sized icons.
-constexpr float k_send_icon_side = 20.0F;
 
 /// Wide enough for the longest snap mode name ("Otsu blobs") plus the arrow.
 constexpr float k_snap_combo_w = 130.0F;
@@ -1813,150 +1803,106 @@ void draw_annotation_window() {
     }
 }
 
-/// The staged redraw in the send bar: the screenshot with the box on it, so
-/// what is about to be sent is visible before it goes. Reuses the approval's
-/// own texture; nothing new is uploaded.
-void draw_staged_thumb(const std::string &_tool) {
-    // Fitted to a square, not just to a width: a phone frame is portrait, so
-    // capping width alone would turn the send bar's one row into a 200px-tall
-    // band.
-    const float s = std::min(k_stage_thumb_side / static_cast<float>(g_appr_w),
-                             k_stage_thumb_side / static_cast<float>(g_appr_h));
-    const ImVec2 size(static_cast<float>(g_appr_w) * s,
-                      static_cast<float>(g_appr_h) * s);
-    ImGui::Image(static_cast<ImTextureID>(static_cast<uintptr_t>(g_appr_tex)),
-                 size, ImVec2(0.0F, 0.0F), ImVec2(1.0F, 1.0F));
-    const ImVec2 img_min = ImGui::GetItemRectMin();
-    const ImVec2 img_max = ImGui::GetItemRectMax();
-    // Where the next row starts; the overlay below is put back here so it costs
-    // no layout.
-    const ImVec2 below = ImGui::GetCursorScreenPos();
-    draw_region(ImGui::GetWindowDrawList(), img_min, s, *g_staged_region,
-                IM_COL32(80, 200, 255, 55), IM_COL32(255, 220, 80, 255), 2.0F);
-    ImGui::SameLine();
-    ImGui::TextDisabled("Corrected %s region will be sent with your reply.",
-                        _tool.c_str());
-    ImGui::SetCursorScreenPos(ImVec2(img_max.x - 20.0F, img_min.y + 1.0F));
-    if (ImGui::SmallButton("x##staged_clear")) {
-        clear_staged();
-    }
-    ImGui::SetCursorScreenPos(below);
-}
-
-/// The question waiting on the user: the proposed box drawn over the
-/// screenshot, and the two buttons that decide whether the tap runs at all.
-void draw_approval_bubble(const campcat::llm_approval &_a) {
-    ImGui::PushStyleColor(ImGuiCol_ChildBg, k_bot_bg);
-    ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, k_bubble_rounding);
-    ImGui::BeginChild("approval", ImVec2(0.0F, 0.0F),
-                      ImGuiChildFlags_AutoResizeY |
-                          ImGuiChildFlags_AlwaysUseWindowPadding,
-                      ImGuiWindowFlags_NoScrollbar);
-    WITH_FONT(bold, { ImGui::TextUnformatted("Waiting for your approval"); });
-    ImGui::TextDisabled("%s", _a.summary.c_str());
-    if (g_appr_tex != 0 && g_appr_w > 0) {
-        const ImVec2 size = fit_image(g_appr_w, g_appr_h, k_approval_max_w);
-        ImGui::Image(
-            static_cast<ImTextureID>(static_cast<uintptr_t>(g_appr_tex)), size,
-            ImVec2(0.0F, 0.0F), ImVec2(1.0F, 1.0F));
-        // Read off the Image before anything else touches the "last item"
-        // state.
-        const bool dbl = _a.editable && ImGui::IsItemHovered() &&
-                         ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left);
-        // The boxes are in screenshot pixels; the image is drawn scaled.
-        const ImVec2 origin = ImGui::GetItemRectMin();
-        const float scale = size.x / static_cast<float>(g_appr_w);
-        ImDrawList *dl = ImGui::GetWindowDrawList();
-        for (const campcat::llm::region &r : _a.highlight) {
-            draw_region(dl, origin, scale, r, IM_COL32(255, 200, 60, 48),
-                        IM_COL32(255, 200, 60, 230), 2.0F);
-        }
-        // The region the model gave, when the snap moved it. A different
-        // colour, not just a thinner line: the preview is drawn at ~0.16 scale
-        // on a phone resolution, so a 20px snap is a 3px offset and the two
-        // frames would read as one if they were both yellow.
-        if (_a.given_region) {
-            draw_region(dl, origin, scale, *_a.given_region, 0,
-                        IM_COL32(200, 120, 255, 220), 1.0F);
-        }
-        if (dbl) {
-            open_annotation(_a);
-        }
-        if (_a.given_region) {
-            ImGui::TextDisabled("Thin frame: the region the model gave. Solid: "
-                                "after snapping.");
-        }
-    }
-    if (_a.editable) {
-        ImGui::TextDisabled("Double-click the image to correct the region.");
-    }
-    if (ImGui::Button("Approve")) {
-        g_host.answer_approval(true);
-        clear_staged(); // an approval means the region is right; a redraw is
-                        // moot
-    }
-    ImGui::SameLine();
-    // Rejection with a typed correction goes through the prompt box, which
-    // stays live while this bubble is up; these buttons are the no-typing
-    // shortcut. Plain words, not ✓/✗: the UI font carries no glyphs for those
-    // two and draws them as "?" (see 2026-10-09-llm-tap-approval-design.md
-    // §4.5).
-    if (ImGui::Button("Reject")) {
-        // A staged redraw rides along: the user staged it to be sent, and
-        // dropping it silently here would surprise them.
-        g_host.answer_approval(false, {}, g_staged_region);
-        clear_staged();
-    }
-    ImGui::EndChild();
-    ImGui::PopStyleVar();
-    ImGui::PopStyleColor();
-}
-
-/// While a script the tools are running is in flight: one line and a Stop, so a
-/// loop that never ends can be stopped without quitting the app.
-void draw_script_bubble() {
-    ImGui::PushStyleColor(ImGuiCol_ChildBg, k_bot_bg);
-    ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, k_bubble_rounding);
-    ImGui::BeginChild("script_run", ImVec2(0.0F, 0.0F),
-                      ImGuiChildFlags_AutoResizeY |
-                          ImGuiChildFlags_AlwaysUseWindowPadding,
-                      ImGuiWindowFlags_NoScrollbar);
-    ImGui::TextUnformatted("Running script...");
-    if (ImGui::Button("Stop")) {
-        campcat::llm::request_script_stop();
-    }
-    ImGui::EndChild();
-    ImGui::PopStyleVar();
-    ImGui::PopStyleColor();
-}
-
-/// "Starting the emulator... 12s" plus a Stop, mirroring `draw_script_bubble`.
-/// The emulator wait can run for minutes and nothing else in the app can cut it
-/// short. The clock is this panel's own, started on the first frame the tool's
-/// flag is seen, so the number is the wait as the human watched it.
-void draw_emulator_bubble() {
-    static double shown_at = 0.0;
-    if (!campcat::llm::emulator_starting()) {
-        shown_at = 0.0; // the next wait starts its own clock
+/// Shared by the pinned preview and its full-size inspection popup.
+void draw_approval_image(const campcat::llm_approval &_a, float _max_h) {
+    if (g_appr_tex == 0 || g_appr_w <= 0 || g_appr_h <= 0) {
         return;
     }
-    if (shown_at == 0.0) {
-        shown_at = ImGui::GetTime();
+    const float max_w = ImGui::GetContentRegionAvail().x;
+    const float scale = std::min(
+        {1.0F, max_w / static_cast<float>(g_appr_w),
+         _max_h / static_cast<float>(g_appr_h)});
+    const ImVec2 size(g_appr_w * scale, g_appr_h * scale);
+    ImGui::Image(static_cast<ImTextureID>(static_cast<uintptr_t>(g_appr_tex)),
+                 size);
+    const ImVec2 origin = ImGui::GetItemRectMin();
+    ImDrawList *dl = ImGui::GetWindowDrawList();
+    for (const campcat::llm::region &r : _a.highlight) {
+        draw_region(dl, origin, scale, r, IM_COL32(255, 200, 60, 48),
+                    IM_COL32(255, 200, 60, 230), 2.0F);
     }
+    if (_a.given_region) {
+        draw_region(dl, origin, scale, *_a.given_region, 0,
+                    IM_COL32(200, 120, 255, 220), 1.0F);
+    }
+    if (g_staged_region && g_staged_id == _a.id) {
+        draw_region(dl, origin, scale, *g_staged_region,
+                    IM_COL32(80, 200, 255, 55), IM_COL32(80, 200, 255, 255),
+                    2.0F);
+    }
+    if (_a.editable && ImGui::IsItemHovered() &&
+        ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
+        open_annotation(_a);
+    }
+}
+
+/// Outside the scrollback: the question and its decisions stay by the input.
+/// True when a decision was sent, so Enter cannot also submit this frame.
+bool draw_approval_panel(const campcat::llm_approval &_a) {
+    bool answered = false;
     ImGui::PushStyleColor(ImGuiCol_ChildBg, k_bot_bg);
-    ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, k_bubble_rounding);
-    ImGui::BeginChild("emulator_start", ImVec2(0.0F, 0.0F),
-                      ImGuiChildFlags_AutoResizeY |
-                          ImGuiChildFlags_AlwaysUseWindowPadding,
-                      ImGuiWindowFlags_NoScrollbar);
-    ImGui::Text("Starting the emulator... %ds",
-                static_cast<int>(ImGui::GetTime() - shown_at));
-    if (ImGui::Button("Stop")) {
-        campcat::llm::request_emulator_stop();
+    ImGui::BeginChild("approval", ImVec2(0.0F, 0.0F),
+                      ImGuiChildFlags_Borders | ImGuiChildFlags_AutoResizeY);
+    WITH_FONT(bold, { ImGui::TextUnformatted("Needs your approval"); });
+    if (ImGui::BeginTable("approval_details", 2,
+                          ImGuiTableFlags_SizingStretchProp)) {
+        ImGui::TableSetupColumn("evidence", ImGuiTableColumnFlags_WidthStretch,
+                                0.4F);
+        ImGui::TableSetupColumn("decision", ImGuiTableColumnFlags_WidthStretch,
+                                0.6F);
+        ImGui::TableNextColumn();
+        if (g_appr_tex != 0) {
+            draw_approval_image(_a, 120.0F);
+            if (ImGui::Button("View image")) {
+                ImGui::OpenPopup("approval_screenshot");
+            }
+            ImGui::SetNextWindowSize(
+                ImVec2(ImGui::GetIO().DisplaySize.x * 0.7F,
+                       ImGui::GetIO().DisplaySize.y * 0.75F),
+                ImGuiCond_Appearing);
+            if (ImGui::BeginPopup("approval_screenshot")) {
+                draw_approval_image(_a, ImGui::GetContentRegionAvail().y);
+                ImGui::EndPopup();
+            }
+        } else {
+            ImGui::TextWrapped("No screenshot attached to this request.");
+        }
+        ImGui::TableNextColumn();
+        ImGui::BeginChild("approval_summary", ImVec2(0.0F, 48.0F));
+        ImGui::TextWrapped("%s", _a.summary.c_str());
+        ImGui::EndChild();
+        if (ImGui::Button("Allow once")) {
+            g_host.answer_approval(true);
+            clear_staged();
+            answered = true;
+        }
+        const float reject_w = ImGui::CalcTextSize("Reject").x +
+                               ImGui::GetStyle().FramePadding.x * 2.0F;
+        const float right = ImGui::GetCursorScreenPos().x +
+                            ImGui::GetContentRegionAvail().x;
+        if (ImGui::GetItemRectMax().x + ImGui::GetStyle().ItemSpacing.x +
+                reject_w <= right) {
+            ImGui::SameLine();
+        }
+        if (ImGui::Button("Reject")) {
+            g_host.answer_approval(false, {}, g_staged_region);
+            clear_staged();
+            answered = true;
+        }
+        if (_a.editable && g_appr_tex != 0 && ImGui::Button("Edit region")) {
+            open_annotation(_a);
+        }
+        if (g_staged_region) {
+            ImGui::TextWrapped("Corrected region ready. Submit below to send it.");
+            if (ImGui::SmallButton("Discard correction")) {
+                clear_staged();
+            }
+        }
+        ImGui::EndTable();
     }
     ImGui::EndChild();
-    ImGui::PopStyleVar();
     ImGui::PopStyleColor();
+    return answered;
 }
 
 /// Draws the conversation. Returns true when the user asked to clear it via the
@@ -2006,28 +1952,6 @@ bool draw_log(const ImVec2 &_size) {
         draw_turn(g_turns[i], static_cast<int>(i));
     }
 
-    // The approval gate, at the end of the conversation: the user reads it as
-    // the model's latest action, and it scrolls away with the rest once
-    // answered.
-    const campcat::llm_approval approval = g_host.pending_approval();
-    if (sync_approval_texture(approval)) {
-        ImGui::Spacing();
-        draw_approval_bubble(approval);
-    }
-
-    // A script in flight, next to where the approval bubble was: the same place
-    // the user is already looking. Only shown when there is really a script to
-    // stop, so it never becomes a button that does nothing.
-    if (campcat::llm::script_running()) {
-        ImGui::Spacing();
-        draw_script_bubble();
-    }
-
-    // The same place, for the same reason: a wait nothing else can cut short.
-    if (campcat::llm::emulator_starting()) {
-        ImGui::Spacing();
-        draw_emulator_bubble();
-    }
     ImGui::PopFont();
 
     // Follow new content only while the user is already at the bottom. The
@@ -2096,6 +2020,14 @@ void llm_panel_shutdown_finish() {
 }
 
 campcat::activity_status llm_panel_activity() {
+    if (g_prompts.stopping()) {
+        return {g_running.load() ? campcat::activity_level::waiting
+                                 : campcat::activity_level::idle,
+                g_running.load() ? "Stopping" : "Stopped"};
+    }
+    if (g_resetting.load()) {
+        return {campcat::activity_level::busy, "Clearing"};
+    }
     // Most specific first: a boot and a script both run inside a turn, so
     // reading `g_running` first would report "Thinking" through all of them.
     // The memory pass sets `g_running` too, so it has to be read before it.
@@ -2123,36 +2055,72 @@ campcat::activity_status llm_panel_activity() {
     return {campcat::activity_level::idle, "Idle"};
 }
 
-void llm_panel_draw_panel(campcat::shell_state &_st, campcat::app_config &_cfg,
-                          bool _adb_busy) {
-    // Finished work is folded in on the UI thread, which owns g_turns.
+void llm_panel_tick(bool _adb_busy) {
     consume_handoff();
-    // The worker cleared the stream for a message that was only queued. It is
-    // the turn in flight now, so the pump below writes into it and not into
-    // the one that just finished.
     if (g_promote.exchange(false)) {
         if (llm_turn *queued = queued_turn()) {
             queued->queued = false;
         }
     }
-
-    // An automation cycle or the scheduler is using adb, so tools must refuse
-    // rather than contend with it.
     g_adb_busy.store(_adb_busy);
+    if (g_prompts.stopping() && g_running.load()) {
+        // A tool can publish its approval or reset its stop flag after the
+        // first click. Keep cancelling until the worker acknowledges Stop.
+        request_task_stop();
+    }
+    pump_stream();
+}
 
+bool llm_panel_draw_task_bar(bool _on_llm_page) {
+    const campcat::activity_status status = llm_panel_activity();
+    if (!_on_llm_page && !g_running.load() && !g_prompts.stopping() &&
+        status.level != campcat::activity_level::failed) {
+        return false;
+    }
+    bool view_task = false;
+    ImGui::PushID("agent_task_bar");
+    ImGui::AlignTextToFramePadding();
+    WITH_FONT(bold, { ImGui::TextUnformatted("Agent task"); });
+    ImGui::SameLine();
+    ImGui::TextColored(campcat::activity_color(status.level), "%s", status.label);
+    if (g_running.load()) {
+        ImGui::BeginDisabled(g_prompts.stopping() || g_resetting.load());
+        if (ImGui::Button("Stop agent")) {
+            request_task_stop();
+        }
+        ImGui::EndDisabled();
+    }
+    if (!_on_llm_page) {
+        if (g_running.load()) {
+            ImGui::SameLine();
+        }
+        view_task = ImGui::Button("Open task in LLM");
+    }
+    if (g_prompts.stopping() && g_running.load()) {
+        ImGui::TextWrapped("Stop requested. Waiting for the current operation to finish.");
+    } else if (status.level == campcat::activity_level::waiting &&
+               g_host.pending_approval().pending) {
+        ImGui::TextWrapped(_on_llm_page
+                              ? "Review the operation below."
+                              : "An operation needs your decision. Open LLM to review it.");
+    }
+    ImGui::Separator();
+    ImGui::Spacing();
+    ImGui::PopID();
+    return view_task;
+}
+
+void llm_panel_draw_panel(campcat::shell_state &_st, campcat::app_config &_cfg) {
     // Kept for the shutdown pass and the memory window, neither of which is
     // handed the config: this panel is the only place that sees it.
     g_config_home = _cfg.config_home;
     g_provider = _cfg.llm.provider;
 
-    const bool busy = g_running.load();
-
-    pump_stream();
     // Saved skills in a fixed column on the left, conversation on the right,
     // the prompt box below both. Side by side because the list is an index, not
     // a second conversation: stacked, it took height off every reply.
     script_editor_panel_draw(std::filesystem::path(_cfg.config_home),
-                             k_script_list_w, -g_footer_h);
+                             k_script_list_w, -g_footer_h, _st.workspace);
     ImGui::SameLine();
     // Measured, not another negative width: a negative size is resolved against
     // the window's content region, not against what is left past the cursor, so
@@ -2179,9 +2147,12 @@ void llm_panel_draw_panel(campcat::shell_state &_st, campcat::app_config &_cfg,
     if (g_staged_region && (!awaiting || g_staged_id != approval.id)) {
         clear_staged();
     }
-    if (awaiting && g_staged_region && g_appr_tex != 0 && g_appr_w > 0) {
-        draw_staged_thumb(approval.tool);
-    }
+    const bool have_approval = sync_approval_texture(approval);
+    ImGui::BeginDisabled(g_prompts.stopping());
+    const bool answered = have_approval && draw_approval_panel(approval);
+    ImGui::EndDisabled();
+    ImGui::TextUnformatted(awaiting ? "Correction for this operation"
+                                    : "Message to agent");
 
     // Idle consolidation. Measured from the last LLM request rather than from
     // mouse or keyboard activity: an agent nobody is talking to is an agent
@@ -2194,17 +2165,17 @@ void llm_panel_draw_panel(campcat::shell_state &_st, campcat::app_config &_cfg,
         start_memorize(_st, _cfg);
     }
 
-    // The button is square like the gear: the icon carries the meaning, so no
-    // label has to fit, and the 104px the text reserved goes back to the prompt
-    // box. The width still reserves exactly what follows the input.
+    // The action label makes an approval correction distinct from a new message.
     const bool memorizing = g_memorizing.load();
     const float gap = ImGui::GetStyle().ItemSpacing.x;
-    const float send_w = ImGui::GetFrameHeight();
+    const char *send_label = awaiting ? "Submit correction" : "Send";
+    const float send_w = ImGui::CalcTextSize(send_label).x +
+                         ImGui::GetStyle().FramePadding.x * 2.0F;
     const float gear_w = ImGui::GetFrameHeight() + gap;
     ImGui::SetNextItemWidth(-(send_w + gear_w + gap * 2.0F + 2.0F));
     const bool submitted =
         prompt_input_text("##llm_prompt",
-                          awaiting ? "Optional: tell it what to do instead"
+                          awaiting ? "Describe the correction for this operation..."
                                    : "Tell CampCat what to do...",
                           &g_input);
     // Attached here rather than inside prompt_input_text: that helper paints
@@ -2230,45 +2201,23 @@ void llm_panel_draw_panel(campcat::shell_state &_st, campcat::app_config &_cfg,
     ImGui::SameLine();
     // A turn in flight still accepts a message: that message is how the user
     // stops it. Clear conversation does not, because the reset drops the log.
-    const bool can_send =
-        awaiting || (!g_resetting.load() && !is_blank(g_input));
+    const bool can_send = !answered &&
+                          !(g_prompts.stopping() && g_running.load()) &&
+                          !g_resetting.load() &&
+                          (!is_blank(g_input) || (awaiting && g_staged_region));
     if (!can_send) {
         ImGui::BeginDisabled();
     }
     ImGui::PushStyleColor(ImGuiCol_Button, k_primary);
     ImGui::PushStyleColor(ImGuiCol_ButtonHovered, k_primary_hi);
     ImGui::PushStyleColor(ImGuiCol_ButtonActive, k_primary_lo);
-    const bool clicked = ImGui::Button("##llm_send", ImVec2(send_w, 0.0F));
+    const bool clicked = ImGui::Button(send_label, ImVec2(send_w, 0.0F));
     ImGui::PopStyleColor(3);
-    // Read while disabled is still in effect: the icon wants the faded colour,
-    // the tooltip must not get it, so the tint is taken here and the tooltip
-    // goes out after EndDisabled.
-    const ImU32 send_tint = ImGui::GetColorU32(ImGuiCol_Text);
-    const bool send_hovered =
-        ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled);
-    const GLuint send_tex = campcat::app::load_icon(k_send_path);
-    if (send_tex != 0) {
-        const ImVec2 mn = ImGui::GetItemRectMin();
-        const float pad = (send_w - k_send_icon_side) * 0.5F;
-        ImGui::GetWindowDrawList()->AddImage(
-            static_cast<ImTextureID>(static_cast<uintptr_t>(send_tex)),
-            ImVec2(mn.x + pad, mn.y + pad),
-            ImVec2(mn.x + send_w - pad, mn.y + send_w - pad),
-            ImVec2(0.0F, 0.0F), ImVec2(1.0F, 1.0F), send_tint);
-    }
     if (!can_send) {
         ImGui::EndDisabled();
     }
-    // The label used to say why a disabled Send was disabled; an icon cannot,
-    // so that moved here. A disabled item never reports as hovered without the
-    // flag. An empty prompt needs no explanation, and a turn in flight already
-    // shows as its own header chip, so only the memory pass speaks up.
-    if (send_hovered) {
-        if (memorizing) {
-            ImGui::SetTooltip("Summarizing...");
-        } else if (can_send) {
-            ImGui::SetTooltip("Send");
-        }
+    if (memorizing && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+        ImGui::SetTooltip("Summarizing...");
     }
     ImGui::SameLine();
     draw_approval_settings(_cfg);
@@ -2329,7 +2278,7 @@ void llm_panel_draw_panel(campcat::shell_state &_st, campcat::app_config &_cfg,
                                    g_staged_region);
             clear_staged();
             g_input.clear(); // consumed as the answer, not as a prompt
-        } else if (busy) {
+        } else if (g_running.load()) {
             const std::string prompt = g_input;
             g_input.clear();
             queue_prompt(prompt);

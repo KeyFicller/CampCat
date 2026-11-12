@@ -1,4 +1,5 @@
 #include "app/ui/graph_panel.h"
+#include "app/workspace_selection.h"
 
 #include "app/ui/fonts.h"
 #include "app/ui/gl_texture.h"
@@ -38,7 +39,7 @@ constexpr float k_node_w = 240.0F;
 constexpr float k_header_h = 23.0F;
 constexpr float k_text_pad = 8.0F;
 constexpr float k_body_pad = 3.0F;
-constexpr float k_line_h = 17.0F;
+constexpr float k_line_h = 19.0F;
 constexpr float k_node_min_h = 72.0F;
 constexpr float k_gap_x = 88.0F;
 constexpr float k_gap_y = 28.0F;
@@ -56,6 +57,10 @@ constexpr float k_return_drop = 36.0F;
 constexpr float k_return_pitch = 28.0F;
 
 const ImU32 k_ink = IM_COL32(216, 222, 229, 255);
+/// An edge label sits on a raised chip: the canvas colour behind it would let
+/// a crossing link run straight through the word.
+const ImU32 k_label_bg = IM_COL32(30, 34, 40, 235);
+const ImU32 k_label_edge = IM_COL32(60, 66, 76, 255);
 /// A line reporting something the anchor lacks.
 const ImU32 k_bad = IM_COL32(224, 106, 106, 255);
 
@@ -553,8 +558,25 @@ ImVec2 bezier_mid(ImVec2 _p0, ImVec2 _p1, ImVec2 _p2, ImVec2 _p3) {
     return _p0 * 0.125F + _p1 * 0.375F + _p2 * 0.375F + _p3 * 0.125F;
 }
 
+bool pointer_on_canvas() {
+    // The clicked node owns the active ImGui item by the time Show returns.
+    if (!ImGui::IsWindowHovered(ImGuiHoveredFlags_ChildWindows |
+                                ImGuiHoveredFlags_AllowWhenBlockedByActiveItem)) {
+        return false;
+    }
+    const ImVec2 mouse = ImGui::GetMousePos();
+    const auto &minimap = view_options().mMinimap;
+    return ImRect(g_canvas_origin, g_canvas_origin + g_canvas_size).Contains(mouse) &&
+           !ImRect(g_canvas_origin + minimap.Min * g_canvas_size,
+                   g_canvas_origin + minimap.Max * g_canvas_size).Contains(mouse);
+}
+
 void apply_hits(const std::vector<hit_target> &_hits,
-                const std::filesystem::path &_home) {
+                const std::filesystem::path &_home,
+                campcat::workspace_selection &_selection) {
+    if (!pointer_on_canvas()) {
+        return;
+    }
     const ImVec2 mouse = ImGui::GetMousePos();
     const bool down = ImGui::IsMouseDown(ImGuiMouseButton_Left);
     const bool dbl = ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left);
@@ -575,20 +597,45 @@ void apply_hits(const std::vector<hit_target> &_hits,
             }
             ImGui::EndTooltip();
         }
-        if (dbl && !hit.open_script.empty()) {
-            script_editor_open(_home, hit.open_script);
+        if (ImGui::IsMouseClicked(ImGuiMouseButton_Left) &&
+            !hit.open_script.empty()) {
+            _selection.select_bundle(_selection.graph, hit.open_script);
+            if (dbl) {
+                script_editor_open(_home, hit.open_script);
+            }
         }
         return;
     }
 }
 
-std::string g_selected;
+std::string g_loaded_name;
+std::filesystem::path g_loaded_home;
+std::string g_focused_bundle;
+std::string g_browsed_bundle;
 scanned_graph g_loaded;
 std::string g_error;
 /// Fit the view once, on the frame after a load: `Show` resets the flag itself,
 /// so it is spent the first time it is read.
 bool g_need_fit = false;
 graph_view_delegate g_delegate;
+
+std::string node_at_pointer() {
+    const float scale = g_view.mFactor;
+    const ImVec2 offset = g_canvas_origin + g_view.mPosition * scale;
+    // Selected cards are drawn above unselected cards; later indices are on top.
+    for (bool selected : {true, false}) {
+        for (std::size_t i = g_delegate.GetNodeCount(); i > 0; --i) {
+            const auto node = g_delegate.GetNode(i - 1);
+            if (node.mSelected == selected &&
+                ImRect(offset + node.mRect.Min * scale,
+                       offset + node.mRect.Max * scale)
+                    .Contains(ImGui::GetMousePos())) {
+                return node.mName;
+            }
+        }
+    }
+    return {};
+}
 
 std::optional<GraphEditor::NodeIndex> node_index(std::string_view _id) {
     for (std::size_t i = 0; i < g_delegate.GetNodeCount(); ++i) {
@@ -694,7 +741,13 @@ void draw_edge_labels(ImDrawList *_dl, ImVec2 _origin, ImVec2 _canvas,
         if (visible.GetWidth() <= 0.0F || visible.GetHeight() <= 0.0F) {
             continue;
         }
-        _dl->AddRectFilled(box.Min, box.Max, view_options().mBackgroundColor);
+        const float radius = 3.0F * factor;
+        _dl->AddRectFilled(box.Min, box.Max,
+                           edge.script == g_browsed_bundle ? k_accent
+                                                           : k_label_bg,
+                           radius);
+        _dl->AddRect(box.Min, box.Max, k_label_edge, radius, 0,
+                     1.0F * factor);
         _dl->AddText(font, size, mid - text * 0.5F,
                      edge.script == running ? k_run : k_ink, label.data(),
                      label.data() + label.size());
@@ -710,6 +763,9 @@ void draw_edge_labels(ImDrawList *_dl, ImVec2 _origin, ImVec2 _canvas,
 /// them, since one is built a screen at a time.
 void load_graph(const std::filesystem::path &_home, const std::string &_name) {
     clear_previews();
+    g_loaded_name = _name;
+    g_loaded_home = _home;
+    g_focused_bundle.clear();
     g_loaded = campcat::ccat_lang::scan_graph(_home, _name);
     g_delegate.reset(g_loaded.graph, _home);
     g_error.clear();
@@ -722,66 +778,69 @@ void load_graph(const std::filesystem::path &_home, const std::string &_name) {
 
 } // namespace
 
-void graph_panel_draw(const campcat::app_config &_cfg_view) {
-    script_editor_draw_windows();
+void graph_panel_focus_selection() { g_focused_bundle.clear(); }
+
+void graph_panel_draw(const campcat::app_config &_cfg_view,
+                       campcat::workspace_selection &_selection) {
     const std::filesystem::path home = _cfg_view.config_home;
-    const std::vector<std::string> names = campcat::ccat_lang::graph_names(home);
-    if (names.empty()) {
-        ImGui::TextDisabled("No graph under %s", home.string().c_str());
+    if (_selection.graph.empty()) {
+        g_loaded_name.clear();
+        g_focused_bundle.clear();
+        ImGui::TextWrapped("Choose a graph in the workspace toolbar.");
         return;
     }
-
-    // The selected graph can go away under the page -- deleted, or renamed by a
-    // tool -- and the canvas must go with it rather than point at a file that
-    // is no longer there.
-    if (!g_selected.empty() &&
-        std::find(names.begin(), names.end(), g_selected) == names.end()) {
-        g_selected.clear();
-        g_loaded = scanned_graph{};
-        g_error.clear();
-        g_delegate.reset(g_loaded.graph, home);
-        clear_previews();
+    if (g_loaded_name != _selection.graph || g_loaded_home != home) {
+        load_graph(home, _selection.graph);
     }
-
-    const ImGuiStyle &style = ImGui::GetStyle();
-    const float reload_w =
-        ImGui::CalcTextSize("Reload").x + style.FramePadding.x * 2.0F;
-    ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - reload_w -
-                            style.ItemSpacing.x);
-    if (ImGui::BeginCombo("##graph_bundle",
-                          g_selected.empty() ? "(no graph)"
-                                             : g_selected.c_str())) {
-        for (const std::string &name : names) {
-            if (ImGui::Selectable(name.c_str(), name == g_selected) &&
-                name != g_selected) {
-                g_selected = name;
-                load_graph(home, name);
-            }
-        }
-        ImGui::EndCombo();
+    if (ImGui::Button("Reload")) {
+        load_graph(home, _selection.graph);
     }
     ImGui::SameLine();
-    if (g_selected.empty()) {
-        ImGui::BeginDisabled();
+    if (ImGui::Button("Fit graph")) {
+        g_need_fit = true;
     }
-    const bool reload_clicked = ImGui::Button("Reload");
-    if (g_selected.empty()) {
-        ImGui::EndDisabled();
+    ImGui::SameLine();
+    ImGui::BeginDisabled(_selection.bundle.empty());
+    if (ImGui::Button("Focus selected")) {
+        graph_panel_focus_selection();
     }
-    if (reload_clicked && !g_selected.empty()) {
-        load_graph(home, g_selected);
-    }
-
-    if (g_selected.empty()) {
-        ImGui::TextDisabled("Pick a graph.");
-        return;
-    }
+    ImGui::EndDisabled();
     if (!g_error.empty()) {
         ImGui::TextColored(k_err_col, "%s", g_error.c_str());
     }
 
     GraphEditor::FitOnScreen fit =
         g_need_fit ? GraphEditor::Fit_AllNodes : GraphEditor::Fit_None;
+    if (!_selection.bundle.empty() &&
+        _selection.bundle != g_focused_bundle) {
+        std::vector<std::string> anchors;
+        for (const auto &anchor : g_loaded.graph.anchors) {
+            if (_selection.bundle == _selection.graph + "." + anchor.id) {
+                anchors.push_back(anchor.id);
+            }
+        }
+        for (const auto &edge : g_loaded.graph.edges) {
+            if (edge.script == _selection.bundle) {
+                anchors.push_back(edge.from);
+                anchors.push_back(edge.to);
+            }
+        }
+        for (const auto &action : g_loaded.graph.actions) {
+            if (action.script == _selection.bundle) {
+                anchors.push_back(action.anchor);
+            }
+        }
+        for (std::size_t i = 0; i < g_delegate.GetNodeCount(); ++i) {
+            const char *name = g_delegate.GetNode(i).mName;
+            g_delegate.SelectNode(i, name != nullptr &&
+                std::find(anchors.begin(), anchors.end(), name) != anchors.end());
+        }
+        if (!anchors.empty()) {
+            fit = GraphEditor::Fit_SelectedNodes;
+        }
+    }
+    g_focused_bundle = _selection.bundle;
+    g_browsed_bundle = _selection.bundle;
     g_need_fit = false;
     g_hits.clear();
     g_edge_labels_drawn = false;
@@ -801,5 +860,14 @@ void graph_panel_draw(const campcat::app_config &_cfg_view) {
     }
     GraphEditor::Show(g_delegate, view_options(), g_view, true, &fit);
     io.MouseWheel = wheel;
-    apply_hits(g_hits, home);
+    if (pointer_on_canvas() && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+        const auto node = node_at_pointer();
+        if (!node.empty()) {
+            _selection.select_bundle(_selection.graph,
+                                      _selection.graph + "." + node);
+        }
+    }
+    apply_hits(g_hits, home, _selection);
+    // Canvas clicks keep their current pan/zoom; only external selections fit.
+    g_focused_bundle = _selection.bundle;
 }

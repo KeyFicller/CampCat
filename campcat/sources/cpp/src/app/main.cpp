@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <cfloat>
 #include <csignal>
 #include <cstdio>
 #include <cstdlib>
@@ -31,6 +32,8 @@
 #include "app/ui/template_capture_panel.h"
 #include "ccat_driver/ccat_script_profile.h"
 #include "core/app_config.h"
+#include "core/script/ccat_bundle.h"
+#include "core/script/ccat_graph.h"
 #include "core/automation_log.h"
 #include "core/llm/llm_tools.h"
 #include "core/mcp/script_server.h"
@@ -108,6 +111,123 @@ void print_mcp_usage() {
                  "campcat: --graph <name> is required for --mcp and --mcp-http\n"
                  "usage: campcat --mcp --graph <name> [config.json]\n"
                  "       campcat --mcp-http [port] --graph <name> [config.json]\n");
+}
+
+enum class shell_page : int { Script = 0, Llm, Console, Graph, Settings };
+enum class workspace_destination { current, graph, script };
+
+workspace_destination draw_workspace_toolbar(campcat::shell_state &_st,
+                                             campcat::app_config &_cfg,
+                                             bool _locked,
+                                             bool *_details_open,
+                                             shell_page _page) {
+    static std::filesystem::path cached_home;
+    static bool loaded = false;
+    static double next_scan = 0.0;
+    static std::vector<std::string> graphs;
+    static std::vector<std::string> bundles;
+    auto &selection = _st.workspace;
+    const std::filesystem::path home = _cfg.config_home;
+    const bool changed_home = !loaded || cached_home != home;
+    if (changed_home || ImGui::GetTime() >= next_scan) {
+        cached_home = home;
+        loaded = true;
+        next_scan = ImGui::GetTime() + 1.0;
+        selection.set_home(home);
+        graphs = campcat::ccat_lang::graph_names(home);
+        bundles = campcat::ccat_lang::bundle_names(home);
+        selection.reconcile(graphs, bundles);
+        if (changed_home) {
+            if (std::find(bundles.begin(), bundles.end(), _cfg.script_bundle) !=
+                bundles.end()) {
+                const auto tag = campcat::ccat_lang::bundle_tags(home,
+                                                                _cfg.script_bundle);
+                selection.select_bundle(
+                    !tag.anchor_of.empty() ? tag.anchor_of
+                    : !tag.edge_of.empty() ? tag.edge_of : tag.action_of,
+                    _cfg.script_bundle);
+            } else if (!graphs.empty()) {
+                selection.select_graph(graphs.front());
+            }
+        }
+    }
+    if (_page != shell_page::Graph && _page != shell_page::Llm) {
+        return workspace_destination::current;
+    }
+    workspace_destination destination = workspace_destination::current;
+    ImGui::PushID("workspace_toolbar");
+    const float width = ImGui::GetContentRegionAvail().x;
+    if (ImGui::BeginTable("context", 3, ImGuiTableFlags_SizingStretchProp)) {
+        ImGui::TableSetupColumn("graph", ImGuiTableColumnFlags_WidthFixed,
+                                std::min(200.0F, width * 0.4F));
+        ImGui::TableSetupColumn("selection", ImGuiTableColumnFlags_WidthStretch, 1.0F);
+        ImGui::TableSetupColumn("actions", ImGuiTableColumnFlags_WidthFixed,
+                                ImGui::CalcTextSize("More").x +
+                                    ImGui::GetStyle().FramePadding.x * 2.0F);
+        ImGui::TableNextRow();
+        ImGui::TableSetColumnIndex(0);
+        ImGui::SetNextItemWidth(-FLT_MIN);
+        if (ImGui::BeginCombo("##graph", selection.graph.empty()
+                                          ? "(no graph)" : selection.graph.c_str())) {
+            for (const std::string &name : graphs) {
+                if (ImGui::Selectable(name.c_str(), name == selection.graph)) {
+                    selection.select_graph(name);
+                }
+            }
+            ImGui::EndCombo();
+        }
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("Choose graph");
+        }
+        ImGui::TableSetColumnIndex(1);
+        const ImVec2 label_at = ImGui::GetCursorScreenPos();
+        const ImVec2 label_size(std::max(1.0F, ImGui::GetContentRegionAvail().x),
+                                ImGui::GetFrameHeight());
+        const ImVec4 label_clip(label_at.x, label_at.y,
+                                label_at.x + label_size.x,
+                                label_at.y + label_size.y);
+        ImGui::GetWindowDrawList()->AddText(
+            ImGui::GetFont(), ImGui::GetFontSize(),
+            ImVec2(label_at.x, label_at.y + ImGui::GetStyle().FramePadding.y),
+            ImGui::GetColorU32(ImGuiCol_TextDisabled),
+            selection.bundle.empty() ? "Select a skill" : selection.bundle.c_str(),
+            nullptr, 0.0F, &label_clip);
+        ImGui::Dummy(label_size);
+        if (ImGui::IsItemHovered() && !selection.bundle.empty()) {
+            ImGui::SetTooltip("%s", selection.bundle.c_str());
+        }
+        ImGui::TableSetColumnIndex(2);
+        if (ImGui::Button("More")) {
+            ImGui::OpenPopup("skill_actions");
+        }
+        if (ImGui::BeginPopup("skill_actions")) {
+            if (ImGui::MenuItem("Edit script", nullptr, false,
+                                 !selection.bundle.empty())) {
+                script_editor_open(home, selection.bundle);
+            }
+            if (ImGui::MenuItem("Details", nullptr, *_details_open,
+                                 !selection.bundle.empty())) {
+                *_details_open = !*_details_open;
+            }
+            if (_page != shell_page::Graph &&
+                ImGui::MenuItem("Show graph", nullptr, false,
+                                 !selection.graph.empty())) {
+                graph_panel_focus_selection();
+                destination = workspace_destination::graph;
+            }
+            ImGui::Separator();
+            if (ImGui::MenuItem("Use for run", nullptr, false,
+                                 !selection.bundle.empty() && !_locked)) {
+                _cfg.script_bundle = selection.bundle;
+                _st.set_script_bundle(selection.bundle);
+                destination = workspace_destination::script;
+            }
+            ImGui::EndPopup();
+        }
+        ImGui::EndTable();
+    }
+    ImGui::PopID();
+    return destination;
 }
 
 } // namespace
@@ -345,7 +465,6 @@ int main(int argc, char **argv) {
         campcat::app_config cfg_view = st.snapshot_cfg();
         // Re-read every frame: the Script page's bundle picker publishes
         // through `set_script_bundle`, so this view is the shell's, not ours.
-        const campcat::ccat_script_profile ccat_ui = st.snapshot_ccat_live();
 
         if (ImGui::BeginMenuBar()) {
             if (ImGui::BeginMenu("File")) {
@@ -359,8 +478,8 @@ int main(int argc, char **argv) {
 
         const bool busy_now = st.cycle_running.load();
         const bool lock_manual_single = busy_now || st.sched.running();
+        llm_panel_tick(lock_manual_single);
 
-        enum class shell_page : int { Script = 0, Llm, Console, Graph, Settings };
         static shell_page page = shell_page::Script;
 
         // What the title row reports. Per page, because the badge sits next to
@@ -428,8 +547,9 @@ int main(int argc, char **argv) {
             }
         };
 
-        constexpr float k_left_w = 320.0F;
+        constexpr float k_left_w = 210.0F;
         const float body_h = ImGui::GetContentRegionAvail().y;
+        bool editor_can_dock = false;
 
         if (ImGui::BeginTable("shell_layout", 2,
                               ImGuiTableFlags_BordersInnerV |
@@ -501,7 +621,16 @@ int main(int argc, char **argv) {
                     page_title = "Script";
                     break;
                 }
-                WITH_FONT(title, { ImGui::TextUnformatted(page_title); });
+                // The chips are drawn in the smaller bold face beside a title
+                // in the larger one, and `SameLine` only shares the line's top.
+                // Both the title's line height and where it starts are needed
+                // to centre them on it.
+                const ImVec2 title_at = ImGui::GetCursorScreenPos();
+                float title_h = 0.0F;
+                WITH_FONT(title, {
+                    title_h = ImGui::GetTextLineHeight();
+                    ImGui::TextUnformatted(page_title);
+                });
                 WITH_FONT(bold, {
                     const float chips_w =
                         (show_page_chip ? chip_width(page_status) + k_chip_gap
@@ -509,26 +638,113 @@ int main(int argc, char **argv) {
                         chip_width(device_status);
                     ImGui::SameLine(ImGui::GetWindowContentRegionMax().x -
                                     chips_w);
+                    const float dy =
+                        (title_h - ImGui::GetTextLineHeight()) * 0.5F;
+                    const ImVec2 at = ImGui::GetCursorScreenPos();
+                    ImGui::SetCursorScreenPos(ImVec2(at.x, at.y + dy));
                     if (show_page_chip) {
                         draw_chip(page_status);
                         ImGui::SameLine(0.0F, k_chip_gap);
                     }
                     draw_chip(device_status);
+                    // Back to the title's own bottom, so the offset does not
+                    // push the separator under it.
+                    ImGui::SetCursorScreenPos(
+                        ImVec2(title_at.x, title_at.y + title_h));
                 });
                 ImGui::Separator();
                 ImGui::Spacing();
             }
 
-            if (page == shell_page::Script) {
-                script_panel_draw(st, cfg_view, ccat_ui, lock_manual_single);
-            } else if (page == shell_page::Llm) {
-                llm_panel_draw_panel(st, cfg_view, lock_manual_single);
-            } else if (page == shell_page::Console) {
-                console_panel_draw(st, cfg_view, busy_now);
-            } else if (page == shell_page::Graph) {
-                graph_panel_draw(cfg_view);
-            } else if (page == shell_page::Settings) {
-                settings_panel_draw(st, cfg_view);
+            if (llm_panel_draw_task_bar(page == shell_page::Llm)) {
+                page = shell_page::Llm;
+            }
+
+            static bool details_open = false;
+            const auto activity = llm_panel_activity();
+            const bool run_locked = lock_manual_single || st.mumu_launching.load() ||
+                activity.level == campcat::activity_level::busy ||
+                activity.level == campcat::activity_level::waiting;
+            switch (draw_workspace_toolbar(st, cfg_view, run_locked,
+                                            &details_open, page)) {
+            case workspace_destination::graph:
+                page = shell_page::Graph;
+                break;
+            case workspace_destination::script:
+                page = shell_page::Script;
+                break;
+            case workspace_destination::current:
+                break;
+            }
+
+            const auto draw_page = [&] {
+                if (page == shell_page::Script) {
+                    script_panel_draw(st, cfg_view, st.snapshot_ccat_live(),
+                                      lock_manual_single);
+                } else if (page == shell_page::Llm) {
+                    llm_panel_draw_panel(st, cfg_view);
+                } else if (page == shell_page::Console) {
+                    console_panel_draw(st, cfg_view, busy_now);
+                } else if (page == shell_page::Graph) {
+                    graph_panel_draw(cfg_view, st.workspace);
+                } else if (page == shell_page::Settings) {
+                    settings_panel_draw(st, cfg_view);
+                }
+            };
+            const bool have_details = details_open && !st.workspace.bundle.empty() &&
+                (page == shell_page::Graph || page == shell_page::Llm);
+            const bool have_editor = script_editor_has_open();
+            editor_can_dock = ImGui::GetContentRegionAvail().x >= 900.0F;
+            const bool dock_sidebar = editor_can_dock && (have_details || have_editor);
+            const float workspace_h = ImGui::GetContentRegionAvail().y;
+            // Keep the page's child ID stable when the inspector opens/closes.
+            if (ImGui::BeginTable("workspace_panes", 2,
+                                  ImGuiTableFlags_Resizable |
+                                      ImGuiTableFlags_NoSavedSettings |
+                                      ImGuiTableFlags_SizingStretchProp,
+                                  ImVec2(-1.0F, workspace_h))) {
+                ImGui::TableSetupColumn("view", ImGuiTableColumnFlags_WidthStretch, 1.0F);
+                ImGui::TableSetupColumn("details",
+                    ImGuiTableColumnFlags_WidthFixed |
+                        (dock_sidebar ? 0 : ImGuiTableColumnFlags_Disabled),
+                    440.0F);
+                ImGui::TableNextRow(ImGuiTableRowFlags_None, workspace_h);
+                ImGui::TableSetColumnIndex(0);
+                ImGui::BeginChild("workspace_view", ImVec2(0.0F, 0.0F));
+                draw_page();
+                ImGui::EndChild();
+                if (dock_sidebar) {
+                    ImGui::TableSetColumnIndex(1);
+                    ImGui::BeginChild("workspace_details", ImVec2(0.0F, 0.0F),
+                                      ImGuiChildFlags_Borders);
+                    if (ImGui::BeginTabBar("sidebar_tabs",
+                                           ImGuiTabBarFlags_AutoSelectNewTabs)) {
+                        if (have_editor && ImGui::BeginTabItem("Editor", nullptr,
+                                script_editor_focus_requested()
+                                    ? ImGuiTabItemFlags_SetSelected : 0)) {
+                            script_editor_draw_docked();
+                            ImGui::EndTabItem();
+                        }
+                        if (have_details && ImGui::BeginTabItem("Details", &details_open)) {
+                            script_editor_inspector_draw(cfg_view.config_home,
+                                                          st.workspace.bundle);
+                            ImGui::EndTabItem();
+                        }
+                        ImGui::EndTabBar();
+                    }
+                    ImGui::EndChild();
+                }
+                ImGui::EndTable();
+            }
+            if (have_details && !editor_can_dock) {
+                ImGui::SetNextWindowSize(
+                    ImVec2(std::min(480.0F, io.DisplaySize.x * 0.9F),
+                           io.DisplaySize.y * 0.7F), ImGuiCond_Appearing);
+                if (ImGui::Begin("Selected skill details", &details_open)) {
+                    script_editor_inspector_draw(cfg_view.config_home,
+                                                  st.workspace.bundle);
+                }
+                ImGui::End();
             }
 
             ImGui::EndChild();
@@ -536,6 +752,8 @@ int main(int argc, char **argv) {
         }
 
         ImGui::End();
+
+        script_editor_draw_windows(editor_can_dock);
 
         // Top level, not inside the shell window: the user may switch pages
         // while correcting a box, and the window must survive that.

@@ -6,6 +6,7 @@
 #include "app/ui/script_editor_panel.h"
 #include "app/ui/template_capture_panel.h"
 #include "core/script/ccat_bundle.h"
+#include "core/script/ccat_graph.h"
 
 #include <imgui.h>
 #include <misc/cpp/imgui_stdlib.h>
@@ -63,10 +64,11 @@ void script_panel_draw(campcat::shell_state &_st,
 
     bool bundle_open = false;
     WITH_FONT(bold, {
-        bundle_open = ImGui::CollapsingHeader("Bundle###script_bundle_sec",
+        bundle_open = ImGui::CollapsingHeader("Run target###script_bundle_sec",
                                               ImGuiTreeNodeFlags_DefaultOpen);
     });
     if (bundle_open) {
+        ImGui::TextWrapped("Choose the script for the next run. Browsing above does not change this target.");
         // A list, not a path box: every script is a bundle now, and the list
         // is the only source of names the editor can save back to.
         const std::vector<std::string> bundles =
@@ -87,6 +89,12 @@ void script_panel_draw(campcat::shell_state &_st,
                     // automation tick read.
                     _cfg_view.script_bundle = name;
                     _st.set_script_bundle(name);
+                    const auto tag = campcat::ccat_lang::bundle_tags(
+                        _cfg_view.config_home, name);
+                    _st.workspace.select_bundle(
+                        !tag.anchor_of.empty() ? tag.anchor_of
+                        : !tag.edge_of.empty() ? tag.edge_of : tag.action_of,
+                        name);
                 }
             }
             ImGui::EndCombo();
@@ -123,7 +131,8 @@ void script_panel_draw(campcat::shell_state &_st,
             _lock_manual_single || !_ccat_ui.has_script_source();
 
         if (!_ccat_ui.has_script_source()) {
-            ImGui::TextDisabled("Pick a bundle before running.");
+            WITH_FONT(bold, { ImGui::TextUnformatted("No bundle selected"); });
+            ImGui::TextDisabled("Choose a Run target above to run or edit it.");
             ImGui::Spacing();
         }
 
@@ -131,10 +140,20 @@ void script_panel_draw(campcat::shell_state &_st,
             ImGui::BeginDisabled();
         }
         WITH_FONT(bold, {
+            ImGui::PushStyleColor(
+                ImGuiCol_Button,
+                ImGui::GetStyleColorVec4(ImGuiCol_HeaderActive));
+            ImGui::PushStyleColor(
+                ImGuiCol_ButtonHovered,
+                ImGui::GetStyleColorVec4(ImGuiCol_CheckMark));
+            ImGui::PushStyleColor(
+                ImGuiCol_ButtonActive,
+                ImGui::GetStyleColorVec4(ImGuiCol_FrameBgActive));
             if (ImGui::Button("Run Once")) {
                 _st.push_job_snapshot(&_cfg_view);
                 _st.run_single_job();
             }
+            ImGui::PopStyleColor(3);
             if (start_locked) {
                 ImGui::EndDisabled();
             }
@@ -200,25 +219,34 @@ void script_panel_draw(campcat::shell_state &_st,
                                              ImGuiTreeNodeFlags_DefaultOpen);
     });
     if (sched_open) {
-        // Both cadences on one row, each slider's footprint half the row with
-        // its label counted in, so the pair lands on the same line.
+        // Labels sit in front of their sliders and share one column, so the two
+        // pairs read as two settings instead of four loose pieces.
         const ImGuiStyle &style = ImGui::GetStyle();
+        const float label_w = std::max(ImGui::CalcTextSize("Interval (s)").x,
+                                       ImGui::CalcTextSize("Jitter (s)").x);
+        // Both pairs and the three gaps between them have to fit one row.
         const float half =
-            (ImGui::GetContentRegionAvail().x - style.ItemSpacing.x) * 0.5F;
+            (ImGui::GetContentRegionAvail().x - 3.0F * style.ItemSpacing.x) *
+            0.5F;
         // Clamped, because ImGui reads a negative width as "fill the row": in a
         // window narrow enough to go negative the two would overlap instead of
         // shrinking.
-        const auto slider_width = [&](const char *_label) {
-            return std::max(60.0F, half - ImGui::CalcTextSize(_label).x -
-                                       style.ItemInnerSpacing.x);
-        };
-        ImGui::SetNextItemWidth(slider_width("Interval (s)"));
-        ImGui::SliderInt("Interval (s)", &_cfg_view.scheduler.interval_seconds,
+        const float slider_w = std::max(60.0F, half - label_w);
+
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextUnformatted("Interval (s)");
+        ImGui::SameLine();
+        ImGui::SetNextItemWidth(slider_w);
+        ImGui::SliderInt("##interval", &_cfg_view.scheduler.interval_seconds,
                          300, 6 * 3600);
         bool reschedule = ImGui::IsItemDeactivatedAfterEdit();
+
         ImGui::SameLine();
-        ImGui::SetNextItemWidth(slider_width("Jitter (s)"));
-        ImGui::SliderInt("Jitter (s)", &_cfg_view.scheduler.jitter_seconds, 0,
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextUnformatted("Jitter (s)");
+        ImGui::SameLine();
+        ImGui::SetNextItemWidth(slider_w);
+        ImGui::SliderInt("##jitter", &_cfg_view.scheduler.jitter_seconds, 0,
                          900);
         reschedule = ImGui::IsItemDeactivatedAfterEdit() || reschedule;
         // Only a running scheduler is re-armed: otherwise dragging a slider
@@ -239,7 +267,4 @@ void script_panel_draw(campcat::shell_state &_st,
     if (cap_open) {
         template_capture_panel_draw(_cfg_view, &_ccat_ui, _lock_manual_single);
     }
-    // Also on the pages that have no script list: a window opened here is a
-    // window the user expects to see, whichever page they are on.
-    script_editor_draw_windows();
 }

@@ -2,11 +2,11 @@
 
 namespace campcat {
 struct app_config;
+struct workspace_selection;
 }
 
 /**
- * @brief Draw the Graph page: pick a graph (a `<G>.entry` anchor bundle), then
- * draw its anchors and edges as a node graph.
+ * @brief Draw the workspace toolbar's selected graph as anchors and edges.
  *
  * Read-only. The canvas pans, zooms, selects and drags nodes, but nothing it
  * does reaches the disk: a new link cannot be drawn and no node moves on the
@@ -16,4 +16,8 @@ struct app_config;
  *
  * @param[in] _cfg_view This frame's config view, read for `config_home`.
  */
-void graph_panel_draw(const campcat::app_config &_cfg_view);
+void graph_panel_draw(const campcat::app_config &_cfg_view,
+                       campcat::workspace_selection &_selection);
+
+/// Focus the workspace's skill when entering the graph through Show graph.
+void graph_panel_focus_selection();
