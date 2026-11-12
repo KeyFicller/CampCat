@@ -58,7 +58,7 @@ PROVIDERS = {
         "key_env": "QWEN_API_KEY",
         "base_url_env": "QWEN_BASE_URL",
         "base_url": "https://token-plan.maas.qianwenaiapi.com/compatible-mode/v1",
-        "model": "openai:qwen3.8-max",
+        "model": "openai:qwen4-max-preview",
         "extra_body": {"enable_thinking": True},
         "thinking_off": {"enable_thinking": False},
     },

@@ -81,7 +81,7 @@ def test_the_request_picks_qwen_and_its_thinking_parameter(monkeypatch):
 
     models.build_chat_model()
 
-    assert seen["name"] == "openai:qwen3.8-max"
+    assert seen["name"] == "openai:qwen4-max-preview"
     assert seen["base_url"] == models.PROVIDERS["qwen"]["base_url"]
     # Its own name, not OPENAI_API_KEY: the key is passed in, so the integration
     # never looks one up.
@@ -140,7 +140,7 @@ def test_the_request_wins_over_the_environment(monkeypatch):
 
     models.build_chat_model()
 
-    assert seen["name"] == "openai:qwen3.8-max"
+    assert seen["name"] == "openai:qwen4-max-preview"
 
 
 def test_an_empty_request_falls_back_to_the_environment(monkeypatch):
@@ -152,7 +152,7 @@ def test_an_empty_request_falls_back_to_the_environment(monkeypatch):
 
     models.build_chat_model()
 
-    assert seen["name"] == "openai:qwen3.8-max"
+    assert seen["name"] == "openai:qwen4-max-preview"
 
 
 def test_qwen_is_built_with_the_client_that_keeps_reasoning(monkeypatch):
@@ -164,7 +164,7 @@ def test_qwen_is_built_with_the_client_that_keeps_reasoning(monkeypatch):
     model = models.build_chat_model()
 
     assert isinstance(model, models._ReasoningChatOpenAI)
-    assert model.model_name == "qwen3.8-max"
+    assert model.model_name == "qwen4-max-preview"
 
 
 def test_an_unknown_provider_is_refused_rather_than_falling_back(monkeypatch):

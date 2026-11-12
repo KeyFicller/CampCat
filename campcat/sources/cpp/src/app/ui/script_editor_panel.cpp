@@ -213,7 +213,10 @@ const preview_tex *preview_for(const std::filesystem::path &_path) {
     // UNCHANGED: a disc template's shape is its alpha, and COLOR would drop it,
     // drawing the pixels the match ignores as if they counted.
     cv::Mat img = cv::imread(key, cv::IMREAD_UNCHANGED);
-    if (img.channels() == 1) {
+    // Empty first: an empty Mat answers 1 channel, and cvtColor on it throws
+    // out of the frame loop. A missing file gets tex 0, which draws
+    // "unreadable".
+    if (!img.empty() && img.channels() == 1) {
         cv::cvtColor(img, img, cv::COLOR_GRAY2BGR);
     }
     if (!img.empty()) {
