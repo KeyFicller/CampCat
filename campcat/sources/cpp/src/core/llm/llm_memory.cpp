@@ -157,4 +157,18 @@ bool clear_memory(const std::filesystem::path &_config_home, memory_kind _kind) 
     return !ec;
 }
 
+std::filesystem::path transcript_path(const std::filesystem::path &_config_home) {
+    return _config_home / "turns.jsonl";
+}
+
+bool clear_transcript(const std::filesystem::path &_config_home) {
+    if (_config_home.empty()) {
+        return false;
+    }
+    std::lock_guard<std::mutex> lk(file_mutex());
+    std::error_code ec;
+    std::filesystem::remove(transcript_path(_config_home), ec);
+    return !ec;
+}
+
 } // namespace campcat::llm

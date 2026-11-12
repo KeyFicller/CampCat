@@ -700,7 +700,8 @@ llm_result llm_host::run_turn(const std::filesystem::path &_config_home,
     const long id = next_request_id();
     std::string request = llm_protocol::build_turn_request(
         id, _prompt, llm::tools_json(), memory, scripter_memory, _provider,
-        _max_model_rounds, _operator_only);
+        _max_model_rounds, _operator_only,
+        llm::transcript_path(_config_home).string());
     request.push_back('\n');
     const llm_result turn = exchange(request, k_request_timeout_ms, id);
     // This turn may have replaced the screenshot; take it back for the next one
@@ -846,7 +847,8 @@ llm_host &consult_host() {
     return host;
 }
 
-llm_result llm_host::reset(const std::filesystem::path &_repo_root) {
+llm_result llm_host::reset(const std::filesystem::path &_repo_root,
+                           const std::filesystem::path &_config_home) {
     llm_result r;
     // The session is over: the screenshot goes with it, and so do the numbered
     // frames the tools kept, at the same moment the sidecar drops its history.
@@ -857,8 +859,14 @@ llm_result llm_host::reset(const std::filesystem::path &_repo_root) {
     {
         std::lock_guard<std::mutex> lk(m_mu);
         if (m_child.pid() <= 0 || m_broken || !m_ready) {
-            // No child, so no history: report success without spawning one.
-            r.ok = true;
+            // No child, so no live history -- but the transcript is on disk and
+            // survives the process. Leaving it would resurrect the very
+            // conversation the user just cleared, on the next turn.
+            const bool cleared = _config_home.empty() ||
+                                 llm::clear_transcript(_config_home);
+            // No child, so this spawns nothing: report success, having done the
+            // one thing that was left to do.
+            r.ok = cleared;
             r.turns = 0;
             m_usage = {};
             return r;
@@ -988,7 +996,8 @@ llm_host &consult_host() {
     return host;
 }
 
-llm_result llm_host::reset(const std::filesystem::path &) {
+llm_result llm_host::reset(const std::filesystem::path &,
+                           const std::filesystem::path &) {
     // Unreachable in practice -- the Windows host never spawns a sidecar -- but
     // "a reset drops the frame table" holds on every platform, so it is not
     // conditional here.

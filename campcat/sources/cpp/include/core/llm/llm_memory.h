@@ -43,4 +43,16 @@ bool write_memory(const std::filesystem::path &_config_home, memory_kind _kind,
 /// Delete one memory file. Already absent counts as success.
 bool clear_memory(const std::filesystem::path &_config_home, memory_kind _kind);
 
+/// `<config_home>/turns.jsonl`, this conversation's event log.
+///
+/// Unlike the notes, the host never reads or writes this: the sidecar appends to
+/// it. The host only needs the path to send with a turn, and to delete when the
+/// user clears the conversation -- which, unlike a reset request, still works
+/// when no sidecar is running.
+std::filesystem::path transcript_path(const std::filesystem::path &_config_home);
+
+/// Delete the transcript. Already absent counts as success, the same way
+/// `clear_memory` treats it.
+bool clear_transcript(const std::filesystem::path &_config_home);
+
 } // namespace campcat::llm

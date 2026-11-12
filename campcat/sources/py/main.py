@@ -71,6 +71,13 @@ def handle_request(req: dict) -> Iterator[dict]:
         return
 
     session.set_scripter_memory(req.get("scripter_memory") or "")
+    # Before the graph runs: a turn that crashes this process has to already be
+    # on disk. An empty path (old host, `--once`) leaves the log off entirely.
+    restored = session.attach_log(req.get("transcript") or "")
+    if restored:
+        # The host's timeline lives in memory and died with the process, so the
+        # window would show an empty conversation the model remembers having.
+        yield protocol.build_log("warn", f"已恢复上次会话的 {restored} 轮")
 
     out: dict = {}
     buf: list[str] = []

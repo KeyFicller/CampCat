@@ -144,6 +144,9 @@ std::string base64_encode(const unsigned char *_data, std::size_t _len);
  * training samples, so one sample holds one agent's regions. Omitting the
  * field (the default) leaves the ordinary toolset, which is what older
  * sidecars read.
+ * @param[in] _transcript Where the sidecar appends this conversation's event
+ * log. Omitted when empty, which is what `--once`, a unit test and a host that
+ * predates the field all ask for: no log at all.
  */
 std::string build_turn_request(long _id, std::string_view _text,
                                std::string_view _tools_json,
@@ -151,7 +154,8 @@ std::string build_turn_request(long _id, std::string_view _text,
                                std::string_view _scripter_memory,
                                std::string_view _provider,
                                int _max_model_rounds,
-                               bool _operator_only = false);
+                               bool _operator_only = false,
+                               std::string_view _transcript = "");
 
 /**
  * @brief Build one `tool_result` line answering a `tool_call`.

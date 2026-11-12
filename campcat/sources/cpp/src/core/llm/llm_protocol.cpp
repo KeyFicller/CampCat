@@ -54,7 +54,8 @@ std::string build_turn_request(long _id, std::string_view _text,
                                std::string_view _memory,
                                std::string_view _scripter_memory,
                                std::string_view _provider,
-                               int _max_model_rounds, bool _operator_only) {
+                               int _max_model_rounds, bool _operator_only,
+                               std::string_view _transcript) {
     nlohmann::json j;
     j["type"] = "turn";
     j["id"] = _id;
@@ -72,6 +73,11 @@ std::string build_turn_request(long _id, std::string_view _text,
     // missing key as "the handoff is on", which is what it already did.
     if (_operator_only) {
         j["operator_only"] = true;
+    }
+    // Same rule: a sidecar that predates the field simply never persists, which
+    // is what it already did.
+    if (!_transcript.empty()) {
+        j["transcript"] = std::string(_transcript);
     }
     return j.dump();
 }

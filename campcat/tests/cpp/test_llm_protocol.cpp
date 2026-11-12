@@ -341,6 +341,21 @@ TEST(LlmProtocol, OperatorOnlyWithholdsTheHandoff) {
     EXPECT_EQ(j["operator_only"], true);
 }
 
+TEST(LlmProtocol, TurnCarriesTheTranscriptPath) {
+    // The sidecar cannot know config_home, so the path has to ride along with
+    // the turn or there is nothing to append to.
+    const nlohmann::json j = nlohmann::json::parse(build_turn_request(
+        1, "hi", "", "notes", "", "qwen", 20, false, "/x/turns.jsonl"));
+    EXPECT_EQ(j["transcript"], "/x/turns.jsonl");
+}
+
+TEST(LlmProtocol, TurnOmitsTheTranscriptWhenUnset) {
+    // `--once` and the unit tests pass nothing, and an older sidecar ignores
+    // the field. Both mean "do not persist", which was the behaviour before.
+    const nlohmann::json j = turn_with("qwen");
+    EXPECT_FALSE(j.contains("transcript"));
+}
+
 TEST(LlmProtocol, MemorizeNamesTheAgent) {
     const nlohmann::json j = nlohmann::json::parse(
         build_memorize_request(2, "notes", "qwen", "scripter"));
@@ -438,6 +453,24 @@ TEST(LlmMemory, LegacyMemoryFileIsRenamedOnce) {
         dir, campcat::llm::memory_kind::operator_notes, &op));
     EXPECT_EQ(op, "keep");
     EXPECT_TRUE(std::filesystem::exists(dir / "memory.md"));
+    std::filesystem::remove_all(dir);
+}
+
+TEST(LlmMemory, ClearTranscriptIsIdempotent) {
+    // A clear has to delete the file even with no sidecar running, or the
+    // conversation comes back on the next launch.
+    const std::filesystem::path dir =
+        std::filesystem::temp_directory_path() / "campcat_transcript_clear";
+    std::filesystem::remove_all(dir);
+    std::filesystem::create_directories(dir);
+    EXPECT_TRUE(campcat::llm::clear_transcript(dir)); // never existed
+    {
+        std::ofstream out(campcat::llm::transcript_path(dir));
+        out << "{}\n";
+    }
+    ASSERT_TRUE(std::filesystem::exists(campcat::llm::transcript_path(dir)));
+    EXPECT_TRUE(campcat::llm::clear_transcript(dir));
+    EXPECT_FALSE(std::filesystem::exists(campcat::llm::transcript_path(dir)));
     std::filesystem::remove_all(dir);
 }
 

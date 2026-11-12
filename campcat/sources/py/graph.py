@@ -109,6 +109,7 @@ def build_messages(state: TurnState) -> dict:
     if frame is not None:
         messages.append(frame)
     mark = session.new_mark("turn")
+    session.log_turn(state.get("text", ""), mark)
     messages.append(HumanMessage(content=state.get("text", ""), id=mark))
     return {"messages": messages, "turn_mark": mark}
 
@@ -326,6 +327,10 @@ def run_tools(state: TurnState) -> dict:
     """
     messages = list(state.get("messages") or [])
     calls = getattr(messages[-1], "tool_calls", None) or []
+    if calls:
+        # Before any of them runs: the device moves when a tool does, and a
+        # result can only be written if this process lives to see it.
+        session.log_intent(messages[-1])
     # The pictures are held back and appended after every result, never between
     # them. Once a round asks for more than one tool, a user turn wedged in
     # mid-way makes the provider read the round as having answered only the
@@ -374,7 +379,9 @@ def run_tools(state: TurnState) -> dict:
         return _host_result(name, args)
 
     results, pictures, interrupted = _run_calls(calls, run_one)
-    out: dict = {"messages": session.demote_pictures(messages + results + pictures),
+    kept = session.demote_pictures(messages + results + pictures)
+    session.log_round(kept)
+    out: dict = {"messages": kept,
                  "tool_rounds": state.get("tool_rounds", 0) + 1}
     if interrupted:
         out["interrupted"] = True
@@ -420,12 +427,17 @@ def commit(state: TurnState) -> dict:
     own = session.own_since(state.get("messages") or [], state.get("turn_mark"))
     if state.get("error"):
         kept = memorier._paired(own)
+        note = stopped_note(state["error"])
         if kept:
+            session.log_round(state.get("messages") or [])
             session.append_turn(
                 state.get("text", ""),
-                kept + [AIMessage(content=stopped_note(state["error"]))])
+                kept + [AIMessage(content=note)])
+        session.log_end(note)
         return {"turns": session.size()}
+    session.log_round(state.get("messages") or [])
     session.append_turn(state.get("text", ""), own)
+    session.log_end("")
     return {"turns": session.size()}
 
 

@@ -1039,7 +1039,8 @@ void start_reset(std::filesystem::path _config_home, std::string _provider) {
             campcat::automation_log::emit("[llm] memory not saved: " +
                                           kept.error);
         }
-        campcat::llm_result res = g_host.reset(config_home.parent_path());
+        campcat::llm_result res = g_host.reset(config_home.parent_path(),
+                                              config_home);
         {
             handoff done;
             done.has = true;

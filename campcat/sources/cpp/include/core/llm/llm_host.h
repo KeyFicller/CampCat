@@ -179,12 +179,20 @@ public:
      * @brief Clear the sidecar's conversation history.
      *
      * Succeeds without spawning anything when no child is running, since there
-     * is then no history to clear.
+     * is then no live history -- but the transcript outlives the process, so
+     * `_config_home` is what lets that case still delete it. Without it a clear
+     * would look like it worked and the conversation would come back on the
+     * next launch.
      *
      * Does not touch the memory file: callers that want the session kept run
      * `memorize` first, because this is what forgets the conversation it reads.
+     *
+     * @param[in] _repo_root Where the sidecar is launched from.
+     * @param[in] _config_home Holds `turns.jsonl`. Empty skips the file, which
+     * is what a caller that has no config home means.
      */
-    llm_result reset(const std::filesystem::path &_repo_root);
+    llm_result reset(const std::filesystem::path &_repo_root,
+                     const std::filesystem::path &_config_home = {});
 
     /**
      * @brief Supply the state tools read, or a default context to disable them.
