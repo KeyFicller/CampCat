@@ -49,5 +49,5 @@
     "interval_seconds": 300,
     "jitter_seconds": 7
   },
-  "script_bundle": ""
+  "script_bundle": "stzb.alliance-map"
 }

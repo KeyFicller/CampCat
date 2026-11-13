@@ -57,14 +57,18 @@ def handle_request(req: dict) -> Iterator[dict]:
         yield consult.answer(req)
         return
     if rtype == "memorize":
-        # The conversation is already here, so only the current notes cross the
-        # wire; the reply carries the rewritten ones back for the host to write.
-        notes = memorier.memorize(req.get("memory") or "", req.get("agent") or "")
-        if notes is None:
+        # The conversation is already here, so only the ledger's index crosses
+        # the wire; the reply carries proposed operations back, and the host
+        # validates and writes them. The sidecar never writes the ledger.
+        agent = req.get("agent") or ""
+        if agent in {"operator", "scripter"}:
+            session.set_memory_upto(req.get("memory_upto") or "", agent)
+        ops = memorier.memorize(req.get("memory") or "", agent)
+        if ops is None:
             yield protocol.build_error_result(
                 rid, "memory not updated", **session.usage_fields())
         else:
-            yield protocol.build_result(rid, True, notes, **session.usage_fields())
+            yield protocol.build_result(rid, True, ops, **session.usage_fields())
         return
     if rtype != "turn":
         yield protocol.build_log("warn", f"ignoring unknown message type: {rtype}")
@@ -74,6 +78,9 @@ def handle_request(req: dict) -> Iterator[dict]:
     # Before the graph runs: a turn that crashes this process has to already be
     # on disk. An empty path (old host, `--once`) leaves the log off entirely.
     restored = session.attach_log(req.get("transcript") or "")
+    # How far the notes on disk already reach, so a restored conversation is not
+    # folded into them a second time. Unknown or absent leaves the cursor at 0.
+    session.set_memory_upto(req.get("memory_upto") or "")
     if restored:
         # The host's timeline lives in memory and died with the process, so the
         # window would show an empty conversation the model remembers having.

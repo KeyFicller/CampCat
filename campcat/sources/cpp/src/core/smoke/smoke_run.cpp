@@ -205,9 +205,10 @@ int run_smoke(const std::filesystem::path &_prompts,
     for (std::size_t i = 0; i < prompts.size(); ++i) {
         const run_clock::time_point started = run_clock::now();
         const llm_result res =
-            host.run_turn(cfg.config_home, cfg.llm.provider, prompts[i],
-                          cfg.llm.max_dispatches, cfg.llm.max_model_rounds,
-                          false, real_home.parent_path());
+            host.run_turn(cfg.config_home, cfg.llm.provider, cfg.script_bundle,
+                          prompts[i], cfg.llm.max_dispatches,
+                          cfg.llm.max_model_rounds, false,
+                          real_home.parent_path());
         std::string line = "turn " + std::to_string(i + 1) + "/" +
                            std::to_string(prompts.size()) + " " +
                            seconds_since(started) + (res.ok ? " ok" : " FAILED");

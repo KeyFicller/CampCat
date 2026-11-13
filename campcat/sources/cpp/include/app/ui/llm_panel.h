@@ -35,7 +35,7 @@ void llm_panel_shutdown_finish();
 void llm_panel_draw_panel(campcat::shell_state &_st, campcat::app_config &_cfg);
 
 /// Update the worker's UI state even while another page is selected.
-void llm_panel_tick(bool _adb_busy);
+void llm_panel_tick();
 
 /// Persistent agent status and Stop. Returns true to open its LLM page.
 bool llm_panel_draw_task_bar(bool _on_llm_page);

@@ -23,36 +23,15 @@ import agent.memorier as memorier
 import agent.reflector as reflector
 import observability
 import session
+import runner
 import subagent
 import tools
+import tool_policy
 from agent.region_rules import REGION_RULES
 
 
-# Only the scripter sees these. Anything the host sends that is not listed here
-# or in HIDDEN goes to the operator, so a new C++ tool lands with today's behaviour.
-SCRIPTER_ONLY = frozenset({
-    "read_script", "ccat_help",
-    "save_script", "update_script", "delete_script", "rename_script",
-    "save_template", "view_template", "view_crop",
-    "save_anchor",
-})
-# Registered in C++ for the review pipeline, which calls them itself. A model
-# is not offered them: the approval bubble already shows a region.
-HIDDEN = frozenset({"mark", "tight_crop"})
-# Offered to both: the operator runs saved skills, looks at the screen and
-# reads a graph before goto; the scripter verifies what it wrote and cuts
-# templates from fresh frames.
-SHARED = frozenset({
-    "list_scripts", "run_script", "screenshot", "view_shot", "read_graph",
-})
-
-
-def _name(tool: dict) -> str | None:
-    try:
-        name = tool["function"]["name"]
-    except (KeyError, TypeError):
-        return None
-    return name if isinstance(name, str) else None
+# Kept as module names for callers that already use the agent's tool table.
+from tool_policy import SCRIPTER_ONLY, SHARED, HIDDEN
 
 
 class Handoff(BaseModel):
@@ -74,7 +53,7 @@ HANDOFF_TOOL = convert_to_openai_tool(Handoff)
 def scripter_tools(host_tools: list) -> list:
     """Host tools the scripter may call, then diagnose_template and Handoff."""
     offered = SCRIPTER_ONLY | SHARED
-    return [tool for tool in host_tools if _name(tool) in offered] + [
+    return [tool for tool in host_tools if tool_policy.name_of(tool) in offered] + [
         diagnoser.diagnose_template, HANDOFF_TOOL]
 
 
@@ -150,10 +129,18 @@ def brief_of(args: dict) -> str:
 
 
 def handoff_may_change(args: dict) -> bool:
-    """True when this handoff may edit bundles that already exist."""
+    """Whether the handoff requests a repair; its bundle still limits the scope."""
     if str(args.get("last_error") or "").strip():
         return True
     return args.get("fix") is True
+
+
+def repair_targets(args: dict) -> frozenset[str]:
+    """Only the explicit bundle grants repair access, never goal or error prose."""
+    bundle = args.get("bundle")
+    if handoff_may_change(args) and isinstance(bundle, str) and bundle.strip():
+        return frozenset({bundle.strip()})
+    return frozenset()
 
 
 def bundle_names_of(listing: str) -> set[str]:
@@ -168,35 +155,12 @@ def bundle_names_of(listing: str) -> set[str]:
     return names
 
 
-# The field that names the bundle a write would change. `save_anchor` is
-# handled beside this: its name is `graph.anchor`.
-_FROZEN_FIELD = {
-    "update_script": "name",
-    "delete_script": "name",
-    "rename_script": "name",
-    "save_template": "bundle",
-}
-
-
 def refuse_existing(tool: str, args: dict, frozen: set[str]) -> str | None:
     """The refusal the model sees, or None when the call may reach the host."""
-    if tool == "save_anchor":
-        graph_name = args.get("graph")
-        anchor = args.get("anchor")
-        if (not isinstance(graph_name, str) or not isinstance(anchor, str)
-                or not graph_name or not anchor):
-            return None
-        target = graph_name + "." + anchor
-    else:
-        field = _FROZEN_FIELD.get(tool)
-        if field is None:
-            return None
-        target = args.get(field)
-        if not isinstance(target, str) or not target:
-            return None
-    if target not in frozen:
-        return None
-    return f"error: {target} 已存在；这次交接不能改它。要改它得让交接带上 fix: true，请把这一句写进你的总结。"
+    for target in tool_policy.write_targets(tool, args):
+        if target in frozen:
+            return f"error: {target} 已存在；这次交接不能改它。要改它得让交接带上 fix: true，请把这一句写进你的总结。"
+    return None
 
 
 # None means this handoff may change existing bundles. A set is the names
@@ -484,37 +448,38 @@ HANDOFF_MAX_ROUNDS = 60
 
 
 def run_scripter(args: dict, host_tools: list,
-                 max_model_rounds: int | None = None) -> str:
+                 max_model_rounds: int | None = None) -> runner.ToolResult:
     """Run the scripter to the end and return the text the operator should see.
 
     A failure here is a tool result, not a failed operator turn.
     """
     goal = str(args.get("goal") or "").strip()
     if not goal:
-        return "error: goal 为空"
+        return runner.ToolResult("error: goal 为空", error_code="invalid_args")
     _CALLS.clear()
     brief = brief_of(args)
     with observability.span("author-script", brief) as (callbacks, obs):
-        def note(text: str) -> str:
+        def note(text: str, error_code: str = "") -> runner.ToolResult:
             if obs is not None:
                 obs.update(output={"reply": text})
-            return text
+            return runner.ToolResult(text, error_code=error_code)
 
         token = None
+        scope_token = None
         begun = False
         entered = False
         try:
             import graph
-            graph.begin_fail_counts()
+            runner.begin_fail_counts()
             begun = True
-            if handoff_may_change(args):
-                token = arm_freeze(None)
-            else:
-                listed = tools.call_cpp("list_scripts", {})
-                if not listed.get("ok"):
-                    return note("error: " + str(listed.get("error", "")))
-                token = arm_freeze(frozenset(
-                    bundle_names_of(str(listed.get("text") or ""))))
+            allowed = repair_targets(args)
+            scope_token = tools.arm_write_scope(allowed)
+            listed = tools.call_cpp("list_scripts", {})
+            if not listed.get("ok"):
+                return note("error: " + str(listed.get("error", "")),
+                            str(listed.get("error_code") or "host_error"))
+            token = arm_freeze(frozenset(
+                bundle_names_of(str(listed.get("text") or ""))) - allowed)
             if max_model_rounds is None:
                 max_model_rounds = graph.MAX_MODEL_ROUNDS
             max_model_rounds = min(max_model_rounds, HANDOFF_MAX_ROUNDS)
@@ -539,13 +504,14 @@ def run_scripter(args: dict, host_tools: list,
             # shows only that the handoff came back with nothing.
             if os.environ.get("CAMPCAT_LLM_TRACE"):
                 print(f"[handoff] error: {exc}", file=sys.stderr, flush=True)
-            return note("error: " + str(exc))
+            return note("error: " + str(exc), "handoff_error")
         finally:
             if token is not None:
                 disarm_freeze(token)
+            if scope_token is not None:
+                tools.disarm_write_scope(scope_token)
             if begun:
-                import graph
-                graph.end_fail_counts()
+                runner.end_fail_counts()
             if entered:
                 import agent.region_review as region_review
                 region_review.end_handoff()
@@ -561,13 +527,16 @@ def run_scripter(args: dict, host_tools: list,
                       file=sys.stderr, flush=True)
                 print("[handoff] roles: " + _roles(out.get("messages") or []),
                       file=sys.stderr, flush=True)
-            return note("error: " + str(out["error"]))
+            return note("error: " + str(out["error"]), "model_error")
         reply = (out.get("reply") or "").strip()
         if not reply:
             own = session.own_since(out.get("messages") or [],
                                     out.get("turn_mark"))
-            return note(_no_summary(own))
-        return note(reply)
+            return note(_no_summary(own), "handoff_failed")
+        # Older model histories end with a bare status instead of Handoff.
+        legacy_failed = reply.split(None, 1)[0].rstrip(":") == "failed"
+        return note(reply, out.get("failure_code") or (
+            "handoff_failed" if legacy_failed else ""))
 
 
 def _roles(messages: list) -> str:
@@ -608,7 +577,7 @@ def _scripter_build(state: dict) -> dict:
     frame = session.latest_frame()
     if frame is not None:
         messages.append(frame)
-    mark = session.new_mark("brief")
+    mark = session.new_mark("scripter-turn")
     # Lessons ride on the brief, not the system prefix: a new note would
     # otherwise make every earlier handoff miss the provider's cache.
     messages.append(HumanMessage(
@@ -624,20 +593,18 @@ def _scripter_invoke(state: dict) -> dict:
     handoff result is the last round alone: an announcement before a tool
     call must not prefix `saved`, and must not hide an empty ending.
     """
-    import graph
     fresh = dict(state)
     fresh["reply"] = ""
-    return graph._invoke(fresh, state.get("tools") or [], subagent.chunk_sink)
+    return runner.invoke(fresh, state.get("tools") or [], subagent.chunk_sink)
 
 
 def _apply_scripter_tools(state: dict) -> dict:
-    import graph
     messages = list(state.get("messages") or [])
     calls = getattr(messages[-1], "tool_calls", None) or []
 
-    done: list[str] = []
+    done: list[runner.ToolResult] = []
 
-    def run_one(call: dict) -> tuple[object, list]:
+    def run_one(call: dict) -> runner.ToolResult:
         name = call.get("name", "")
         args = call.get("args") or {}
         if name == "Handoff":
@@ -646,57 +613,62 @@ def _apply_scripter_tools(state: dict) -> dict:
             try:
                 got = Handoff.model_validate(args)
             except ValidationError:
-                return "error: Handoff 的 status 只能是 saved、updated 或 failed", []
+                return runner.ToolResult(
+                    "error: Handoff 的 status 只能是 saved、updated 或 failed",
+                    error_code="invalid_handoff")
             text = got.status if not got.summary.strip() else (
                 got.status + "\n" + got.summary.strip())
-            done.append(text)
-            return text, []
+            outcome = runner.ToolResult(
+                text, error_code="handoff_failed" if got.status == "failed" else "")
+            done.append(outcome)
+            return outcome
         if name == diagnoser.DIAGNOSE_TEMPLATE_NAME:
             # The shot this diagnosis takes is the one a re-cut is checked
             # against, so it has to stay in the scripter's messages.
-            before = session._LATEST_NUM
+            before = session.latest_shot()
             with subagent.working(
                     "diagnoser",
                     f"{args.get('bundle', '')}/{args.get('template', '')}") as run:
-                content = diagnoser.run_diagnoser(args)
-                run.settle(content)
+                outcome = diagnoser.run_diagnoser(args)
+                run.settle(outcome.content, ok=not outcome.failed)
             pics: list = []
-            if session._LATEST_NUM != before:
+            if session.latest_shot() != before:
                 frame = session.latest_frame()
                 if frame is not None:
                     pics.append(frame)
-            return content, pics
+            return runner.ToolResult(outcome.content, pics, outcome.error_code)
         frozen = _frozen.get()
         if frozen is not None:
             refusal = refuse_existing(name, args, frozen)
             if refusal:
-                return refusal, []
-        return graph._host_result(name, args)
+                return runner.ToolResult(refusal, error_code="write_scope")
+        return runner.host_result(name, args)
 
-    def record(call: dict) -> tuple[object, list]:
+    def record(call: dict) -> runner.ToolResult:
         """`run_one`, plus a line in the trajectory the reflection reads.
 
         Recorded after the call so a failure is recorded as one. An interrupt
         raises before reaching this, which is right: the handoff never finished.
         """
         out = run_one(call)
-        text = str(out[0])
-        failed = text.startswith("error:")
+        text = str(out.content)
         _CALLS.append({
             "name": call.get("name", ""),
             "args": call.get("args") or {},
-            "failed": failed,
-            "error": text[:150] if failed else "",
+            "failed": out.failed,
+            "error": text[:150] if out.failed else "",
+            "error_code": out.error_code,
         })
         return out
 
-    results, pictures, interrupted = graph._run_calls(calls, record)
+    results, pictures, interrupted = runner.run_calls(calls, record)
     out = {
         "messages": session.demote_pictures(messages + results + pictures),
         "tool_rounds": state.get("tool_rounds", 0) + 1,
     }
     if done:
-        out["reply"] = done[-1]
+        out["reply"] = done[-1].content
+        out["failure_code"] = done[-1].error_code
         out["finished"] = True
     if interrupted:
         out["interrupted"] = True
@@ -718,9 +690,10 @@ def _scripter_commit(state: dict) -> dict:
         if kept:
             session.append_scripter_turn(
                 state.get("text", ""),
-                kept + [AIMessage(content=graph.stopped_note(state["error"]))])
+                kept + [AIMessage(content=graph.stopped_note(state["error"]))],
+                mark=state.get("turn_mark"))
         return {}
-    session.append_scripter_turn(state.get("text", ""), own)
+    session.append_scripter_turn(state.get("text", ""), own, mark=state.get("turn_mark"))
     return {}
 
 

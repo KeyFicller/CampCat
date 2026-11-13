@@ -46,6 +46,11 @@ public:
         return m_stopping;
     }
 
+    bool pending() const {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        return !m_next.empty();
+    }
+
 private:
     mutable std::mutex m_mutex;
     std::string m_next;

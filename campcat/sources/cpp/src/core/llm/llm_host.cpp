@@ -5,7 +5,10 @@
 #include "core/llm/llm_protocol.h"
 
 #include <chrono>
+#include <string>
 #include <vector>
+
+#include <nlohmann/json.hpp>
 
 #ifndef _WIN32
 #include <cerrno>
@@ -490,7 +493,7 @@ std::string llm_host::run_tool(const llm_protocol::message &_call) {    int call
         call_index, m_turn_max_dispatches, m_view_crop_streak);
 
     const llm::tool_reply reply =
-        llm::dispatch(_call.tool_name, _call.tool_args_json);
+        llm::dispatch(_call.tool_name, _call.tool_args_json, _call.write_scope);
     std::string text = reply.text;
     std::string error = reply.error;
     if (!alarm.empty()) {
@@ -544,7 +547,7 @@ std::string llm_host::run_tool(const llm_protocol::message &_call) {    int call
                                           reply.image_png.data()),
                                       reply.image_png.size());
     return llm_protocol::build_tool_result(_call.call_id, reply.ok, text, error,
-                                           image_b64, reply.shot);
+                                           image_b64, reply.shot, reply.error_code);
 }
 
 llm_result llm_host::exchange(const std::string &_request_line,
@@ -646,6 +649,7 @@ llm_protocol::usage_stats llm_host::usage() const {
 
 llm_result llm_host::run_turn(const std::filesystem::path &_config_home,
                               const std::string &_provider,
+                              const std::string &_bundle,
                               const std::string &_prompt, int _max_dispatches,
                               int _max_model_rounds, bool _operator_only,
                               const std::filesystem::path &_repo_root) {
@@ -680,20 +684,20 @@ llm_result llm_host::run_turn(const std::filesystem::path &_config_home,
         return r;
     }
 
-    // Read fresh every turn rather than cached: the file is small, and editing
+    // Read fresh every turn rather than cached: the ledger is small, and editing
     // it outside the app then has to show up on the very next request.
     std::string memory;
     if (!llm::read_memory(_config_home, llm::memory_kind::operator_notes,
-                          &memory)) {
+                          _bundle, &memory)) {
         memory.clear();
-        record_note("operator long-term memory file is unreadable; continuing "
+        record_note("operator long-term memory ledger is unreadable; continuing "
                     "without it");
     }
     std::string scripter_memory;
     if (!llm::read_memory(_config_home, llm::memory_kind::scripter_notes,
-                          &scripter_memory)) {
+                          _bundle, &scripter_memory)) {
         scripter_memory.clear();
-        record_note("scripter long-term memory file is unreadable; continuing "
+        record_note("scripter long-term memory ledger is unreadable; continuing "
                     "without it");
     }
 
@@ -701,7 +705,9 @@ llm_result llm_host::run_turn(const std::filesystem::path &_config_home,
     std::string request = llm_protocol::build_turn_request(
         id, _prompt, llm::tools_json(), memory, scripter_memory, _provider,
         _max_model_rounds, _operator_only,
-        llm::transcript_path(_config_home).string());
+        llm::transcript_path(_config_home).string(),
+        llm::last_pass_to(_config_home, llm::memory_kind::operator_notes,
+                          _bundle));
     request.push_back('\n');
     const llm_result turn = exchange(request, k_request_timeout_ms, id);
     // This turn may have replaced the screenshot; take it back for the next one
@@ -713,13 +719,14 @@ llm_result llm_host::run_turn(const std::filesystem::path &_config_home,
 
 llm_result llm_host::memorize(const std::filesystem::path &_config_home,
                               const std::string &_provider,
+                              const std::string &_bundle,
                               llm::memory_kind _kind, int _timeout_ms) {
     llm_result r;
 
-    std::string current;
-    if (!llm::read_memory(_config_home, _kind, &current)) {
+    std::vector<llm::memory_entry> entries;
+    if (!llm::read_ledger(_config_home, _kind, _bundle, &entries)) {
         r.error = std::string(llm::memory_agent_name(_kind)) +
-                  " long-term memory file is unreadable; not overwriting it";
+                  " memory ledger is unreadable; not writing to it";
         return r;
     }
 
@@ -731,38 +738,44 @@ llm_result llm_host::memorize(const std::filesystem::path &_config_home,
 
     const long id = next_request_id();
     std::string request = llm_protocol::build_memorize_request(
-        id, current, _provider, llm::memory_agent_name(_kind));
+        id, llm::render_index(entries), _provider,
+        llm::memory_agent_name(_kind),
+        llm::last_pass_to(_config_home, _kind, _bundle));
     request.push_back('\n');
     const llm_result out = exchange(request, _timeout_ms, id);
     if (!out.ok) {
         return out;
     }
-    // The user sent a message while this pass ran. The notes stay as they
-    // were; the message is the next turn. No `interrupt` line: a memorize
-    // request has no tool call to replace.
+    // The user sent a message while this pass ran. Nothing is written; the
+    // message is the next turn. No `interrupt` line: a memorize request has no
+    // tool call to replace.
     if (m_interrupt.load()) {
         r.ok = true;
-        r.text = current;
+        r.text = llm::render_memory(entries, llm::k_memory_budget_chars, nullptr);
         return r;
     }
 
-    // Nothing new since the last pass: the sidecar hands the notes straight
-    // back, and rewriting an identical file would only move its timestamp.
-    if (out.text == current) {
-        r.ok = true;
-        r.text = out.text;
+    llm::memory_proposal proposal;
+    if (!llm::parse_memory_proposal(out.text, &proposal, &r.error)) return r;
+    std::vector<std::string> notes;
+    const std::string &from = proposal.from;
+    const std::string &to = proposal.to;
+    std::vector<std::string> sources;
+    if (!from.empty()) sources.push_back(from);
+    if (!to.empty() && to != from) sources.push_back(to);
+    const auto committed = llm::commit_pass(_config_home, _kind, _bundle, proposal.ops,
+                                            sources, from, to, &notes);
+    for (const std::string &n : notes) record_note(n);
+    if (!committed.storage_ok) {
+        r.error = "memory commit failed; the committed cursor was not advanced";
         return r;
     }
 
-    if (!llm::write_memory(_config_home, _kind, out.text)) {
-        r.error =
-            std::string(llm::memory_agent_name(_kind)) +
-            " long-term memory was not written (unreadable, empty, or over " +
-            std::to_string(llm::k_memory_max_chars) + " characters)";
-        return r;
+    std::vector<llm::memory_entry> after;
+    if (llm::read_ledger(_config_home, _kind, _bundle, &after)) {
+        r.text = llm::render_memory(after, llm::k_memory_budget_chars, nullptr);
     }
     r.ok = true;
-    r.text = out.text;
     return r;
 }
 
@@ -968,15 +981,17 @@ bool llm_host::ensure_running(const std::filesystem::path &,
 llm_protocol::usage_stats llm_host::usage() const { return {}; }
 
 llm_result llm_host::run_turn(const std::filesystem::path &,
-                              const std::string &, const std::string &, int,
-                              int, bool, const std::filesystem::path &) {
+                              const std::string &, const std::string &,
+                              const std::string &, int, int, bool,
+                              const std::filesystem::path &) {
     llm_result r;
     r.error = "the LLM sidecar is not supported on Windows";
     return r;
 }
 
 llm_result llm_host::memorize(const std::filesystem::path &,
-                              const std::string &, llm::memory_kind, int) {
+                              const std::string &, const std::string &,
+                              llm::memory_kind, int) {
     llm_result r;
     r.error = "the LLM sidecar is not supported on Windows";
     return r;
@@ -1044,7 +1059,7 @@ llm::approval_decision
 llm_host::service_approval(const llm::approval_request &_req) {
     const auto start = std::chrono::steady_clock::now();
     std::unique_lock<std::mutex> lk(m_approval_mu);
-    if (m_approval_abort) {
+    if (m_approval_abort || m_interrupt.load()) {
         return {};
     }
     m_approval_req = _req;

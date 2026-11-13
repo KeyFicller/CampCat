@@ -1,6 +1,7 @@
 #pragma once
 
 #include "ccat_driver/ccat_script_profile.h"
+#include "app/device_task_lease.h"
 #include "app/workspace_selection.h"
 #include "core/app_config.h"
 #include "core/log_buffer.h"
@@ -72,13 +73,15 @@ public:
      * Enquire, launch the app when it is down, `open`, wait for ready, then arm
      * the watchdog and record what we started. Blocking: up to 60s for the app
      * plus 180s for the instance. Refuses when another launch, or an automation
-     * cycle, already owns the flags.
+     * device task, already owns the lease. Nested tools pass their owner.
      *
      * @param[in] _should_stop Polled by the waits; true gives up early and
      * comes back as a failed status that says so. Empty never stops.
      */
     campcat::mumu_status
-    start_mumu_blocking(const std::function<bool()> &_should_stop = {});
+    start_mumu_blocking(
+        const std::function<bool()> &_should_stop = {},
+        const device_task_lease::owner *_owner = nullptr);
     /** @brief Reconfigure and arm the scheduler. */
     void refresh_scheduler_locked(bool _immediate_first_tick = false);
 
@@ -103,6 +106,7 @@ public:
 
     log_buffer log_lines;
     std::deque<std::string> log_scroll;
+    device_task_lease device_tasks;
     std::atomic<bool> cycle_running{false};
     std::atomic<bool> stop_requested{false};
     /// Named `sched`, not `scheduler`: the member would shadow the type.

@@ -13,6 +13,7 @@ from pydantic import BaseModel, Field
 
 import agent.scripter as scripter
 import models
+import tool_policy
 from agent.region_rules import REGION_RULES
 
 
@@ -51,7 +52,7 @@ def author_script(
     steps: Annotated[list[HandoffStep], Field(description=(
         "你已经在设备上做过的事，一个控件一项。写脚本的 agent 看不到这段对话。"))] = [],
     bundle: Annotated[str, Field(description=(
-        "要新建或修改的 bundle；留空让写脚本的 agent 自己选。"))] = "",
+        "要新建或修改的 bundle；新建时可留空让写脚本的 agent 自己选，修已有的必须填写。"))] = "",
     shots: Annotated[list[int], Field(description=(
         "能说明涉及到的界面的截图编号。"))] = [],
     last_error: Annotated[str, Field(description=(
@@ -64,7 +65,8 @@ def author_script(
     图添加界面和移动。它能读写 bundle、切模板、跑脚本来验证，然后回报。
     把用户说过的每一条约束原样放进 `goal` 的第二段：写脚本的 agent 看不到这段
     对话的其他内容，第一段只留这一次要产出的那一个东西。没有 `fix: true`
-    也没有 `last_error` 时，它改不动已经存在的 bundle。`steps` 是你自己在设备
+    也没有 `last_error` 时，它改不动已经存在的 bundle。修已有的 bundle 时必须
+    明确填写 `bundle`；修复权限只覆盖这个名字。`steps` 是你自己在设备
     上已经做过的事：一个控件一项——见过的界面、每点过的控件、它的最终区域和
     那里应该出现的东西。少了它，写脚本的 agent 会把每个控件重新找一遍。
     """
@@ -83,7 +85,8 @@ OPERATOR_PERSONA = (
     "`goal`。要改一个已经存在的 bundle 时必须传 `fix: true`——包括你自己这一轮"
     "刚建好、但判据不对的锚点（比如标题模板在别的屏也命中），不传就会被拒，"
     "同一个改法重交几次也不会成；一次只修这一处。"
-    "上一次 `run_script` 失败时传 `last_error`。其余任何交接都不许改动已存在"
+    "上一次 `run_script` 失败时传 `last_error`。这两种修复都必须在 `bundle`"
+    "明确填写要修的名字，只能改它；没有明确目标时不能改任何已有 bundle。其余任何交接都不许改动已存在"
     "的 bundle。"
     "把你查看过的每个界面、点过的每个控件写进 `steps`，一个控件一项；区域照抄"
     "工具结果里的写法（`box x,y wxh` / `circle cx,cy,r` / `diamond cx,cy,rx,ry`），"
@@ -166,14 +169,6 @@ def _rules(names: tuple[str, ...]) -> str:
     return "\n\n".join(f"## {name}\n\n{_RULES[name]}" for name in names)
 
 
-def _name(tool: dict) -> str | None:
-    try:
-        name = tool["function"]["name"]
-    except (KeyError, TypeError):
-        return None
-    return name if isinstance(name, str) else None
-
-
 def shared_rules() -> str:
     """The blocks appended after either persona."""
     return _rules(_RULE_NAMES)
@@ -182,7 +177,7 @@ def shared_rules() -> str:
 def operator_tools(host_tools: list) -> list:
     """Host tools the operator may call, plus the handoff tool."""
     hidden = scripter.SCRIPTER_ONLY | scripter.HIDDEN
-    kept = [tool for tool in host_tools if _name(tool) not in hidden]
+    kept = [tool for tool in host_tools if tool_policy.name_of(tool) not in hidden]
     return kept + [author_script]
 
 

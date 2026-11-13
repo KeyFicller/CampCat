@@ -3,6 +3,11 @@
 add_executable(test_campcat_core cpp/test_approval_gate.cpp
                                  cpp/test_automation_log.cpp
                                  cpp/test_box_snap.cpp
+                                 cpp/test_bundle_store.cpp
+                                 cpp/test_frame_store.cpp
+                                 cpp/test_device_task_lease.cpp
+                                 cpp/test_llm_controller.cpp
+                                 cpp/test_llm_memory.cpp
                                  cpp/test_ccat_anchor.cpp
                                  cpp/test_ccat_ask.cpp
                                  cpp/test_ccat_cond_action.cpp

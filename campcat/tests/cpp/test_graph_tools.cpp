@@ -18,6 +18,40 @@
 #include <string>
 #include <vector>
 
+TEST(WriteScope, RefusesUnrelatedExistingBundleBeforeMutation) {
+    const auto root = std::filesystem::temp_directory_path() / "campcat_write_scope";
+    std::filesystem::remove_all(root);
+    std::filesystem::create_directories(root / "other.entry");
+    { std::ofstream f(root / "other.entry/main.ccat"); f << "log(\"old\")\n"; }
+    campcat::llm::tool_context ctx;
+    ctx.script_dir = root;
+    campcat::llm::set_context(ctx);
+    const auto result = campcat::llm::dispatch("delete_script", R"({"name":"other.entry"})",
+                                              std::vector<std::string>{"g.city"});
+    EXPECT_FALSE(result.ok);
+    EXPECT_EQ(result.error_code, "write_scope_denied");
+    EXPECT_TRUE(std::filesystem::exists(root / "other.entry/main.ccat"));
+    campcat::llm::set_context({});
+    std::filesystem::remove_all(root);
+}
+
+TEST(WriteScope, RenameCannotRewriteUnrelatedReferrers) {
+    const auto root = std::filesystem::temp_directory_path() / "campcat_rename_scope";
+    std::filesystem::remove_all(root);
+    for (auto name : {"old", "ref"}) std::filesystem::create_directories(root / name);
+    { std::ofstream f(root / "old/main.ccat"); f << "log(\"old\")\n"; }
+    { std::ofstream f(root / "ref/main.ccat"); f << "run(\"../old/main.ccat\")\n"; }
+    campcat::llm::tool_context ctx; ctx.script_dir = root;
+    campcat::llm::set_context(ctx);
+    const auto result = campcat::llm::dispatch("rename_script",
+        R"({"name":"old","new_name":"renamed"})", std::vector<std::string>{"old"});
+    EXPECT_FALSE(result.ok);
+    EXPECT_EQ(result.error_code, "write_scope_denied");
+    EXPECT_TRUE(std::filesystem::exists(root / "old/main.ccat"));
+    EXPECT_FALSE(std::filesystem::exists(root / "renamed/main.ccat"));
+    campcat::llm::set_context({}); std::filesystem::remove_all(root);
+}
+
 namespace {
 
 constexpr int kScreenW = 100;

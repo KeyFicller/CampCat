@@ -1,4 +1,6 @@
 #include "core/llm/llm_tools.h"
+#include "core/file_io.h"
+#include "core/script/bundle_store.h"
 
 #include "ccat_driver/ccat_program_runner.h" // run_ccat_program
 #include "core/adb_client.h"
@@ -35,21 +37,16 @@ namespace {
 
 /// Set by set_context() on the worker thread; read by every tool below.
 tool_context g_ctx;
+class tool_failure : public std::runtime_error {
+public:
+    std::string code;
+    tool_failure(std::string _code, std::string _message)
+        : std::runtime_error(std::move(_message)), code(std::move(_code)) {}
+};
 
-/// The numbered screenshots this session can still cut a template out of:
-/// number
-/// -> that frame's raw PNG. The sidecar used to keep them and attach one to a
-/// call, which capped a call at one picture; here any tool can reach any frame
-/// by number, so one call can cut from several.
-///
-/// `g_ctx.screen` stays as well, keeping the latest frame as its own copy: tap
-/// and mark check coordinates against it, and the approval bubble draws on it.
-/// Two copies of one picture buy leaving set_context()/m_screen() alone.
-///
-/// Same thread rule as g_ctx: only the worker running the sidecar exchange
-/// reads this, and forget_frames() runs at session reset, where no turn is in
-/// flight.
-std::map<int, screen_state> g_frames;
+/// Session frames spill to disk after the in-memory budget is reached.
+frame_store g_frames;
+std::optional<screen_state> g_lookup_frame;
 /// Only ever goes up, so a number the model remembers from an earlier request
 /// keeps pointing at the same picture. Reset with the table.
 int g_next_shot = 0;
@@ -302,8 +299,8 @@ const screen_state *frame_for(const std::optional<int> &_shot,
         }
         return &g_ctx.screen;
     }
-    const auto it = g_frames.find(*_shot);
-    if (it == g_frames.end()) {
+    g_lookup_frame = g_frames.get(*_shot);
+    if (!g_lookup_frame) {
         *_error = "no screenshot #" + std::to_string(*_shot) +
                   " in this session (" +
                   (g_next_shot > 0
@@ -312,7 +309,7 @@ const screen_state *frame_for(const std::optional<int> &_shot,
                   ")";
         return nullptr;
     }
-    return &it->second;
+    return &*g_lookup_frame;
 }
 
 /// Decodes the frame a call names. `*_error` is left empty on success.
@@ -857,7 +854,7 @@ constexpr int k_default_swipe_ms = 300;
     cv::Mat bgr;
     std::string diag;
     if (!adb.screencap_bgr(&bgr, 45000, &diag)) {
-        throw js::bind_error("screencap failed: " + diag +
+        throw tool_failure("device_error", "screencap failed: " + diag +
                              std::string(k_device_hint));
     }
     std::vector<unsigned char> png;
@@ -871,7 +868,7 @@ constexpr int k_default_swipe_ms = 300;
     // taken from one.
     g_ctx.screen =
         screen_state{bgr.cols, bgr.rows, std::string(png.begin(), png.end())};
-    g_frames[++g_next_shot] = g_ctx.screen;
+    g_next_shot = g_frames.put(g_ctx.screen);
     g_last_shot = g_next_shot;
     return g_ctx.screen.png;
 }
@@ -1242,16 +1239,16 @@ std::string run_parsed(const ccat_lang::Program &_prog,
             res.message.empty() ? std::string("script failed") : res.message;
         // A statement that could not see the device is the one failure here the
         // model can act on (see k_device_hint).
-        if (msg.find("screencap failed") != std::string::npos ||
-            msg.find("adb tap failed") != std::string::npos) {
+        if (res.error_code == "device_error") {
             msg += k_device_hint;
         }
         // The viewers this hint names do not exist on a play-only server, so
         // the advice would only send the client looking for them.
-        if (!g_ctx.play_only && msg.find(".png") != std::string::npos) {
+        if (!g_ctx.play_only && res.error_code == "script_failed") {
             msg += k_template_hint;
         }
-        throw js::bind_error(msg + script_log_suffix(script_logs));
+        throw tool_failure(res.error_code.empty() ? "script_failed" : res.error_code,
+                           msg + script_log_suffix(script_logs));
     }
     return "script ran ok (" + std::to_string(_prog.stmts.size()) +
            " statements)" + script_log_suffix(script_logs);
@@ -1844,41 +1841,23 @@ void describe_templates(const template_plan &_plan,
 
 void write_text(const std::string &_bundle, const std::string &_file,
                 const std::string &_text) {
-    std::ofstream out(g_ctx.script_dir / _bundle / _file,
-                      std::ios::binary | std::ios::trunc);
-    out.write(_text.data(), static_cast<std::streamsize>(_text.size()));
-    out.close();
-    if (!out) {
-        throw js::bind_error("could not write " + _bundle + "/" + _file);
-    }
+    write_file_atomic(g_ctx.script_dir / _bundle / _file, _text);
 }
 
-/// Writes `_source` as `_bundle`'s main.ccat, then the templates it names,
-/// then deletes the leftovers.
+/// Publish the script, templates and optional anchor description together.
 void write_bundle(const std::string &_bundle, const std::string &_source,
-                  const template_plan &_plan) {
-    std::error_code ec;
-    std::filesystem::create_directories(g_ctx.script_dir / _bundle, ec);
-    write_text(_bundle, "main.ccat", _source);
-    for (const pending_cut &cut : _plan.cuts) {
-        const std::filesystem::path path = g_ctx.script_dir / _bundle / cut.file;
-        try {
-            if (!cv::imwrite(path.string(), cut.crop)) {
-                throw js::bind_error("could not write " + _bundle + "/" +
-                                     cut.file);
-            }
-        } catch (const cv::Exception &e) {
-            throw js::bind_error("could not write " + _bundle + "/" +
-                                 cut.file + ": " + e.what());
+                  const template_plan &_plan,
+                  const std::optional<std::string_view> &_golden = std::nullopt) {
+    ccat_lang::publish_bundle(g_ctx.script_dir, _bundle, [&](const auto &stage) {
+        write_file_atomic(stage / "main.ccat", _source);
+        for (const pending_cut &cut : _plan.cuts) {
+            if (!cv::imwrite((stage / cut.file).string(), cut.crop))
+                throw js::bind_error("could not write " + _bundle + "/" + cut.file);
         }
-    }
-    for (const std::string &file : _plan.to_delete) {
-        std::filesystem::remove(g_ctx.script_dir / _bundle / file, ec);
-        if (ec) {
-            throw js::bind_error("could not delete " + _bundle + "/" + file +
-                                 ": " + ec.message());
-        }
-    }
+        for (const std::string &file : _plan.to_delete)
+            std::filesystem::remove(stage / file);
+        if (_golden) write_file_atomic(stage / "golden.md", *_golden);
+    });
 }
 
 void require_anchor_script(const ccat_lang::Program &_prog) {
@@ -2062,8 +2041,7 @@ CPP_REFLECT_TOOL(update_script)
         }
     }
 
-    write_bundle(bundle, source, plan);
-    write_text(bundle, "golden.md", golden);
+    write_bundle(bundle, source, plan, golden);
     return "saved anchor \"" + bundle + "\" (golden.md, main.ccat, " +
            std::to_string(plan.cuts.size() + plan.kept.size()) +
            " templates)\n" + graph_check(graph);
@@ -2327,6 +2305,7 @@ void request_emulator_stop() { g_emulator_stop.store(true); }
 
 void forget_frames() {
     g_frames.clear();
+    g_lookup_frame.reset();
     g_next_shot = 0;
     g_human_region.reset();
 }
@@ -2365,12 +2344,14 @@ std::string fill_quiet_note(std::string_view _note,
     return out;
 }
 
-tool_reply dispatch(std::string_view _name, std::string_view _args_json) {
+tool_reply dispatch(std::string_view _name, std::string_view _args_json,
+    const std::optional<std::vector<std::string>> &_write_scope) {
     tool_reply out;
     // Cleared before the busy check, so no early return can leave a frame
     // number behind for the next call to report as its own.
     g_last_shot = 0;
     if (g_ctx.adb_busy && g_ctx.adb_busy()) {
+        out.error_code = "device_busy";
         out.error = "adb busy: an automation cycle is running; "
                     "stop calling device tools and tell the user";
         return out;
@@ -2378,8 +2359,47 @@ tool_reply dispatch(std::string_view _name, std::string_view _args_json) {
     const nlohmann::json args =
         nlohmann::json::parse(_args_json, nullptr, false);
     if (args.is_discarded() || !args.is_object()) {
+        out.error_code = "invalid_argument";
         out.error = "arguments must be a JSON object";
         return out;
+    }
+    if (_write_scope) {
+        const std::map<std::string_view, std::vector<std::string_view>> writes{
+            {"save_script", {"name"}}, {"update_script", {"name"}},
+            {"delete_script", {"name"}}, {"rename_script", {"name", "new_name"}},
+            {"save_template", {"bundle"}}, {"save_anchor", {"graph", "anchor"}}};
+        if (const auto rule = writes.find(_name); rule != writes.end()) {
+            std::vector<std::string> targets;
+            for (auto field : rule->second) {
+                const auto it = args.find(std::string(field));
+                if (it != args.end() && it->is_string()) targets.push_back(it->get<std::string>());
+            }
+            if (_name == "save_anchor") {
+                if (targets.size() == 2) targets = {targets[0] + "." + targets[1]};
+                else targets.clear();
+            }
+            if (_name == "rename_script" && targets.size() == 2) {
+                std::vector<std::string> referrers;
+                std::string reason;
+                if (ccat_lang::check_bundle_renamable(g_ctx.script_dir, targets[0], targets[1],
+                        &referrers, &reason) == ccat_lang::rename_status::ok)
+                    targets.insert(targets.end(), referrers.begin(), referrers.end());
+            }
+            for (const auto &target : targets) {
+                if (!ccat_lang::safe_leaf_name(target)) {
+                    out.error_code = "invalid_argument";
+                    out.error = "bundle name must be a plain file name";
+                    return out;
+                }
+                std::error_code ec;
+                const bool exists = std::filesystem::exists(g_ctx.script_dir / target, ec);
+                if (ec || (exists && std::find(_write_scope->begin(), _write_scope->end(), target) == _write_scope->end())) {
+                    out.error_code = "write_scope_denied";
+                    out.error = "this task may not modify existing bundle \"" + target + "\"";
+                    return out;
+                }
+            }
+        }
     }
     for (const auto &entry : js::tool_registry()) {
         if (entry.name != _name) {
@@ -2395,11 +2415,16 @@ tool_reply dispatch(std::string_view _name, std::string_view _args_json) {
             out.ok = true;
             out.quiet_note = fill_quiet_note(entry.quiet_note, args);
             out.shot = g_last_shot;
+        } catch (const tool_failure &e) {
+            out.error = e.what(); out.error_code = e.code;
+        } catch (const std::filesystem::filesystem_error &e) {
+            out.error = e.what(); out.error_code = "storage_error";
         } catch (const std::exception &e) {
-            out.error = e.what();
+            out.error = e.what(); out.error_code = "tool_failed";
         }
         return out;
     }
+    out.error_code = "unknown_tool";
     out.error = "unknown tool: " + std::string(_name);
     return out;
 }

@@ -476,9 +476,9 @@ int main(int argc, char **argv) {
             ImGui::EndMenuBar();
         }
 
-        const bool busy_now = st.cycle_running.load();
+        const bool busy_now = st.device_tasks.busy();
         const bool lock_manual_single = busy_now || st.sched.running();
-        llm_panel_tick(lock_manual_single);
+        llm_panel_tick();
 
         static shell_page page = shell_page::Script;
 
@@ -684,7 +684,7 @@ int main(int argc, char **argv) {
                 } else if (page == shell_page::Llm) {
                     llm_panel_draw_panel(st, cfg_view);
                 } else if (page == shell_page::Console) {
-                    console_panel_draw(st, cfg_view, busy_now);
+                    console_panel_draw(st, cfg_view, lock_manual_single);
                 } else if (page == shell_page::Graph) {
                     graph_panel_draw(cfg_view, st.workspace);
                 } else if (page == shell_page::Settings) {
@@ -722,7 +722,8 @@ int main(int argc, char **argv) {
                         if (have_editor && ImGui::BeginTabItem("Editor", nullptr,
                                 script_editor_focus_requested()
                                     ? ImGuiTabItemFlags_SetSelected : 0)) {
-                            script_editor_draw_docked();
+                            script_editor_draw_docked(st.device_tasks.busy() ||
+                                                       st.sched.running());
                             ImGui::EndTabItem();
                         }
                         if (have_details && ImGui::BeginTabItem("Details", &details_open)) {
@@ -753,7 +754,8 @@ int main(int argc, char **argv) {
 
         ImGui::End();
 
-        script_editor_draw_windows(editor_can_dock);
+        script_editor_draw_windows(editor_can_dock, st.device_tasks.busy() ||
+                                                        st.sched.running());
 
         // Top level, not inside the shell window: the user may switch pages
         // while correcting a box, and the window must survive that.
@@ -781,12 +783,11 @@ int main(int argc, char **argv) {
 
     st.stop_workers();
 
-    st.close_launched_mumu();
-
-    campcat::automation_log::clear_sink();
-
     template_capture_panel_shutdown_gl();
     llm_panel_shutdown_gl();
+    // A nested emulator launch must finish before its watchdog is closed.
+    st.close_launched_mumu();
+    campcat::automation_log::clear_sink();
     script_editor_panel_shutdown_gl(); // preview textures, before the context
                                        // goes
     ImGui_ImplOpenGL3_Shutdown();

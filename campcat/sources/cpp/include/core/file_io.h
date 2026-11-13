@@ -2,12 +2,21 @@
 
 #include <filesystem>
 #include <fstream>
+#include <mutex>
 #include <stdexcept>
 #include <string>
 #include <string_view>
 #include <system_error>
 
 namespace campcat {
+
+/// Serializes short library file transactions, including graph-scoped notes.
+/// Device execution never holds this lock.
+inline std::recursive_mutex &library_io_mutex() {
+    static std::recursive_mutex mutex;
+    return mutex;
+}
+
 
 /// Writes `_text` to a temp sibling and renames it over `_path`, so a crash or
 /// a full disk leaves the old file rather than a half-written one. The temp

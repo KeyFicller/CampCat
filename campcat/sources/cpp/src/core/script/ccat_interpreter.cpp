@@ -878,10 +878,13 @@ CcatInterpreter::run(const Program &_program,
         // fields and every existing consumer -- `run_script`, the scheduled
         // task, `[console] ok=...` -- reports a false answer without a new one.
         r.ok = o.value;
+        if (!o.value) r.error_code = "script_false";
         r.message = o.value ? "ok" : std::string("the script returned false");
         return r;
     }
     r.ok = false;
+    r.error_code = o.kind == stmt_exec_outcome::tag::stopped ? "cancelled"
+        : o.device ? "device_error" : o.fatal ? "script_fatal" : "script_failed";
     r.message = o.message.empty() ? std::string("error") : std::move(o.message);
     return r;
 }

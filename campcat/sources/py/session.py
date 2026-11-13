@@ -268,8 +268,7 @@ def reset() -> None:
     _LATEST_B64 = ""
     _LATEST_TIME = 0.0
     _TURN_PREV_SHOT = None
-    memorier._MW = None
-    memorier._SCRIPTER_MW = None
+    memorier.reset()
     _MEMORIZED_UPTO = 0
     _SCRIPTER_MEMORIZED_UPTO = 0
     _SCRIPTER_MEMORY = ""
@@ -325,13 +324,59 @@ def size() -> int:
                if isinstance(m.id, str) and m.id.startswith(_TURN_MARK))
 
 
-def history() -> list:
+def history(agent: str = "operator") -> list:
     """The conversation, for the request being assembled.
 
     A copy: the caller extends it into its own list, so nothing outside this
     module ends up holding the live one.
     """
-    return list(_MESSAGES)
+    return list(_history_state(agent)[0])
+
+
+def _history_state(agent: str) -> tuple[list, int, str]:
+    if agent == "operator":
+        return _MESSAGES, _MEMORIZED_UPTO, _TURN_MARK
+    if agent == "scripter":
+        return _SCRIPTER_MESSAGES, _SCRIPTER_MEMORIZED_UPTO, _SCRIPTER_TURN_MARK
+    raise ValueError(f"unknown history agent: {agent}")
+
+
+def _set_memory_cursor(cursor: int, agent: str) -> None:
+    global _MEMORIZED_UPTO, _SCRIPTER_MEMORIZED_UPTO
+    if agent == "operator":
+        _MEMORIZED_UPTO = cursor
+    else:
+        _SCRIPTER_MEMORIZED_UPTO = cursor
+
+
+def memory_history(agent: str = "operator") -> list:
+    """Only the messages not yet covered by a durable host memory receipt."""
+    messages, cursor, _ = _history_state(agent)
+    return list(messages[cursor:])
+
+
+def replace_history(messages: list, agent: str = "operator") -> None:
+    """Install a compacted history without moving its memory cursor past new work."""
+    old, cursor, _ = _history_state(agent)
+    covered = {id(message) for message in old[:cursor]}
+    if cursor == len(old):
+        end = len(messages)
+    else:
+        # A new summary may include pending turns. Revisit it rather than
+        # assuming that a replacement at the old offset is already committed.
+        end = next((i for i, message in enumerate(messages)
+                    if id(message) not in covered), len(messages))
+    old[:] = messages
+    _set_memory_cursor(end, agent)
+
+
+def turn_span(messages: list, agent: str = "operator") -> tuple[str, str]:
+    """The first and last actual turn marks in a memory proposal."""
+    _, _, prefix = _history_state(agent)
+    marks = [str(message.id) for message in messages
+             if isinstance(message, HumanMessage)
+             and str(message.id).startswith(prefix + ":")]
+    return (marks[0], marks[-1]) if marks else ("", "")
 
 
 def start_turn() -> None:
@@ -341,7 +386,7 @@ def start_turn() -> None:
     _review_turn()
 
 
-def append_turn(text: str, raw: list) -> None:
+def append_turn(text: str, raw: list, *, mark: str | None = None) -> None:
     """Add one turn to the conversation, as it really happened.
 
     `raw` is the turn's own messages: the model's calls and the host's own
@@ -351,8 +396,9 @@ def append_turn(text: str, raw: list) -> None:
     captions, and a caption is where the frame number lives.
     """
     global _TURN_SEQ
-    _TURN_SEQ += 1
-    _MESSAGES.append(HumanMessage(content=text, id=f"{_TURN_MARK}:{_TURN_SEQ}"))
+    mark = mark or new_mark(_TURN_MARK)
+    _TURN_SEQ = max(_TURN_SEQ, _seq_of(mark))
+    _MESSAGES.append(HumanMessage(content=text, id=mark))
     _MESSAGES.extend(_detach_picture(m) if _is_picture(m) else m for m in raw)
 
 
@@ -455,7 +501,7 @@ def _restore(path: str) -> int:
     A file that cannot be read starts the conversation empty, and is left alone:
     overwriting something we failed to look at is how a log becomes no log.
     """
-    global _TURN_SEQ, _MEMORIZED_UPTO
+    global _TURN_SEQ, _MEMORIZED_UPTO, _SCRIPTER_MEMORIZED_UPTO
     try:
         with open(path, "rb") as f:
             data = f.read()
@@ -488,10 +534,39 @@ def _restore(path: str) -> int:
         _TURN_SEQ = max(_TURN_SEQ, _seq_of(turn["id"]))
         _MESSAGES.append(HumanMessage(content=turn["text"], id=turn["id"]))
         _MESSAGES.extend(turn["msgs"])
-    # The notes on disk already cover everything up to here; summarizing it
-    # again would be paid for and change nothing.
-    _MEMORIZED_UPTO = len(_MESSAGES)
+    # How much of this the notes already cover is known only to the host, which
+    # sends the mark its last pass reached on the next turn. Assuming "all of
+    # it" is what silently dropped every turn written after the last pass; 0
+    # errs toward folding something twice instead.
+    _MEMORIZED_UPTO = 0
+    # The scripter's history is not in this log, so it starts empty here. A
+    # cursor left at its pre-restart value would fold the same words twice.
+    _SCRIPTER_MEMORIZED_UPTO = 0
     return len(turns)
+
+
+def set_memory_upto(mark: str, agent: str = "operator") -> None:
+    """Skip the history the notes already cover, as told by the host.
+
+    `mark` is the turn a memory pass reached. That turn's own replies were
+    folded with it, so the cursor goes to the *next* turn's start. An unknown
+    mark leaves the cursor alone: the host's ledger and this history disagree,
+    and folding everything again only costs one pass.
+    """
+    if not mark:
+        return
+    messages, cursor, prefix = _history_state(agent)
+    for i, m in enumerate(messages):
+        if not isinstance(m, HumanMessage) or str(m.id) != mark:
+            continue
+        end = len(messages)
+        for j in range(i + 1, len(messages)):
+            if str(getattr(messages[j], "id", "")).startswith(prefix + ":"):
+                end = j
+                break
+        # `reset` may already have moved it past this; never go backwards.
+        _set_memory_cursor(max(cursor, end), agent)
+        return
 
 
 def _decode(data: bytes) -> list[dict]:
@@ -589,8 +664,8 @@ def _drop_dangling(messages: list) -> list:
 def _rewrite(path: str, turns: list) -> None:
     """Replace the file with these turns, atomically.
 
-    A temp file and a rename, the way `write_memory` does it: a process killed
-    mid-write leaves the old log, never half of a new one.
+    A temp file and a rename: a process killed mid-write leaves the old log,
+    never half of a new one.
     """
     tmp = path + ".tmp"
     try:
@@ -614,7 +689,8 @@ def _rewrite(path: str, turns: list) -> None:
 
 def _seq_of(mark: str) -> int:
     """The turn number a mark carries, or 0 for one that carries none."""
-    _, _, number = mark.partition(":")
+    _, _, suffix = mark.partition(":")
+    number = suffix.partition(":")[0]
     return int(number) if number.isdigit() else 0
 
 
@@ -622,7 +698,8 @@ def new_mark(prefix: str) -> str:
     """A unique id for the message that starts a turn."""
     global _TURN_SEQ
     _TURN_SEQ += 1
-    return f"{prefix}:{_TURN_SEQ}"
+    # Ledger receipts outlive resets and the scripter's unlogged history.
+    return f"{prefix}:{_TURN_SEQ}:{uuid4().hex}"
 
 
 def own_since(messages: list, mark: str | None) -> list:
@@ -645,22 +722,27 @@ def own_since(messages: list, mark: str | None) -> list:
 
 def scripter_history() -> list:
     """The scripter's conversation. A copy, for the same reason as `history`."""
-    return list(_SCRIPTER_MESSAGES)
+    return history("scripter")
 
 
-def append_scripter_turn(brief: str, raw: list) -> None:
+def append_scripter_turn(brief: str, raw: list, *, mark: str | None = None) -> None:
     """One handoff, kept where the operator's history cannot see it.
 
     Same rule as `append_turn`: pictures lose their bytes and keep the caption
     that names the frame. The id prefix is not `turn`, so `size()` ignores it.
     """
     global _TURN_SEQ
-    _TURN_SEQ += 1
+    mark = mark or new_mark(_SCRIPTER_TURN_MARK)
+    _TURN_SEQ = max(_TURN_SEQ, _seq_of(mark))
     _SCRIPTER_MESSAGES.append(
-        HumanMessage(content=brief, id=f"{_SCRIPTER_TURN_MARK}:{_TURN_SEQ}"))
+        HumanMessage(content=brief, id=mark))
     _SCRIPTER_MESSAGES.extend(
         _detach_picture(m) if _is_picture(m) else m for m in raw)
 
+
+def latest_shot() -> int:
+    """The newest frame number, for detecting a nested agent's screenshot."""
+    return _LATEST_NUM
 
 
 def latest_frame() -> HumanMessage | None:

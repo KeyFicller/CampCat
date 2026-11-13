@@ -743,7 +743,7 @@ def _one(kind: str, shape: str, region: dict, shot, expect: str,
         _accepted[key] = dict(final)
     if kind == "tap":
         # shot is omitted on a tap; the check ran against the newest frame.
-        _remember_tap(session._LATEST_NUM, region, final)
+        _remember_tap(session.latest_shot(), region, final)
     body = _moved(shape, region, final)
     if not body and len(out.get("candidates") or []) > 1:
         body = (f"{len(out['candidates'])} 个候选中保留第一个："

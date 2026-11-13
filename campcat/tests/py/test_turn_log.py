@@ -19,8 +19,8 @@ def _attach(tmp_path) -> str:
     return path
 
 
-def _restart(path: str) -> int:
-    """What a new process sees: nothing in memory, the file still on disk."""
+def _forget() -> None:
+    """What a new process starts with: nothing in memory, the file on disk."""
     session._MESSAGES.clear()
     if session._LOG is not None:
         session._LOG.close()
@@ -29,6 +29,11 @@ def _restart(path: str) -> int:
     session._LOG_MARK = None
     session._TURN_SEQ = 0
     session._MEMORIZED_UPTO = 0
+
+
+def _restart(path: str) -> int:
+    """What a new process sees: nothing in memory, the file still on disk."""
+    _forget()
     return session.attach_log(path)
 
 
@@ -171,6 +176,63 @@ def test_a_half_written_last_line_is_dropped(tmp_path):
     # The tail is gone from the file too, so the next append is a whole line.
     with open(path, encoding="utf-8") as f:
         assert f.read().endswith("\n")
+
+
+def test_restoring_no_longer_claims_the_notes_cover_everything(tmp_path):
+    """The cursor says what a *pass* folded, not what a restart found.
+
+    Anything written after the last pass was restored but never folded, and
+    assuming otherwise dropped those turns permanently.
+    """
+    path = _attach(tmp_path)
+    mark = _turn(path, "one")
+    session.log_round([HumanMessage(content="one", id=mark), AIMessage(content="ok")])
+    session.log_end("")
+
+    _forget()
+    session._MEMORIZED_UPTO = 99
+    session._SCRIPTER_MEMORIZED_UPTO = 99
+    session.attach_log(path)
+
+    assert session._MEMORIZED_UPTO == 0
+    # The scripter's history is not in this log, so its cursor starts over.
+    assert session._SCRIPTER_MEMORIZED_UPTO == 0
+
+
+def test_a_pass_mark_moves_the_cursor_past_that_turn(tmp_path):
+    path = _attach(tmp_path)
+    first = _turn(path, "one")
+    session.log_round([HumanMessage(content="one", id=first), AIMessage(content="ok")])
+    session.log_end("")
+    second = _turn(path, "two")
+    session.log_round([HumanMessage(content="two", id=second), AIMessage(content="ok")])
+    session.log_end("")
+
+    _restart(path)
+    assert session._MEMORIZED_UPTO == 0
+
+    session.set_memory_upto(first)
+    # That turn's own reply was folded with it, so the cursor sits at the next
+    # turn's start rather than right after the mark.
+    assert str(session._MESSAGES[session._MEMORIZED_UPTO].id) == second
+
+    session.set_memory_upto(second)
+    assert session._MEMORIZED_UPTO == len(session._MESSAGES)
+
+
+def test_an_unknown_pass_mark_leaves_the_cursor_alone(tmp_path):
+    # The host's ledger and this history disagree. Folding everything again
+    # costs one pass; silently skipping costs the note.
+    path = _attach(tmp_path)
+    mark = _turn(path, "one")
+    session.log_round([HumanMessage(content="one", id=mark), AIMessage(content="ok")])
+    session.log_end("")
+    _restart(path)
+
+    session.set_memory_upto("turn:999")
+    assert session._MEMORIZED_UPTO == 0
+    session.set_memory_upto("")
+    assert session._MEMORIZED_UPTO == 0
 
 
 def test_replaying_twice_gives_the_same_history(tmp_path):

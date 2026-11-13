@@ -535,8 +535,15 @@ std::optional<std::string> draw_list(const std::filesystem::path &_dir,
 
 /// The rename prompt. It says up front which scripts the rename will rewrite,
 /// and a refusal is shown inside it so the name can be corrected in place.
+bool mutation_button(const char *_label, bool _locked) {
+    ImGui::BeginDisabled(_locked);
+    const bool clicked = ImGui::Button(_label);
+    ImGui::EndDisabled();
+    return clicked && !_locked;
+}
+
 void draw_rename_modal(const std::filesystem::path &_dir,
-                        campcat::workspace_selection &_selection) {
+                        campcat::workspace_selection &_selection, bool _save_locked) {
     if (g_rename_pending) {
         ImGui::OpenPopup(k_rename_popup);
         g_rename_pending = false;
@@ -568,7 +575,7 @@ void draw_rename_modal(const std::filesystem::path &_dir,
         ImGui::TextWrapped("%s", g_rename_error.c_str());
     }
 
-    if (ImGui::Button("Rename")) {
+    if (mutation_button("Rename", _save_locked)) {
         // A trailing space is invisible and would leave a directory nobody can
         // type.
         std::string typed = g_rename_buf;
@@ -616,7 +623,7 @@ void draw_rename_modal(const std::filesystem::path &_dir,
 /// The anchor row's "New action..." prompt: name one, and a bundle
 /// `<graph>.<anchor>.<name>` with a skeleton main.ccat is written and opened.
 void draw_new_action_modal(const std::filesystem::path &_dir,
-                        campcat::workspace_selection &_selection) {
+                        campcat::workspace_selection &_selection, bool _save_locked) {
     if (g_new_action_pending) {
         ImGui::OpenPopup(k_new_action_popup);
         g_new_action_pending = false;
@@ -656,11 +663,11 @@ void draw_new_action_modal(const std::filesystem::path &_dir,
         ImGui::TextDisabled("%s", why.c_str());
     }
 
-    const bool ready = why.empty();
+    const bool ready = why.empty() && !_save_locked;
     if (!ready) {
         ImGui::BeginDisabled();
     }
-    if (ImGui::Button("Create") || (entered && ready)) {
+    if ((ImGui::Button("Create") || entered) && ready) {
         const std::string err = campcat::ccat_lang::create_action_bundle(
             _dir, g_graph, g_new_action_anchor, g_new_action_name);
         if (err.empty()) {
@@ -694,7 +701,7 @@ void draw_new_action_modal(const std::filesystem::path &_dir,
 /// there is nothing to confirm. Decided when the menu item is clicked, so
 /// nobody is asked to confirm a deletion that was never going to happen.
 void draw_delete_modal(const std::filesystem::path &_dir,
-                        campcat::workspace_selection &_selection) {
+                        campcat::workspace_selection &_selection, bool _save_locked) {
     if (g_delete_pending) {
         ImGui::OpenPopup(k_delete_popup);
         g_delete_pending = false;
@@ -720,7 +727,7 @@ void draw_delete_modal(const std::filesystem::path &_dir,
         "This removes the whole %s/ directory, main.ccat and every "
         "template in it.\nIt cannot be undone.",
         g_delete_name.c_str());
-    if (ImGui::Button("Delete")) {
+    if (mutation_button("Delete", _save_locked)) {
         std::string err;
         if (campcat::ccat_lang::delete_bundle(_dir, g_delete_name, &err) ==
             campcat::ccat_lang::delete_status::ok) {
@@ -747,7 +754,7 @@ void draw_delete_modal(const std::filesystem::path &_dir,
     ImGui::EndPopup();
 }
 
-void draw_editor_contents(script_editor &_e) {
+void draw_editor_contents(script_editor &_e, bool _save_locked) {
     const std::filesystem::path bundle_dir = _e.main_path.parent_path();
 
     // Everything below the code: the resource box and its separator sit
@@ -784,12 +791,14 @@ void draw_editor_contents(script_editor &_e) {
     }
     ImGui::EndChild();
 
+    ImGui::BeginDisabled(_save_locked);
     if (ImGui::Button("Save")) {
         save_editor(_e.dir, _e);
     }
     if (ImGui::IsItemHovered()) {
         ImGui::SetTooltip("Write main.ccat (Cmd+S)");
     }
+    ImGui::EndDisabled();
     ImGui::SameLine();
     if (ImGui::Button("Reload")) {
         reload_editor(_e);
@@ -808,13 +817,13 @@ void draw_editor_contents(script_editor &_e) {
     }
 
     // Cmd on macOS, Ctrl elsewhere; ImGui maps the platform modifier onto Ctrl.
-    if (ImGui::IsWindowFocused(ImGuiFocusedFlags_ChildWindows) &&
+    if (!_save_locked && ImGui::IsWindowFocused(ImGuiFocusedFlags_ChildWindows) &&
         ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiKey_S)) {
         save_editor(_e.dir, _e);
     }
 }
 
-void draw_editor(script_editor &_e) {
+void draw_editor(script_editor &_e, bool _save_locked) {
     if (!_e.open) {
         return;
     }
@@ -831,7 +840,7 @@ void draw_editor(script_editor &_e) {
         ImVec2(std::min(760.0F, display.x * 0.9F),
                std::min(560.0F, display.y * 0.85F)), ImGuiCond_Appearing);
     if (ImGui::Begin(title.c_str(), &_e.open)) {
-        draw_editor_contents(_e);
+        draw_editor_contents(_e, _save_locked);
     }
     ImGui::End();
 }
@@ -857,7 +866,7 @@ bool script_editor_focus_requested() {
                        [](const auto &entry) { return entry->open && entry->focus; });
 }
 
-void script_editor_draw_docked() {
+void script_editor_draw_docked(bool _save_locked) {
     if (ImGui::BeginTabBar("script_editors", ImGuiTabBarFlags_AutoSelectNewTabs |
                                               ImGuiTabBarFlags_FittingPolicyScroll)) {
         for (const auto &entry : g_editors) {
@@ -874,7 +883,7 @@ void script_editor_draw_docked() {
                 ImGui::PushID(entry->main_path.c_str());
                 // This child scopes keyboard shortcuts to the visible editor.
                 ImGui::BeginChild("editor", ImVec2(0.0F, 0.0F));
-                draw_editor_contents(*entry);
+                draw_editor_contents(*entry, _save_locked);
                 ImGui::EndChild();
                 ImGui::PopID();
                 ImGui::EndTabItem();
@@ -885,11 +894,11 @@ void script_editor_draw_docked() {
     prune_closed_editors();
 }
 
-void script_editor_draw_windows(bool _docked) {
+void script_editor_draw_windows(bool _docked, bool _save_locked) {
     prune_closed_editors();
     if (!_docked) {
         for (const std::unique_ptr<script_editor> &entry : g_editors) {
-            draw_editor(*entry);
+            draw_editor(*entry, _save_locked);
         }
     }
     prune_closed_editors();
@@ -897,7 +906,7 @@ void script_editor_draw_windows(bool _docked) {
 
 void script_editor_panel_draw(const std::filesystem::path &_script_dir,
                               float _list_w, float _list_h,
-                              campcat::workspace_selection &_selection) {
+                              campcat::workspace_selection &_selection, bool _save_locked) {
     scan_scripts(_script_dir);
     if (g_graph != _selection.graph) {
         g_graph = _selection.graph;
@@ -928,9 +937,9 @@ void script_editor_panel_draw(const std::filesystem::path &_script_dir,
         g_rename_buf = rename_clicked;
         g_rename_pending = true;
     }
-    draw_delete_modal(_script_dir, _selection);
-    draw_rename_modal(_script_dir, _selection);
-    draw_new_action_modal(_script_dir, _selection);
+    draw_delete_modal(_script_dir, _selection, _save_locked);
+    draw_rename_modal(_script_dir, _selection, _save_locked);
+    draw_new_action_modal(_script_dir, _selection, _save_locked);
 }
 
 void script_editor_inspector_draw(const std::filesystem::path &_script_dir,
