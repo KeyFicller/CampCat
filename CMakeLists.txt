@@ -255,6 +255,7 @@ add_library(campcat_core STATIC
   campcat/sources/cpp/src/core/script/ccat_graph.cpp
   campcat/sources/cpp/src/core/script/ccat_parser.cpp
   campcat/sources/cpp/src/core/script/ccat_interpreter.cpp
+  campcat/sources/cpp/src/core/script/replay_audit.cpp
   campcat/sources/cpp/src/core/script/ccat_repl.cpp
   campcat/sources/cpp/src/core/process.cpp
   campcat/sources/cpp/src/core/llm/llm_protocol.cpp
@@ -266,6 +267,7 @@ add_library(campcat_core STATIC
   campcat/sources/cpp/src/core/llm/llm_consult.cpp
   campcat/sources/cpp/src/core/llm/llm_host.cpp
   campcat/sources/cpp/src/core/smoke/smoke_run.cpp
+  campcat/sources/cpp/src/core/smoke/smoke_verify.cpp
   campcat/sources/cpp/src/core/mcp/script_server.cpp
   campcat/sources/cpp/src/ccat_driver/ccat_script_profile.cpp
   campcat/sources/cpp/src/ccat_driver/ccat_script_automation.cpp

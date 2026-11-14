@@ -28,7 +28,7 @@
   "llm": {
     "max_dispatches": 10000,
     "max_model_rounds": 1000,
-    "provider": "deepseek"
+    "provider": "qwen"
   },
   "match": {
     "box_threshold": 0.7,
@@ -44,6 +44,11 @@
   "region_score": {
     "data_dir": "training_data",
     "record": false
+  },
+  "replay": {
+    "enabled": true,
+    "keep_runs": 20,
+    "max_run_mb": 256
   },
   "scheduler": {
     "interval_seconds": 300,

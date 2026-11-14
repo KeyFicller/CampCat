@@ -19,12 +19,20 @@ namespace campcat {
  */
 std::vector<std::string> smoke_prompts(std::string_view _text);
 
+/// Deterministic acceptance: graph validity, optional expected bundle names,
+/// and successful replay evidence for every edge and action's input branch.
+/// An unexercised branch is unverified, even if the model's turn succeeded.
+std::vector<std::string> smoke_problems(
+    const std::filesystem::path &_library,
+    const std::filesystem::path &_replays,
+    const std::filesystem::path &_expectations = {});
+
 /**
  * @brief Build one graph on the demo app and print what it took.
  *
  * Boots the emulator, connects adb, then runs every prompt of `_prompts`
  * through the same sidecar, prompts and tools the conversation page uses. The
- * graph lands in a fresh `smoke/<timestamp>/` directory, which also becomes the
+ * graph lands in a fresh `smoke/<timestamp>/library/` directory, which also becomes the
  * turn's `config_home`: the interpreter reads anchors from that field, so the
  * real library's screens never leak into the run.
  *
@@ -35,7 +43,11 @@ std::vector<std::string> smoke_prompts(std::string_view _text);
  * @param[in] _prompts List file (see `smoke_prompts`).
  * @param[in] _config `config.json`; its `config_home` names the real library,
  * copied from for `CCAT.md` and the notes, and used for the checkout root.
- * @return 0 when every turn succeeded, 1 otherwise.
+ * A sibling `<prompts-stem>.expect.json`, when present, lists the expected
+ * anchors, edges and actions per graph. Graph errors or unverified input
+ * branches fail acceptance even when every model turn completed normally.
+ * Evidence is retained under `smoke/<timestamp>/logs/replay/` for offline checks.
+ * @return 0 when every turn and deterministic acceptance succeeded, 1 otherwise.
  */
 int run_smoke(const std::filesystem::path &_prompts,
               const std::filesystem::path &_config);

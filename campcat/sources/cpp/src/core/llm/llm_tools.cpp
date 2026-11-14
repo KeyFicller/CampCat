@@ -11,6 +11,7 @@
 #include "core/script/ccat_bundle.h" // bundle_main / bundle_names / ...
 #include "core/script/ccat_graph.h"  // screen graph: scan / summary / tags
 #include "core/script/ccat_parser.h" // parse_program / parse_error
+#include "core/template_matcher.h"
 
 // Private: <meta> and the consteval cost stay out of include/.
 #include "llm_tool_schema.h"
@@ -1213,7 +1214,8 @@ CPP_REFLECT_TOOL(go_home)
 /// error wording. `_images_base` is where `tap("x.png")` looks for templates:
 /// a bundle's own directory, as the GUI's Run uses.
 std::string run_parsed(const ccat_lang::Program &_prog,
-                       const std::filesystem::path &_images_base) {
+                       const std::filesystem::path &_images_base,
+                       const std::filesystem::path &_script_path = {}) {
     // Checked before adb so a refusal above is the reason reported, and so that
     // path is testable without a device.
     adb_api &adb = require_adb();
@@ -1230,10 +1232,9 @@ std::string run_parsed(const ccat_lang::Program &_prog,
                 script_logs.push_back(std::move(*text));
             }
         });
-    const auto res =
-        run_ccat_program(&adb, g_ctx.cfg, _images_base, {}, _prog,
-                         [] { return g_script_stop.load(); }, g_ctx.ask,
-                         g_ctx.graph);
+    const auto res = run_ccat_program(
+        &adb, g_ctx.cfg, _images_base, _script_path, _prog,
+        [] { return g_script_stop.load(); }, g_ctx.ask, g_ctx.graph);
     if (!res.ok) {
         std::string msg =
             res.message.empty() ? std::string("script failed") : res.message;
@@ -1244,9 +1245,14 @@ std::string run_parsed(const ccat_lang::Program &_prog,
         }
         // The viewers this hint names do not exist on a play-only server, so
         // the advice would only send the client looking for them.
-        if (!g_ctx.play_only && res.error_code == "script_failed") {
+        if (!g_ctx.play_only && (res.error_code == "script_failed" ||
+                                 res.error_code == "not_found" ||
+                                 res.error_code == "template_missing" ||
+                                 res.error_code == "template_error")) {
             msg += k_template_hint;
         }
+        if (!res.audit_path.empty())
+            msg += "\nReplay audit: " + res.audit_path;
         throw tool_failure(res.error_code.empty() ? "script_failed" : res.error_code,
                            msg + script_log_suffix(script_logs));
     }
@@ -1365,7 +1371,7 @@ std::string landing_of(const std::string &_name) {
         }
     }
     const std::unique_ptr<ccat_lang::Program> prog = parse_or_throw(source);
-    const std::string ran = run_parsed(*prog, g_ctx.script_dir / name);
+    const std::string ran = run_parsed(*prog, g_ctx.script_dir / name, main);
     // Only a run that got here landed somewhere, and the name says where: the
     // page it ended on is what the client would otherwise screenshot to learn.
     const std::string landed = landing_of(name);
@@ -1692,6 +1698,62 @@ void require_bundle(const std::string &_name) {
     }
 }
 
+[[= js::quiet{.text = js::str("Reuse template {from_bundle}/{from_name} in {bundle}")}]][[= js::doc{
+    .text = js::str(
+        "复用一张已经验过的模板：先在指定帧上用原尺寸匹配，命中才把 PNG 原样"
+        "复制进目标 bundle（保留 alpha，不建立跨 bundle 的模板路径）。导航控件"
+        "相同且布局没变时优先用它；不匹配时才重新裁图。复制仍需目标 bundle "
+        "的写权限和模板审批。")}]]
+    [[= js::param_docs(
+        js::str("目标 bundle，必须已经存在。"),
+        js::str("目标模板名，叶子名，缺 .png 时补上。"),
+        js::str("已验证模板所在的 bundle。"),
+        js::str("已验证模板的名字，缺 .png 时补上。"),
+        js::str("要确认控件仍存在的帧编号；省略用最近一帧。"))]] std::string
+        reuse_template(std::string bundle, std::string name,
+                       std::string from_bundle, std::string from_name,
+                       std::optional<int> shot) {
+    require_bundle(bundle);
+    const std::string file = with_png_ext(name);
+    if (!ccat_lang::safe_leaf_name(file))
+        throw js::bind_error("template name must be a plain file name");
+    const std::string png = view_template(from_bundle, from_name);
+    if (!g_ctx.cfg)
+        throw js::bind_error("no shell config for template matching");
+    cv::Mat frame, templ, mask;
+    std::string error;
+    if (!frame_mat(shot, &frame, &error))
+        throw js::bind_error(error);
+    const auto &match = g_ctx.cfg->match;
+    template_matcher matcher(match.box_threshold, match.circle_threshold, false);
+    const auto source = g_ctx.script_dir / from_bundle / with_png_ext(from_name);
+    if (!matcher.load_template(source.string(), &templ, &mask))
+        throw js::bind_error("cannot read source template");
+    require_textured(templ, "source template");
+    const auto hit = matcher.match(frame, templ, 0, {}, mask);
+    if (!hit.found)
+        throw js::bind_error("source template does not match this frame:" +
+                             match_verdict_text(hit));
+    if (needs_approval("reuse_template")) {
+        if (!g_ctx.request_approval)
+            throw js::bind_error("no human available to approve reusing the template");
+        llm::approval_request req;
+        req.tool = "reuse_template";
+        req.summary = "Copy " + from_bundle + "/" + with_png_ext(from_name) +
+                      " to " + bundle + "/" + file + match_verdict_text(hit);
+        req.screen_png = frame_for(shot, &error)->png;
+        req.highlight.push_back(llm::box{hit.bbox.x, hit.bbox.y,
+                                        hit.bbox.width, hit.bbox.height});
+        const auto decision = g_ctx.request_approval(req);
+        if (!decision.approved)
+            throw js::bind_error("user rejected reusing the template: " + decision.guidance);
+    }
+    write_file_atomic(g_ctx.script_dir / bundle / file, png);
+    return "reused template \"" + bundle + "/" + file + "\" from " +
+           from_bundle + "/" + with_png_ext(from_name) + match_verdict_text(hit);
+}
+CPP_REFLECT_TOOL(reuse_template)
+
 /// One entry of the template set an update declares: a name, either a shape to
 /// cut that name from or nothing to keep the PNG already in the bundle, and
 /// which screenshot to cut from. "Keep" needs the optional because one update
@@ -1980,7 +2042,8 @@ CPP_REFLECT_TOOL(update_script)
     }
     const std::string bundle = graph + "." + anchor;
     std::string error;
-    if (!ccat_lang::parse_golden_md(golden, &error)) {
+    const auto description = ccat_lang::parse_golden_md(golden, &error);
+    if (!description) {
         throw js::bind_error("golden.md: " + error);
     }
     const std::unique_ptr<ccat_lang::Program> prog = parse_or_throw(source);
@@ -2007,14 +2070,18 @@ CPP_REFLECT_TOOL(update_script)
         const ccat_lang::locate_hit hit =
             locate_on_frame(&require_adb(), g_ctx.cfg, graph, frame, &error);
         using ccat_lang::locate_kind;
-        if (hit.kind == locate_kind::page ||
+        // A popup may cover a recognizable (even ambiguous) background page.
+        const bool overlay = description->kind == ccat_lang::anchor_kind::popup &&
+            (hit.kind == locate_kind::page || hit.kind == locate_kind::transient ||
+             hit.kind == locate_kind::ambiguous);
+        if (!overlay && (hit.kind == locate_kind::page ||
             hit.kind == locate_kind::transient ||
-            hit.kind == locate_kind::interrupt) {
+            hit.kind == locate_kind::interrupt)) {
             throw js::bind_error("this screen is already anchor " + hit.id +
                                  " of graph " + graph +
                                  "; reuse it instead of saving " + anchor);
         }
-        if (hit.kind != locate_kind::unknown) {
+        if (!overlay && hit.kind != locate_kind::unknown) {
             throw js::bind_error(
                 "cannot check for a duplicate anchor: " +
                 (hit.detail.empty() ? error : hit.detail));
@@ -2264,7 +2331,7 @@ bool approval_gate_required(const approval_config &_gates,
     if (_tool == "save_script" || _tool == "save_anchor") {
         return _gates.gates.save_script;
     }
-    if (_tool == "save_template") {
+    if (_tool == "save_template" || _tool == "reuse_template") {
         return _gates.gates.save_template;
     }
     if (_tool == "update_script") {
@@ -2367,7 +2434,8 @@ tool_reply dispatch(std::string_view _name, std::string_view _args_json,
         const std::map<std::string_view, std::vector<std::string_view>> writes{
             {"save_script", {"name"}}, {"update_script", {"name"}},
             {"delete_script", {"name"}}, {"rename_script", {"name", "new_name"}},
-            {"save_template", {"bundle"}}, {"save_anchor", {"graph", "anchor"}}};
+            {"save_template", {"bundle"}}, {"reuse_template", {"bundle"}},
+            {"save_anchor", {"graph", "anchor"}}};
         if (const auto rule = writes.find(_name); rule != writes.end()) {
             std::vector<std::string> targets;
             for (auto field : rule->second) {

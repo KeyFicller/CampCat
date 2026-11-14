@@ -195,7 +195,8 @@ def run_tools(state: TurnState) -> dict:
                 # only one that can change how the next handoff is split.
                 content = str(outcome.content)
                 head, body = reflector.reflect(
-                    scripter.calls(), state.get("tool_rounds", 0), content)
+                    scripter.calls(), state.get("tool_rounds", 0), content,
+                    handoff_failed=outcome.failed)
                 session.add_lessons(body)
                 run.settle(content, ok=not outcome.failed)
                 content += reflector.directive(head, body)

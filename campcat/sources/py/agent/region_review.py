@@ -171,9 +171,9 @@ def _where(region: dict) -> str:
         return (f"diamond rx={region['rx']} ry={region['ry']} "
                 f"at {region['cx']},{region['cy']}")
     return f"circle r={region['r']} at {region['cx']},{region['cy']}"
-_accepted: dict[str, dict] = {}
-_reject_count: dict[str, int] = {}
-_reject_reason: dict[str, str] = {}
+_accepted: dict[tuple, dict] = {}
+_reject_count: dict[tuple, int] = {}
+_reject_reason: dict[tuple, str] = {}
 # A tap this operator stretch already accepted, keyed by (frame, box). The
 # scripter of this same handoff reuses it; the next stretch must not.
 _tap_boxes: dict[tuple, dict] = {}
@@ -708,7 +708,10 @@ def _one(kind: str, shape: str, region: dict, shot, expect: str,
         reused = _recall_tap(shot, region)
         if reused is not None:
             return reused, _kept(reused), ""
-    key = (label or "").strip()
+    # A name is not a pixel location: batching may visit several frames that
+    # all contain a "navigation" template in different places.
+    key = (kind, shot if shot is not None else session.latest_shot(),
+           (label or "").strip(), expect)
     if key and key in _accepted:
         # Name the box: an operator that measured (174,1836) and was told "the
         # previous region is reused" had no way to tell whether the cache was

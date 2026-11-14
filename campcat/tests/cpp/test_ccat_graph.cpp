@@ -494,6 +494,88 @@ TEST(CcatGraph, RunEdgeStopIsNotFailure) {
     EXPECT_TRUE(got.message.empty()) << got.message;
 }
 
+TEST(CcatGraph, GotoDoesNotRetryADeviceOrAuditFailure) {
+    const screen_graph graph =
+        mem_graph({{"a", page}, {"b", page}}, {{"a", "b"}});
+    for (bool device : {false, true}) {
+        std::vector<std::string> ran;
+        const auto got =
+            navigate(graph, "b",
+                     io_of({shows("a")}, &ran,
+                           [device](const std::string &) {
+                               bundle_run failure;
+                               failure.failed = true;
+                               failure.device = device;
+                               failure.fatal = !device;
+                               failure.error_code =
+                                   device ? "device_error" : "storage_error";
+                               failure.message = "injected execution failure";
+                               return failure;
+                           }),
+                     quick());
+        EXPECT_FALSE(got.ok);
+        EXPECT_EQ(got.error_code, device ? "device_error" : "storage_error");
+        EXPECT_EQ(ran.size(), 1u);
+    }
+}
+
+TEST(CcatGraph, RunEdgeKeepsTheBundleFailureCategory) {
+    const screen_graph graph =
+        mem_graph({{"a", page}, {"b", page}}, {{"a", "b"}});
+    std::vector<std::string> ran;
+    const auto got = run_edge(graph, graph.edges.front(),
+                              io_of({shows("a")}, &ran,
+                                    [](const std::string &) {
+                                        bundle_run failure;
+                                        failure.failed = true;
+                                        failure.error_code = "not_found";
+                                        failure.message = "target missing";
+                                        return failure;
+                                    }),
+                              quick());
+    EXPECT_EQ(got.error_code, "not_found");
+}
+
+TEST(CcatGraph, ExhaustedNavigationKeepsTheLastFailureCategory) {
+    const screen_graph graph =
+        mem_graph({{"a", page}, {"b", page}}, {{"a", "b"}});
+    std::vector<std::string> ran;
+    const auto got = navigate(graph, "b",
+                              io_of({shows("a")}, &ran,
+                                    [](const std::string &) {
+                                        bundle_run failure;
+                                        failure.failed = true;
+                                        failure.error_code = "not_found";
+                                        failure.message = "target missing";
+                                        return failure;
+                                    }),
+                              quick());
+    EXPECT_EQ(got.error_code, "not_found");
+    EXPECT_EQ(ran.size(), 3u);
+}
+
+TEST(CcatGraph, NavigationKeepsAnArrivalAnchorFailureCode) {
+    const screen_graph graph =
+        mem_graph({{"a", page}, {"b", page}}, {{"a", "b"}});
+    std::vector<std::string> ran;
+    bool executed = false;
+    auto io = io_of({shows("a"), shows("b")}, &ran, [&](const std::string &) {
+        executed = true;
+        return bundle_run{};
+    });
+    const auto check = io.check;
+    io.check = [&](const anchor_def &anchor, const cv::Mat &frame) {
+        if (executed) {
+            anchor_check failure;
+            failure.error = "bad anchor source";
+            failure.error_code = "parse_error";
+            return failure;
+        }
+        return check(anchor, frame);
+    };
+    EXPECT_EQ(navigate(graph, "b", io, quick()).error_code, "parse_error");
+}
+
 class ScriptAdb final : public campcat::adb_api {
 public:
     std::vector<cv::Mat> frames;

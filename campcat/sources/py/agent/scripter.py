@@ -45,6 +45,12 @@ class Handoff(BaseModel):
     summary: str = Field(
         default="",
         description="一到三句：做了什么，这次运行最后怎么样。")
+    ui_style: str = Field(
+        default="",
+        description=(
+            "供长期记忆使用。根据本次看过的截图，记一两条当前游戏可复用的 UI 规律，"
+            "如按钮形状、配色、文字底色、导航位置或弹窗布局。写清游戏或图名，附观察帧号。"
+            "只在一页看到的就注明页面。已有笔记覆盖或证据不足时留空。"))
 
 
 HANDOFF_TOOL = convert_to_openai_tool(Handoff)
@@ -213,7 +219,9 @@ RULES = {
         "名字已存在会被拒绝。名字按这个形式起，全小写英文：边 "
         "`图.锚点-锚点`，动作 `图.锚点.动作`。起好了就不要为了风格再改名——"
         "`rename_script` 只在内容真的换了名字时才用。\n"
-        "5. `save_template`，脚本里出现的每一个 PNG 各调一次。手上没有这张"
+        "5. 已验证过的相同控件优先 `reuse_template(bundle, name, from_bundle, from_name, shot)`："
+        "工具确认当前帧能按原尺寸匹配，才把 PNG 复制到本 bundle；不共享坐标或外部路径。"
+        "不匹配、样式变了或没有可复用模板时才 `save_template`，脚本里每个 PNG 各存一张。手上没有这张"
         "界面的新鲜帧，才先截屏；已有的帧用 `shot` 指定，先 `view_shot` 看"
         "一眼。区域里的数按说明的 ×k 换成帧像素，在哪张图上量的就乘哪张的 k。"
         "围着不动的部分裁紧。"
@@ -245,7 +253,7 @@ RULES = {
         "`wait_until(\"expected.png\", ms)` 断言它本该产生的界面。没落地的动作"
         "会当场在那里失败并指名文件，而不是让下一条语句在一个过时的界面上执行。"
         "anchor 的模板要随脚本一起保存。模板路径就是这个 bundle 里的文件名；"
-        "带 `/` 或 `..` 的会被拒绝，所以在这里裁图，不要从别的 bundle 借。"
+        "带 `/` 或 `..` 的会被拒绝；用 `reuse_template` 复制验证过的 PNG，或者在这里裁图。"
         "复用技能仍然用 `run(\"../other/main.ccat\")`。\n"
         "  * 每一条 `log(...)` 都要有 anchor 依据：绝不要单独打印「任务完成」。"
         "声明某个状态的 `log(...)`，就放在确认该状态的那个模板的 `wait_until` 或 "
@@ -322,6 +330,8 @@ RULES = {
         "`save_script(\"{graph}.{anchor}.{action}\")` 和 `save_template` 保存。"
         "`stzb.kucang.claim` 带着 `[action of stzb on kucang]` 标签。"
         "用 `run_script` 加 `run(\"{graph}.{anchor}.{action}/main.ccat\")` 验证。"
+        "批量补边只处理 brief 列明的同图 2–3 条已知 page 新边，每条各自保存、依次验证；"
+        "新屏和已有 bundle 修复仍单独交接，不扩大写权限。"
     ),
     "图的规则": (
         "  * 一次运行起步的那个界面，anchor id 是 `entry`，即使 brief 里把它"
@@ -345,6 +355,9 @@ RULES = {
         "界面；`kind: transient` 是加载或过渡界面——你可能正处在上面，"
         "但它不是你该去的地方，所以没有边；`kind: popup` 配 "
         "`close: <关掉它的那个 bundle>`，是可以盖在任何界面上的弹窗。\n"
+        "  * 边的两端必须都是 page，popup 和 transient 都不接边。触发弹窗的点击是"
+        "起始 page 的 action，关闭逻辑放在 popup 的 close bundle。背景 page 在弹窗下"
+        "仍可识别是允许的，locate 会先认 popup，不用改匹配阈值。\n"
         "  * 一条边可以分支——冷启动和热启动走不同的路——但它不检查自己的两端，"
         "也绝不调用 `goto`：图会检查它从 a 起步，并给 b 20 秒出现的时间。\n"
         "  * 耗时更长的边自己等：对 b 的模板 `wait_until`，"
@@ -355,6 +368,11 @@ RULES = {
         "  * action 的脚本不调用 `goto`，也不自己 `at`；它中途可以离开页面。"
         "一个任务就是 `goto` 到那个页面，"
         "`run(\"{graph}.{anchor}.{action}/main.ccat\")`，然后核对结果。\n"
+        "  * action 的返回值表示目标是否达成：看到明确的已完成状态也返回 true，"
+        "控件缺失且没有完成证据时返回 false，不能都当作已完成。图引擎把 false 视为失败。"
+        "点击分支必须在输入后用 `wait_until` 确认完成状态。验证时分别记录：实际执行输入并"
+        "断言成功、已完成而安全跳过、控件缺失而失败；只跑过跳过分支时明确写点击分支未验证。"
+        "过渡画面没观察到就写未确认，不能从没有报错推断它发生过。\n"
     ),
 }
 
@@ -409,7 +427,8 @@ SCRIPTER_PERSONA = (
     "你替 operator 写和修 .ccat bundle。你从不和用户说话；你的回复就是一次"
     "工具结果。干完之后调用 Handoff 收尾：status 是 `saved`、`updated` 或 "
     "`failed` 之一（这三个词照抄英文，不要翻译），summary 用一到三句话说明"
-    "你做了什么、这次运行最后怎么样了。回答之前先用工具把活干完：读和写 bundle、"
+    "你做了什么、这次运行最后怎么样了。把写脚本时从截图确认的新界面规律放入 "
+    "ui_style，供下次定位控件和选模板时参考。回答之前先用工具把活干完：读和写 bundle、"
     "把每个模板都裁好、跑一遍、再按报错修好。之前交接的记录只作参考。"
     "这次要产出什么，只看最后这份 brief。brief 里没有的约束，对你来说不存在。"
 )

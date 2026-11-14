@@ -1,6 +1,7 @@
 #pragma once
 
 #include <filesystem>
+#include <cstdint>
 #include <fstream>
 #include <mutex>
 #include <stdexcept>
@@ -9,6 +10,22 @@
 #include <system_error>
 
 namespace campcat {
+
+/// Stable content identity for replay regression, not a cryptographic checksum.
+inline std::string file_fingerprint(const std::filesystem::path &_path) {
+    std::ifstream in(_path, std::ios::binary);
+    if (!in) throw std::runtime_error("cannot fingerprint " + _path.string());
+    std::uint64_t hash = 14695981039346656037ull;
+    char bytes[8192];
+    while (in.read(bytes, sizeof(bytes)) || in.gcount()) {
+        for (std::streamsize i = 0; i < in.gcount(); ++i) {
+            hash ^= static_cast<unsigned char>(bytes[i]);
+            hash *= 1099511628211ull;
+        }
+    }
+    if (!in.eof()) throw std::runtime_error("cannot fingerprint " + _path.string());
+    return "fnv1a64:" + std::to_string(hash);
+}
 
 /// Serializes short library file transactions, including graph-scoped notes.
 /// Device execution never holds this lock.

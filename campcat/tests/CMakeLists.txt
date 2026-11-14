@@ -14,6 +14,7 @@ add_executable(test_campcat_core cpp/test_approval_gate.cpp
                                  cpp/test_ccat_condition_walks.cpp
                                  cpp/test_ccat_graph.cpp
                                  cpp/test_ccat_return.cpp
+                                 cpp/test_ccat_replay.cpp
                                  cpp/test_ccat_script_profile.cpp
                                  cpp/test_graph_tools.cpp
                                  cpp/test_llm_host.cpp

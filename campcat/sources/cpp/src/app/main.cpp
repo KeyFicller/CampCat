@@ -272,6 +272,17 @@ int main(int argc, char **argv) {
             std::move(graph), port);
     }
 
+    if (argc >= 2 && std::string(argv[1]) == "--verify-smoke") {
+        if (argc < 4 || argc > 5) {
+            std::fprintf(stderr, "usage: campcat --verify-smoke <library> <replays> [expect.json]\n");
+            return 2;
+        }
+        const auto problems = campcat::smoke_problems(argv[2], argv[3], argc == 5 ? argv[4] : "");
+        for (const auto &problem : problems) std::printf("[smoke] %s\n", problem.c_str());
+        std::printf("[smoke] acceptance %s\n", problems.empty() ? "passed" : "FAILED");
+        return problems.empty() ? 0 : 1;
+    }
+
     // The smoke face: build one graph on the demo app with no window and print
     // what it took. Same sidecar, prompts and tools as the conversation page,
     // so the number is what a person in the GUI would have paid.
@@ -592,6 +603,9 @@ int main(int argc, char **argv) {
             ImGui::Separator();
             ImGui::Spacing();
             nav_item("Settings", shell_page::Settings);
+            if (llm_panel_draw_sidebar_task(page == shell_page::Llm)) {
+                page = shell_page::Llm;
+            }
             ImGui::EndChild();
 
             // The other half of the pair above: one fills, the other fits.
@@ -654,10 +668,6 @@ int main(int argc, char **argv) {
                 });
                 ImGui::Separator();
                 ImGui::Spacing();
-            }
-
-            if (llm_panel_draw_task_bar(page == shell_page::Llm)) {
-                page = shell_page::Llm;
             }
 
             static bool details_open = false;

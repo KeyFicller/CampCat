@@ -97,16 +97,14 @@ def test_operator_hands_off_at_a_new_screen_and_at_a_finished_task():
     assert "回答 `unknown` 就是新 anchor" in text
     # A handoff that adds two anchors leaves the edge with no start.
     assert "连着开两个新 anchor，那条边就没有起点了" in text
-    # Decompose: one concept per handoff, so the scripter meets small jobs.
-    assert "不要攒着一起交" in text
-    assert "一次交接只产出一个东西" in text
-    assert "比你交一大堆做得快" in text
+    assert "不要攒着一起交新屏或资源动作" in text
+    assert "每批交 2–3 条" in text
     # The goal has two halves. One run put the user's whole request -- "build
     # the entire graph" -- in the first half, and the scripter spent the whole
     # wall clock building it alone; the operator never got a turn to split it.
     assert "上下文（不是这次要做的）" in text
     assert "就会在一次交接里把整张图都做完" in text
-    assert "一次交接就会把整张图做完" in operator.author_script.args["goal"]["description"]
+    assert "2–3 条简单新边" in operator.author_script.args["goal"]["description"]
     # The escape hatch: an action that leaves the screen still lands on the
     # screen it started from, so it is not a reason to pile work up.
     assert "暂不交跨屏的任务" in text

@@ -3,6 +3,7 @@
 #include "core/automation/game_automation.h"
 #include "core/script/ccat_ast.h"
 #include "core/script/ccat_graph.h"
+#include "core/script/replay_audit.h"
 
 #include "core/template_matcher.h"
 
@@ -221,6 +222,13 @@ private:
 
     void dump_match_debug(const char *_op, const std::filesystem::path &_templ,
                           const cv::Mat &_screen, const match_result &_r);
+
+    void audit_match(const std::filesystem::path &_path,
+                     const match_result &_r);
+    std::unique_ptr<replay_audit> m_audit;
+    replay_step *m_step = nullptr;
+    unsigned long long m_step_id = 0;
+    unsigned long long m_source_id = 0;
 
     adb_api *m_adb;
     const app_config *m_cfg;

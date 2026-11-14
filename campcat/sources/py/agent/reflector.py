@@ -56,6 +56,8 @@ INSTRUCTIONS = (
     "\n"
     "不要复述数字（已经有人算好了）、不要写当前界面、不要写用户偏好，"
     "不要写已经存进 bundle 的流程。没有值得写的就把 notes 留空。\n"
+    "最后答复只是助手的说法，不能替代工具证据；没有观察到的状态保留为未确认，"
+    "不要把没有报错、没有截到过渡画面解释成已经验证成功。\n"
     "\n"
     f"notes 拼起来总长不超过 {MAX_CHARS} 个字符。"
 )
@@ -83,12 +85,12 @@ def metrics(calls: list[dict], operator_rounds: int) -> dict:
         # ponytail: the whole argument set is the key, so a tap repeated with
         # different wording for `expect` is not counted. Upgrade to a per-tool
         # key only if repeats go unreported in a smoke run.
-        key = name + json.dumps(args, sort_keys=True, ensure_ascii=False)[:200]
+        key = name + json.dumps(args, sort_keys=True, ensure_ascii=False)
         counts[key] = counts.get(key, 0) + 1
         hints.setdefault(key, _args_hint(args))
         if call.get("failed"):
             failed += 1
-        if name.startswith(("save_", "update_", "create_")):
+        if name.startswith(("save_", "update_", "create_")) or name == "reuse_template":
             writes += 1
         elif name.startswith(("view_", "read_", "list_")) or name == "screenshot":
             reads += 1
@@ -158,11 +160,11 @@ def _notes_of(answer) -> str:
 
 
 def reflect(calls: list[dict], operator_rounds: int,
-            reply: str) -> tuple[str, str]:
+            reply: str, *, handoff_failed: bool = False) -> tuple[str, str]:
     """(head, body). The head is counted here; the body is what the model saw.
 
-    "" for both when there is nothing to say: no calls, the model failed, or it
-    wrote nothing. Never raises: a missed note must not turn a finished handoff
+    A clean handoff only returns arithmetic; failures or repeated calls ask
+    the model for a lesson. Never raises: a missed note must not turn a finished handoff
     into a failed tool call.
 
     The two halves go to different readers -- the body is the lesson the next
@@ -173,6 +175,8 @@ def reflect(calls: list[dict], operator_rounds: int,
         return "", ""
     m = metrics(calls, operator_rounds)
     head = summary(m)
+    if not handoff_failed and not m["failed"] and not m["repeat"]:
+        return head, ""
     try:
         model = models.bind_schema(models.build_chat_model(), Lessons)
         with observability.turn("reflect") as callbacks:
@@ -185,10 +189,10 @@ def reflect(calls: list[dict], operator_rounds: int,
             ], config={"callbacks": callbacks})
     except Exception as exc:  # noqa: BLE001 - a missed note, never fatal
         print(f"[sidecar] reflection skipped: {exc}", file=sys.stderr)
-        return "", ""
+        return head, ""
     text = _notes_of(answer)
     if not text:
-        return "", ""
+        return head, ""
     body = text[:MAX_CHARS]
     if os.environ.get("CAMPCAT_LLM_TRACE"):
         note = head + "\n" + body
@@ -232,7 +236,7 @@ def directive(head: str, body: str) -> str:
     as a lesson, not a request, or the operator takes it for the user talking.
     """
     if not body.strip():
-        return ""
+        return "\n\n交接统计（工具记录）\n" + head if head else ""
     parts = [body.strip()]
     if head:
         parts.insert(0, head)

@@ -4,6 +4,7 @@
 #include <cstdio>
 #include <ctime>
 #include <fstream>
+#include <limits>
 #include <sstream>
 
 #include "core/adb_client.h"
@@ -72,8 +73,7 @@ void copy_if_present(const std::filesystem::path &_from,
     }
 }
 
-/// What the run built, one line per graph. Reported rather than judged: a graph
-/// with problems is still the thing whose cost was measured.
+/// What the run built. Acceptance separately checks the graph and its receipts.
 void report_graphs(const std::filesystem::path &_library) {
     const std::vector<std::string> names = ccat_lang::graph_names(_library);
     if (names.empty()) {
@@ -165,11 +165,11 @@ int run_smoke(const std::filesystem::path &_prompts,
         return 1;
     }
 
-    // A fresh directory per run: nothing written here can reach the real
-    // library, and no run inherits a screen from the last one.
+    // Keep this run's library and evidence together, without pruning another
+    // run's receipts or losing early action branches before acceptance.
     const std::filesystem::path real_home = cfg.config_home;
     const std::filesystem::path library =
-        real_home.parent_path() / "smoke" / stamp();
+        real_home.parent_path() / "smoke" / stamp() / "library";
     std::error_code ec;
     std::filesystem::create_directories(library, ec);
     if (ec) {
@@ -181,6 +181,8 @@ int run_smoke(const std::filesystem::path &_prompts,
     // going through the tool context, so a real home would answer every new
     // screen with one of its own anchors and refuse the save as a duplicate.
     cfg.config_home = library.string();
+    cfg.replay.enabled = true;
+    cfg.replay.keep_runs = std::numeric_limits<unsigned>::max();
     copy_if_present(real_home.parent_path() / "CCAT.md",
                     library.parent_path() / "CCAT.md");
     for (const char *notes : {"operator.md", "scripter.md"}) {
@@ -225,6 +227,13 @@ int run_smoke(const std::filesystem::path &_prompts,
 
     host.set_tool_context({});
     report_graphs(library);
+    auto expectations = _prompts;
+    expectations.replace_extension(".expect.json");
+    if (!std::filesystem::exists(expectations)) expectations.clear();
+    const auto problems = smoke_problems(library, library.parent_path() / "logs/replay", expectations);
+    for (const auto &problem : problems) say(problem);
+    failed |= !problems.empty();
+    say(std::string("acceptance ") + (failed ? "FAILED" : "passed"));
     say("turns " + std::to_string(done) + ", failed " + (failed ? "1" : "0"));
     say("total " + seconds_since(began));
     return failed ? 1 : 0;

@@ -119,6 +119,13 @@ struct region_score_config {
     std::string data_dir = "training_data";
 };
 
+/// Disk evidence for deterministic replay; failed writes stop subsequent input.
+struct replay_config {
+    bool enabled = true;
+    unsigned keep_runs = 20;
+    unsigned max_run_mb = 256;
+};
+
 /**
  * @brief Shell JSON document loaded from disk: adb settings, matchers
  * heuristic defaults, scheduler, persistence paths.
@@ -134,6 +141,7 @@ struct app_config {
     adb_config adb{};
     mumu_config mumu{};
     input_config input{};
+    replay_config replay{};
     match_config match{};
     approval_config approval{};
     llm_config llm{};

@@ -25,6 +25,7 @@ const gate_case k_cases[] = {
     {"save_script", &approval_gates::save_script},
     {"save_anchor", &approval_gates::save_script},
     {"save_template", &approval_gates::save_template},
+    {"reuse_template", &approval_gates::save_template},
     {"update_script", &approval_gates::update_script},
     {"delete_script", &approval_gates::delete_script},
     {"rename_script", &approval_gates::rename_script},

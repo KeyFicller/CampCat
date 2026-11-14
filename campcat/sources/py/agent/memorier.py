@@ -72,10 +72,10 @@ SCRIPTER_MEMORY_INSTRUCTIONS = (
     "记录显示某个坑已经写进 bundle 了，就用 retire 收掉那一条，"
     "why 里写上是哪个 bundle。\n"
     "\n"
-    "这个软件的界面风格也留下，section 写「风格」：按钮多半是圆是方、常见的主色、"
-    "字多半衬在色块上还是直接写在背景上、弹窗通常从哪边出来。写成大多数控件的习惯，"
-    "别写成每条都这样，个别不一样的控件不必单列。只留下一轮还成立的；"
-    "某一屏上有什么不要写。\n"
+    "从有效交接的 Handoff.ui_style 提取游戏中可复用的界面规律，section 写「风格」。"
+    "每条保留游戏或图名和适用范围，例如按钮形状、文字底色、导航位置或弹窗布局。"
+    "单页观察只记作该页规律。重复则跳过，确认风格有变化就更新。"
+    "舍弃临时坐标、帧号和这一屏的即时状态。\n"
     "\n"
     "丢掉当前目标、当前这一屏上有什么、逐步的失败日志，以及任何关于用户怎么说话、"
     "禁止了什么的内容。\n"
@@ -99,9 +99,9 @@ MEMORY_FRAME = (
 )
 
 SCRIPTER_MEMORY_FRAME = (
-    "下面是你在之前会话里留下的坑和界面风格。风格只是大多数控件的习惯，"
-    "个别控件可以不一样。用得上的时候就用，和这份 brief 冲突的行"
-    "直接丢掉，绝不要提你收到过它们。\n\n"
+    "下面是你在之前会话里留下的坑和界面风格。只参考当前游戏和适用页面的风格，"
+    "用来缩小找控件和选模板的范围。以当前帧和 brief 为准，保存模板前核对实际控件。"
+    "不要复述记忆来源。\n\n"
 )
 
 
@@ -118,7 +118,7 @@ def memory_block(memory: str) -> str:
 
 
 def scripter_memory_block(memory: str) -> str:
-    """The scripter's pitfalls as a second paragraph of its system prompt.
+    """The scripter's pitfalls and UI style notes in its system prompt.
 
     Empty in, empty out, for the same reason as `memory_block`.
     """

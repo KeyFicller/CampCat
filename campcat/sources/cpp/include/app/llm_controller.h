@@ -39,14 +39,17 @@ public:
     llm_controller(const llm_controller &) = delete;
     llm_controller &operator=(const llm_controller &) = delete;
 
-    /// Acquire before starting the worker; callbacks also support headless jobs.
+    /// Acquire before starting the worker; callbacks also support headless
+    /// jobs.
     bool start(device_task_lease &_tasks, request _request);
-    bool start_turn(shell_state &_st, const app_config &_cfg, std::string _prompt);
+    bool start_turn(shell_state &_st, const app_config &_cfg,
+                    std::string _prompt);
     bool start_memorize(shell_state &_st, const app_config &_cfg);
     bool start_reset(shell_state &_st, const app_config &_cfg);
 
     bool queue_prompt(std::string _prompt, bool *_replaced = nullptr);
-    /// Returns whether a queued message was cancelled. Running work keeps its lease.
+    /// Returns whether a queued message was cancelled. Running work keeps its
+    /// lease.
     bool request_stop();
     bool running() const { return m_running.load(); }
     bool resetting() const { return m_resetting.load(); }
@@ -57,7 +60,8 @@ public:
     /// Join active work, then start the final pass without waiting for it.
     void begin_shutdown(std::function<void()> _final = {});
     void begin_shutdown(const app_config &_cfg);
-    /// Called after window teardown, so the final pass cannot freeze the window.
+    /// Called after window teardown, so the final pass cannot freeze the
+    /// window.
     void finish_shutdown();
 
 private:

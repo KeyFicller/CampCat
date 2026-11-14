@@ -5,7 +5,7 @@
 OPERATOR_ONLY = frozenset({"tap", "start_emulator", "go_home", "run_bundle", "locate"})
 SCRIPTER_ONLY = frozenset({
     "read_script", "ccat_help", "save_script", "update_script", "delete_script",
-    "rename_script", "save_template", "view_template", "view_crop", "save_anchor",
+    "rename_script", "save_template", "reuse_template", "view_template", "view_crop", "save_anchor",
 })
 SHARED = frozenset({"list_scripts", "run_script", "screenshot", "view_shot", "read_graph"})
 HIDDEN = frozenset({"mark", "tight_crop"})
@@ -17,6 +17,7 @@ WRITE_FIELDS = {
     "delete_script": ("name",),
     "rename_script": ("name", "new_name"),
     "save_template": ("bundle",),
+    "reuse_template": ("bundle",),
     "save_anchor": ("graph", "anchor"),
 }
 

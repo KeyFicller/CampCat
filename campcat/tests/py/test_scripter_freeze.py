@@ -39,6 +39,7 @@ def test_frozen_bundles_are_refused():
         ("rename_script", {"name": "old", "new_name": "fresh"}, "old"),
         ("rename_script", {"name": "fresh", "new_name": "old"}, "old"),
         ("save_template", {"bundle": "old", "name": "a.png"}, "old"),
+        ("reuse_template", {"bundle": "old", "from_bundle": "source"}, "old"),
         ("save_anchor", {"graph": "g", "anchor": "a"}, "g.a"),
     ]
     for tool, args, target in cases:

@@ -21,7 +21,7 @@
 #include "app/ui/script_editor_panel.h"
 
 #include <imgui.h>
-#include <imgui_internal.h> // BringWindowToDisplayFront: no public always-on-top window
+#include <imgui_internal.h> // ImTextCountCharsFromUtf8
 #include <imgui_markdown.h>
 #include <misc/cpp/imgui_stdlib.h>
 
@@ -382,7 +382,7 @@ const ImVec4 k_bot_bg{0.16F, 0.18F, 0.20F, 1.0F};
 const ImVec4 k_err_col{0.95F, 0.45F, 0.35F, 1.0F};
 const ImVec4 k_err_bg{0.30F, 0.16F, 0.16F, 1.0F}; ///< failed-reply bubble
 
-/// Name for the subagent window's heading. Unknown names are shown as sent.
+/// Name for the subagent card's heading. Unknown names are shown as sent.
 const char *agent_label(const std::string &_agent) {
     if (_agent == "scripter") {
         return "Scripter";
@@ -396,21 +396,19 @@ const char *agent_label(const std::string &_agent) {
     return _agent.c_str();
 }
 
-/// Defined with the bubble's rendering below: the window shows the same four
+/// Defined with the bubble's rendering below: the card shows the same four
 /// kinds of step the conversation does.
-void draw_item(llm_item &_it, bool _growing);
+void draw_item(llm_item &_it, bool _growing, bool _subagent = false);
 bool grows_in_place(campcat::llm_event::kind _kind);
 
-/// How many of the window's pictures keep a texture. It is a side view, not the
-/// conversation, so this stays well under the bubble's cap.
+/// How many pictures in the subagent card keep a texture.
 constexpr size_t k_sub_tex_cap = 4;
 
-/// The subagent window's steps, mirrored from the host, and the textures it
-/// owns. Its own queue rather than the bubble's: those items are not in a turn,
-/// so the bubble's eviction could not find them.
+/// The card owns its own textures; these items are not in a chat turn.
 std::vector<llm_item> g_sub_items;
 std::deque<long> g_sub_tex;
 unsigned long g_sub_run = 0;
+std::optional<unsigned long> g_sub_cleared_run;
 
 void release_sub_items() {
     for (llm_item &it : g_sub_items) {
@@ -448,8 +446,7 @@ void sync_sub_items(const campcat::llm_host::subagent_state &_st) {
         }
         g_sub_items.push_back(std::move(it));
     }
-    // The window is small, so it keeps fewer pictures alive than the bubble;
-    // an older one says so rather than staying blank.
+    // An older image keeps its row and reports that the screenshot was dropped.
     for (llm_item &it : g_sub_items) {
         if (it.image_id != 0 && it.tex != 0 &&
             std::find(g_sub_tex.begin(), g_sub_tex.end(), it.image_id) ==
@@ -475,8 +472,7 @@ void sync_sub_items(const campcat::llm_host::subagent_state &_st) {
 /// markdown, an image or a folded step, so the last item is only ever its final
 /// widget and cannot say where the block began.
 void copy_menu(const char *_id, std::string_view _text, ImVec2 _top) {
-    // The window check keeps a covered bubble quiet: the rect below is in
-    // screen space, and the subagent window may float over the conversation.
+    // The window check keeps a covered bubble quiet: the rect is in screen space.
     if (!_text.empty() && ImGui::IsWindowHovered() &&
         ImGui::IsMouseHoveringRect(
             _top, ImVec2(ImGui::GetWindowPos().x + ImGui::GetWindowSize().x,
@@ -515,72 +511,52 @@ std::string reply_text(const llm_turn &_t) {
     return out;
 }
 
-/// What the innermost subagent is doing while the operator waits for it.
-///
-/// One window, opened once per run: `runs` rises on every `start`, and a window
-/// the user closed stays closed for the rest of that run. Its title never
-/// changes, so the innermost agent swapping in and out moves nothing on screen.
-void draw_subagent_window() {
-    static bool open = false;
+/// The latest subagent run at the end of the chat, with the same scroll as replies.
+void draw_subagent_card() {
     const campcat::llm_host::subagent_state st = g_host.subagent();
-    if (!st.seen) {
+    if (!st.seen || g_sub_cleared_run == st.runs) {
         return;
     }
-    if (!open && st.runs != g_sub_run) {
-        open = true;
+    const bool new_run = st.runs != g_sub_run;
+    sync_sub_items(st);
+    ImGui::Spacing();
+    if (new_run) {
+        ImGui::SetNextItemOpen(true);
+    }
+    const bool failed = !st.active && !st.ok;
+    const std::string heading = std::string("Sub-agent: ") + agent_label(st.agent) +
+        (st.active ? " / Working" : failed ? " / Failed" : " / Done") +
+        "###subagent_card";
+    if (failed) {
+        ImGui::PushStyleColor(ImGuiCol_Text, k_err_col);
+    }
+    const bool open = ImGui::CollapsingHeader(heading.c_str(),
+                                             ImGuiTreeNodeFlags_DefaultOpen);
+    if (failed) {
+        ImGui::PopStyleColor();
     }
     if (!open) {
         return;
     }
-    sync_sub_items(st);
-    const ImGuiViewport *vp = ImGui::GetMainViewport();
-    ImGui::SetNextWindowPos(
-        ImVec2(vp->WorkPos.x + vp->WorkSize.x - 24.0F,
-               vp->WorkPos.y + vp->WorkSize.y - 24.0F),
-        ImGuiCond_FirstUseEver, ImVec2(1.0F, 1.0F));
-    ImGui::SetNextWindowSize(ImVec2(520.0F, 420.0F), ImGuiCond_FirstUseEver);
-    if (!ImGui::Begin("Sub-agent", &open)) {
-        ImGui::End();
-        return;
-    }
-    // Clicking the conversation raises that window over this one, and this one is
-    // meant to be read while the operator works. A popup stays above it: a menu
-    // opened here, or the approval form, must not be covered by its own window.
-    if (!ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopupId |
-                                    ImGuiPopupFlags_AnyPopupLevel)) {
-        ImGui::BringWindowToDisplayFront(ImGui::GetCurrentWindow());
-    }
-    WITH_FONT(bold, { ImGui::TextUnformatted(agent_label(st.agent)); });
-    ImGui::SameLine();
-    if (st.active) {
-        ImGui::TextDisabled("working...");
-    } else if (st.ok) {
-        ImGui::TextDisabled("done");
-    } else {
-        ImGui::TextColored(k_err_col, "failed");
-    }
+    ImGui::PushID("subagent_steps");
+    ImGui::Indent();
     if (!st.goal.empty()) {
-        ImGui::TextDisabled("%s", st.goal.c_str());
+        ImGui::PushStyleColor(ImGuiCol_Text,
+                              ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
+        ImGui::TextWrapped("%s", st.goal.c_str());
+        ImGui::PopStyleColor();
     }
-    ImGui::Separator();
-    ImGui::BeginChild("sub_lines", ImVec2(0.0F, 0.0F),
-                      ImGuiChildFlags_Borders);
-    // Follow the newest step unless the user scrolled up to read one.
-    const bool at_bottom = ImGui::GetScrollY() >= ImGui::GetScrollMaxY() - 1.0F;
     for (size_t i = 0; i < g_sub_items.size(); ++i) {
         const bool growing = st.active && i + 1 == g_sub_items.size() &&
                              grows_in_place(g_sub_items[i].type);
         const ImVec2 top = ImGui::GetCursorScreenPos();
         ImGui::PushID(static_cast<int>(i));
-        draw_item(g_sub_items[i], growing);
+        draw_item(g_sub_items[i], growing, true);
         copy_menu("copy", g_sub_items[i].text, top);
         ImGui::PopID();
     }
-    if (at_bottom) {
-        ImGui::SetScrollHereY(1.0F);
-    }
-    ImGui::EndChild();
-    ImGui::End();
+    ImGui::Unindent();
+    ImGui::PopID();
 }
 /// Send is the one primary action here; plain buttons are surfaces (main.cpp).
 const ImVec4 k_primary{0.243F, 0.400F, 0.529F, 1.0F};
@@ -640,7 +616,7 @@ void evict_over_cap() {
 
 /// Upload an item's image once and release its bytes. UI thread, and the caller
 /// must hold the GL context.
-void ensure_texture(llm_item &_it) {
+void ensure_texture(llm_item &_it, bool _subagent) {
     if (_it.tex_tried || _it.png.empty()) {
         return;
     }
@@ -669,8 +645,10 @@ void ensure_texture(llm_item &_it) {
         _it.tex_dropped = true;
         return;
     }
-    g_tex_order.push_back(_it.image_id);
-    evict_over_cap();
+    if (!_subagent) {
+        g_tex_order.push_back(_it.image_id);
+        evict_over_cap();
+    }
 }
 
 /// Release every texture `_t`'s steps own, and the queue's claim on them.
@@ -761,11 +739,10 @@ void draw_thinking(llm_item &_it, bool _streaming) {
 }
 
 /// One step of a timeline: an image, what the agent did, its reasoning, or its
-/// words. Shared by the conversation and the subagent window -- both show the
-/// same four kinds, and a second copy would drift.
-void draw_item(llm_item &_it, bool _growing) {
+/// words. Shared by replies and the subagent card.
+void draw_item(llm_item &_it, bool _growing, bool _subagent) {
     if (_it.type == campcat::llm_event::kind::image) {
-        ensure_texture(_it);
+        ensure_texture(_it, _subagent);
         if (_it.tex != 0 && _it.tex_w > 0) {
             const ImVec2 img = fit_image(_it.tex_w, _it.tex_h,
                                          ImGui::GetContentRegionAvail().x);
@@ -965,6 +942,8 @@ bool consume_handoff() {
         return true;
     }
     drop_all_turns();
+    g_sub_cleared_run = g_host.subagent().runs;
+    release_sub_items();
     g_sidecar_turns = 0;
     g_pin_bottom = true;
     campcat::automation_log::emit("[llm] conversation cleared");
@@ -1812,6 +1791,7 @@ bool draw_log(const ImVec2 &_size) {
         }
         draw_turn(g_turns[i], static_cast<int>(i));
     }
+    draw_subagent_card();
 
     ImGui::PopFont();
 
@@ -1844,6 +1824,7 @@ void llm_panel_shutdown_gl() {
     campcat::app::release_icons();
     g_appr_id = -1;
     drop_all_turns();
+    release_sub_items();
     g_thinking = false;
 }
 
@@ -1898,41 +1879,36 @@ void llm_panel_tick() {
     pump_stream();
 }
 
-bool llm_panel_draw_task_bar(bool _on_llm_page) {
+bool llm_panel_draw_sidebar_task(bool _on_llm_page) {
     const campcat::activity_status status = llm_panel_activity();
     if (!_on_llm_page && !g_controller.running() && !g_controller.stopping() &&
         status.level != campcat::activity_level::failed) {
         return false;
     }
     bool view_task = false;
-    ImGui::PushID("agent_task_bar");
-    ImGui::AlignTextToFramePadding();
-    WITH_FONT(bold, { ImGui::TextUnformatted("Agent task"); });
-    ImGui::SameLine();
+    ImGui::PushID("sidebar_agent_task");
+    ImGui::Spacing();
+    WITH_FONT(bold, { ImGui::SeparatorText("Agent task"); });
     ImGui::TextColored(campcat::activity_color(status.level), "%s", status.label);
-    if (g_controller.running()) {
-        ImGui::BeginDisabled(g_controller.stopping() || g_controller.resetting());
-        if (ImGui::Button("Stop agent")) {
-            request_task_stop();
-        }
-        ImGui::EndDisabled();
-    }
-    if (!_on_llm_page) {
+    WITH_FONT(bold, {
         if (g_controller.running()) {
-            ImGui::SameLine();
+            ImGui::BeginDisabled(g_controller.stopping() || g_controller.resetting());
+            if (ImGui::Button("Stop agent", ImVec2(-1.0F, 0.0F))) {
+                request_task_stop();
+            }
+            ImGui::EndDisabled();
         }
-        view_task = ImGui::Button("Open task in LLM");
-    }
+        if (!_on_llm_page) {
+            view_task = ImGui::Button("Open task in LLM", ImVec2(-1.0F, 0.0F));
+        }
+    });
     if (g_controller.stopping() && g_controller.running()) {
         ImGui::TextWrapped("Stop requested. Waiting for the current operation to finish.");
     } else if (status.level == campcat::activity_level::waiting &&
                g_host.pending_approval().pending) {
-        ImGui::TextWrapped(_on_llm_page
-                              ? "Review the operation below."
-                              : "An operation needs your decision. Open LLM to review it.");
+        ImGui::TextWrapped(_on_llm_page ? "Review the pending approval in chat."
+                                        : "Open LLM to review the pending approval.");
     }
-    ImGui::Separator();
-    ImGui::Spacing();
     ImGui::PopID();
     return view_task;
 }
@@ -1961,7 +1937,6 @@ void llm_panel_draw_panel(campcat::shell_state &_st, campcat::app_config &_cfg) 
     }
 
     draw_memory_window();
-    draw_subagent_window();
 
     // Top of whatever comes below the log: the reference for the footer height.
     const float footer_top = ImGui::GetCursorScreenPos().y;
