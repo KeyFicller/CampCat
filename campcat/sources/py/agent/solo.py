@@ -9,11 +9,12 @@ from __future__ import annotations
 
 import agent.operator as operator
 import models
+import tool_policy
 from agent.region_rules import REGION_RULES
 
 
 # Named here rather than derived: this list is what a training sample may contain.
-SOLO = frozenset({"screenshot", "tap", "start_emulator", "go_home"})
+SOLO = tool_policy.SOLO
 
 # Said instead of the operator persona. It names the tools that exist, and what
 # a region is for, so a redraw is a correction the model can learn from rather
@@ -35,17 +36,9 @@ SOLO_PERSONA = (
 )
 
 
-def _name(tool: dict) -> str | None:
-    try:
-        name = tool["function"]["name"]
-    except (KeyError, TypeError):
-        return None
-    return name if isinstance(name, str) else None
-
-
 def tools(host_tools: list) -> list:
     """The host tools a sample may call, in the host's order."""
-    return [tool for tool in host_tools if _name(tool) in SOLO]
+    return [tool for tool in host_tools if tool_policy.name_of(tool) in SOLO]
 
 
 def prompt() -> str:

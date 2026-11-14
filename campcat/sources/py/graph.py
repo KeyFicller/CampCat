@@ -7,37 +7,24 @@ screenshots -- lives in `session.py`.
 
 from __future__ import annotations
 
-import json
-import sys
 from typing import Iterator, TypedDict
 
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langgraph.graph import END, StateGraph
 
 import agent.memorier as memorier
 import agent.operator as operator
 import agent.reflector as reflector
-import agent.region_review as region_review
 import agent.scripter as scripter
 import agent.solo as solo
-import models
 import observability
 import session
+import runner
 import subagent
 import tools
 
-# Model rounds allowed in one request. The C++ host caps dispatches on its
-# side, and its per-request deadline has to stay long enough for this many
-# rounds plus their model latencies, or a long turn dies on "sidecar timed out"
-# instead. Both caps move together.
-MAX_MODEL_ROUNDS = 1000
-# The third identical failure in a row is not a retry the model will invent
-# its way out of. Two are enough to report; the next one is refused.
-_FAIL_LIMIT = 2
-_FUSE_TEXT = "error: 同一调用已连续失败 3 次，停止重试，如实报告"
-# A module list, not a context var: LangGraph runs the tool node in a copy of
-# the context, so a var set while building the turn never reaches the call.
-_FAIL_STACK: list[dict] = [{}]
+# The host and both agents use the same per-request model cap.
+MAX_MODEL_ROUNDS = runner.MAX_MODEL_ROUNDS
 
 
 def rounds_of(raw: object) -> int:
@@ -49,13 +36,6 @@ def rounds_of(raw: object) -> int:
     if isinstance(raw, int) and not isinstance(raw, bool) and raw >= 1:
         return raw
     return MAX_MODEL_ROUNDS
-
-# Said to the model once the rounds above are spent. With the tools withdrawn it
-# otherwise reaches for one anyway and writes the call into its answer as text.
-NO_TOOLS_NOTE = (
-    "这次请求的工具额度已经用完。现在只用纯文本回答，"
-    "不要再输出任何工具调用的标记。"
-)
 
 class TurnState(TypedDict, total=False):
     text: str       # request: this turn's instruction
@@ -71,6 +51,7 @@ class TurnState(TypedDict, total=False):
     error: str
     interrupted: bool  # the user sent a new message; commit, then stop
     finished: bool  # scripter: a Handoff call ended this handoff
+    failure_code: str  # scripter: structured failure of its final handoff
 
 
 def precheck(state: TurnState) -> dict:
@@ -80,7 +61,7 @@ def precheck(state: TurnState) -> dict:
     never turns into a paid round trip.
     """
     session.start_turn()
-    reset_fail_counts()
+    runner.reset_fail_counts()
     text = (state.get("text") or "").strip()
     if not text:
         return {"error": "请求为空"}
@@ -109,70 +90,16 @@ def build_messages(state: TurnState) -> dict:
     if frame is not None:
         messages.append(frame)
     mark = session.new_mark("turn")
+    session.log_turn(state.get("text", ""), mark)
     messages.append(HumanMessage(content=state.get("text", ""), id=mark))
     return {"messages": messages, "turn_mark": mark}
-
-
-def _invoke(state: TurnState, offered: list, on_chunk=None) -> dict:
-    """One model turn against `offered`.
-
-    The schemas are passed to bind_tools with `expect` added on region tools;
-    the check strips it before the host sees the call. The operator and the
-    scripter share this; each passes its own table and its own `on_chunk` -- the
-    operator's stream is the parent graph's, a subagent's goes to its window.
-    """
-    offered = region_review.with_expect(offered)
-    cap = state.get("max_model_rounds", MAX_MODEL_ROUNDS)
-    exhausted = bool(offered) and state.get("tool_rounds", 0) >= cap
-    try:
-        model = models.build_chat_model(context=True)
-        # Past the round cap the tools are withdrawn, so the model has to answer
-        # in text instead of the request ending on an empty tool call.
-        if offered and not exhausted:
-            model = model.bind_tools(offered)
-    except Exception as exc:  # noqa: BLE001 - surfaced to the caller as a result
-        return {"error": str(exc)}
-
-    model_input = list(state.get("messages") or [])
-    if exhausted:
-        # Withdrawing the tools silently is what produced raw markup in the
-        # answer, so the withdrawal gets said out loud.
-        model_input.append(HumanMessage(content=NO_TOOLS_NOTE))
-
-    try:
-        response = models.streamed(model, model_input, on_chunk)
-    except tools.TurnInterrupted:
-        # Not an error: the host has the next message already. The turn commits
-        # what finished and stops, like a stop inside the tool batch.
-        return {"interrupted": True}
-    except Exception as exc:  # noqa: BLE001 - surfaced to the caller as a result
-        return {"error": str(exc)}
-
-    messages = list(state.get("messages") or [])
-    messages.append(response)
-    text = session.strip_tool_markup(
-        session.content_text(getattr(response, "content", response)))
-    if not text and exhausted:
-        # Tools are gone and the model said nothing usable, so say that rather
-        # than showing an empty bubble the user would read as a hang. An empty
-        # text on a normal round is just a round that only called tools.
-        text = "这次请求的工具额度已经用完，而模型没有给出文字回答。"
-    # Accumulated across rounds: the UI streams every round's text, so keeping
-    # only the last one would make the reply shrink when the turn completes.
-    # A model that announces a tool call and then answers is the common case.
-    prior = state.get("reply", "")
-    if prior and text:
-        reply = prior.rstrip() + "\n\n" + text
-    else:
-        reply = prior + text
-    return {"messages": messages, "reply": reply}
 
 
 def invoke(state: TurnState) -> dict:
     """The operator's model turn: every host tool except the scripter's own."""
     host = state.get("tools") or []
     offered = solo.tools(host) if state.get("operator_only") else operator.operator_tools(host)
-    return _invoke(state, offered)
+    return runner.invoke(state, offered)
 
 
 def run_subgraph(compiled, state: dict, callbacks=None) -> dict:
@@ -203,104 +130,6 @@ def run_subgraph(compiled, state: dict, callbacks=None) -> dict:
         var_child_runnable_config.reset(token)
 
 
-def _host_result(name: str, args: dict) -> tuple[object, list]:
-    """One host tool. Pictures stay out of the result list; the caller appends them."""
-    args, note, rejected = region_review.review(name, args)
-    if rejected:
-        return "error: 自查否掉了这个区域：" + rejected, []
-    # Said before the call because the approval gate, which comes first, is
-    # where the score helps: the host's own note on this call cannot carry it.
-    if note:
-        tools.note(note)
-    reply = tools.call_cpp(name, args)
-    if reply.get("ok"):
-        content: object = reply.get("text") or "ok"
-    else:
-        content = "error: " + str(reply.get("error", ""))
-    if note and isinstance(content, str):
-        content += " (" + note + ")"
-    image = reply.get("image_b64") or ""
-    if isinstance(content, str):
-        region_review.remember_human_region(content)
-    if not image:
-        return content, []
-    if name == "screenshot":
-        frame = session.screenshot_frame(reply.get("shot"), image)
-        return content, [frame] if frame is not None else []
-    if name == "view_shot":
-        return content, [session.recall_frame(args.get("shot"), image)]
-    return content, [session.picture_of(name, image, args)]
-
-
-def _interrupted_from(calls: list, start: int) -> list:
-    """Tool results for `calls[start:]`: the one in flight, and the ones not sent."""
-    return [
-        ToolMessage(content=tools.INTERRUPTED_TEXT, tool_call_id=call.get("id", ""))
-        for call in calls[start:]
-    ]
-
-
-def reset_fail_counts() -> None:
-    """Drop every streak. One operator turn starts clean."""
-    _FAIL_STACK[:] = [{}]
-
-
-def begin_fail_counts() -> None:
-    """A fresh streak for one handoff, so it does not inherit the operator's."""
-    _FAIL_STACK.append({})
-
-
-def end_fail_counts() -> None:
-    if len(_FAIL_STACK) > 1:
-        _FAIL_STACK.pop()
-
-
-def _fail_counts() -> dict:
-    return _FAIL_STACK[-1]
-
-
-def _fail_key(call: dict) -> str:
-    name = str(call.get("name") or "")
-    args = json.dumps(call.get("args") or {}, sort_keys=True,
-                      ensure_ascii=False, default=str)
-    return name + "\0" + args
-
-
-def _run_calls(calls: list, run_one) -> tuple[list, list, bool]:
-    """Run `calls` until one is interrupted.
-
-    `run_one(call)` returns `(content, pictures)` or raises `TurnInterrupted`.
-    An interrupt fills that call and every call after it, and stops the batch.
-    The same call with the same error, twice in a row, is not run a third time.
-    """
-    results: list = []
-    pictures: list = []
-    counts = _fail_counts()
-    for index, call in enumerate(calls):
-        key = _fail_key(call)
-        seen = counts.get(key)
-        if seen is not None and seen[1] >= _FAIL_LIMIT:
-            content, pics = _FUSE_TEXT, []
-        else:
-            try:
-                content, pics = run_one(call)
-            except tools.TurnInterrupted:
-                results.extend(_interrupted_from(calls, index))
-                return results, pictures, True
-            text = content if isinstance(content, str) else ""
-            if text.startswith("error:"):
-                prefix = text[:80]
-                if seen is not None and seen[0] == prefix:
-                    counts[key] = (prefix, seen[1] + 1)
-                else:
-                    counts[key] = (prefix, 1)
-            elif key in counts:
-                counts.pop(key, None)
-        results.append(ToolMessage(content=content, tool_call_id=call.get("id", "")))
-        pictures.extend(pics)
-    return results, pictures, False
-
-
 def _run_host_tools(messages: list) -> tuple[list, bool]:
     """Run every tool call on the last message on the host.
 
@@ -310,10 +139,10 @@ def _run_host_tools(messages: list) -> tuple[list, bool]:
     """
     calls = getattr(messages[-1], "tool_calls", None) or []
 
-    def run_one(call: dict) -> tuple[object, list]:
-        return _host_result(call.get("name", ""), call.get("args") or {})
+    def run_one(call: dict) -> runner.ToolResult:
+        return runner.host_result(call.get("name", ""), call.get("args") or {})
 
-    results, pictures, interrupted = _run_calls(calls, run_one)
+    results, pictures, interrupted = runner.run_calls(calls, run_one)
     return session.demote_pictures(messages + results + pictures), interrupted
 
 
@@ -326,6 +155,10 @@ def run_tools(state: TurnState) -> dict:
     """
     messages = list(state.get("messages") or [])
     calls = getattr(messages[-1], "tool_calls", None) or []
+    if calls:
+        # Before any of them runs: the device moves when a tool does, and a
+        # result can only be written if this process lives to see it.
+        session.log_intent(messages[-1])
     # The pictures are held back and appended after every result, never between
     # them. Once a round asks for more than one tool, a user turn wedged in
     # mid-way makes the provider read the round as having answered only the
@@ -333,25 +166,26 @@ def run_tools(state: TurnState) -> dict:
     # messages following tool_calls message").
     host_tools = state.get("tools") or []
 
-    def run_one(call: dict) -> tuple[object, list]:
+    def run_one(call: dict) -> runner.ToolResult:
         name = call.get("name", "")
         args = call.get("args") or {}
         if state.get("operator_only") and name not in solo.SOLO:
             # Not offered this turn, so this is the model calling from the
             # prompt alone. Refused rather than run: a stray call must not
             # start the scripter or drive the device behind the sample.
-            return ("error: 这一轮只能用 " + ", ".join(sorted(solo.SOLO))
-                    + "；不能用 " + name, [])
+            return runner.ToolResult(
+                "error: 这一轮只能用 " + ", ".join(sorted(solo.SOLO))
+                + "；不能用 " + name, error_code="operator_only")
         if name == operator.AUTHOR_SCRIPT_NAME:
             # The screen belongs to the device. A shot the scripter took is the
             # one a later tap in this turn is checked against, so the operator
             # has to see it before that tap. An interrupt inside the scripter
             # propagates, and the calls after this one are filled in by
             # `_run_calls`.
-            before = session._LATEST_NUM
+            before = session.latest_shot()
             with subagent.working("scripter",
                                   args.get("goal") or "") as run:
-                content = scripter.run_scripter(
+                outcome = scripter.run_scripter(
                     args, host_tools,
                     state.get("max_model_rounds", MAX_MODEL_ROUNDS))
                 # After the handoff, where its trajectory and the operator's
@@ -359,22 +193,25 @@ def run_tools(state: TurnState) -> dict:
                 # return. The body serves every *later* handoff's scripter; the
                 # head rides back on this result, for the operator who is the
                 # only one that can change how the next handoff is split.
-                content = str(content)
+                content = str(outcome.content)
                 head, body = reflector.reflect(
-                    scripter.calls(), state.get("tool_rounds", 0), content)
+                    scripter.calls(), state.get("tool_rounds", 0), content,
+                    handoff_failed=outcome.failed)
                 session.add_lessons(body)
-                run.settle(content, ok=not content.startswith(("failed", "error:")))
+                run.settle(content, ok=not outcome.failed)
                 content += reflector.directive(head, body)
             pics: list = []
-            if session._LATEST_NUM != before:
+            if session.latest_shot() != before:
                 frame = session.latest_frame()
                 if frame is not None:
                     pics.append(frame)
-            return content, pics
-        return _host_result(name, args)
+            return runner.ToolResult(content, pics, outcome.error_code)
+        return runner.host_result(name, args)
 
-    results, pictures, interrupted = _run_calls(calls, run_one)
-    out: dict = {"messages": session.demote_pictures(messages + results + pictures),
+    results, pictures, interrupted = runner.run_calls(calls, run_one)
+    kept = session.demote_pictures(messages + results + pictures)
+    session.log_round(kept)
+    out: dict = {"messages": kept,
                  "tool_rounds": state.get("tool_rounds", 0) + 1}
     if interrupted:
         out["interrupted"] = True
@@ -420,12 +257,17 @@ def commit(state: TurnState) -> dict:
     own = session.own_since(state.get("messages") or [], state.get("turn_mark"))
     if state.get("error"):
         kept = memorier._paired(own)
+        note = stopped_note(state["error"])
         if kept:
+            session.log_round(state.get("messages") or [])
             session.append_turn(
                 state.get("text", ""),
-                kept + [AIMessage(content=stopped_note(state["error"]))])
+                kept + [AIMessage(content=note)], mark=state.get("turn_mark"))
+        session.log_end(note)
         return {"turns": session.size()}
-    session.append_turn(state.get("text", ""), own)
+    session.log_round(state.get("messages") or [])
+    session.append_turn(state.get("text", ""), own, mark=state.get("turn_mark"))
+    session.log_end("")
     return {"turns": session.size()}
 
 

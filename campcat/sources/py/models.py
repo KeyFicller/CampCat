@@ -28,9 +28,8 @@ import transport
 # thinking and returns no content at all. Qwen's plan endpoint caps only the
 # visible answer, so this is slack there and a floor here.
 DEFAULT_MAX_TOKENS = 8192 * 16
-# The memory rewrite is a longer output than a reply: it replaces up to
-# `memorier.DEFAULT_MEMORY_MAX_CHARS` characters in one go, and it thinks
-# first like every other call.
+# The memory rewrite proposes a batch of ledger operations rather than printing a
+# whole notebook, but it still thinks first like every other call.
 DEFAULT_MEMORY_MAX_TOKENS = 8192 * 16
 # Every knob, including which variable holds the key and which holds the base
 # URL. Both are passed to the client explicitly, so neither name has to be one an

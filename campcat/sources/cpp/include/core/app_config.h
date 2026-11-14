@@ -119,25 +119,29 @@ struct region_score_config {
     std::string data_dir = "training_data";
 };
 
+/// Disk evidence for deterministic replay; failed writes stop subsequent input.
+struct replay_config {
+    bool enabled = true;
+    unsigned keep_runs = 20;
+    unsigned max_run_mb = 256;
+};
+
 /**
  * @brief Shell JSON document loaded from disk: adb settings, matchers
  * heuristic defaults, scheduler, persistence paths.
  */
 struct app_config {
-    /**
-     * @brief Where the config file lives -- the root every relative path above
-     * resolves against.
-     *
-     * Not the config file's own directory: the file sits at the repo root and
-     * this points at the sibling `ccat_library/`, so that `parent_path()` is
-     * still the repo root and the scripts, memory and match dumps all land in
-     * one directory. Set by `load_from_file`, never authored by hand.
-     */
+    /// Legacy name for the resolved skill-library root. Kept compatible with
+    /// existing consumers; use library_root()/project_root() at new boundaries.
     std::string config_home{};
+    std::filesystem::path library_root() const { return config_home; }
+    std::filesystem::path project_root() const { return library_root().parent_path(); }
+
 
     adb_config adb{};
     mumu_config mumu{};
     input_config input{};
+    replay_config replay{};
     match_config match{};
     approval_config approval{};
     llm_config llm{};

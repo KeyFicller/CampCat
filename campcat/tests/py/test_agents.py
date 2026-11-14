@@ -8,19 +8,21 @@ import agent.operator as operator
 import agent.solo as solo
 import agent.scripter as scripter
 import session
+from pathlib import Path
+import re
 
 HOST_NAMES = (
     "screenshot view_shot view_template view_crop tight_crop mark tap start_emulator "
-    "go_home run_script save_script save_template ccat_help list_scripts "
+    "go_home run_script run_bundle save_script save_template reuse_template ccat_help list_scripts "
     "read_script "
-    "update_script read_graph save_anchor delete_script rename_script"
+    "update_script read_graph locate save_anchor delete_script rename_script"
 ).split()
 
 # Host order, not the grouped order in the spec table: `run_script` is
 # registered before `list_scripts`. `mark` is registered and offered to neither.
 OPERATOR_NAMES = (
-    "screenshot view_shot tap start_emulator go_home run_script list_scripts "
-    "read_graph author_script"
+    "screenshot view_shot tap start_emulator go_home run_script run_bundle list_scripts "
+    "read_graph locate author_script"
 ).split()
 
 
@@ -45,7 +47,7 @@ def test_operator_and_scripter_split_the_host_table():
 
     assert _names(operator_table) == OPERATOR_NAMES
     assert "view_template" not in _names(operator_table)
-    assert len(scripter_table) == 17
+    assert len(scripter_table) == 18
     assert _names(scripter_table) == [
         name for name in HOST_NAMES
         if name in scripter.SCRIPTER_ONLY | scripter.SHARED
@@ -61,6 +63,18 @@ def test_operator_and_scripter_split_the_host_table():
     assert "mark" not in _names(scripter_table)
     assert "tight_crop" not in _names(operator_table)
     assert "tight_crop" not in _names(scripter_table)
+
+
+def test_every_registered_host_tool_has_an_explicit_agent_policy():
+    source = (Path(__file__).resolve().parents[2] / "sources/cpp/src/core/llm/llm_tools.cpp").read_text()
+    registered = set(re.findall(r"^CPP_REFLECT_TOOL\((\w+)\)", source, re.MULTILINE))
+    # This checks registration coverage, so a new host tool requires a policy
+    # decision instead of silently becoming an operator tool forever.
+    import tool_policy
+    groups = [tool_policy.OPERATOR_ONLY, tool_policy.SCRIPTER_ONLY,
+              tool_policy.SHARED, tool_policy.HIDDEN]
+    assert set().union(*groups) == registered
+    assert sum(map(len, groups)) == len(registered)
 
 
 def test_unknown_tool_stays_with_the_operator():

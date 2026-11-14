@@ -31,7 +31,7 @@ inline constexpr const char *k_script_drag_payload = "campcat_script";
  */
 void script_editor_panel_draw(const std::filesystem::path &_script_dir,
                               float _list_w, float _list_h,
-                              campcat::workspace_selection &_selection);
+                              campcat::workspace_selection &_selection, bool _save_locked = false);
 
 /// Description and template evidence for the selected skill, without running it.
 void script_editor_inspector_draw(const std::filesystem::path &_script_dir,
@@ -55,14 +55,14 @@ void script_editor_open(const std::filesystem::path &_script_dir,
  * Called centrally once per frame so editors remain visible on every page.
  * Each editor carries its bundle root. Switching layout keeps its buffer.
  */
-void script_editor_draw_windows(bool _docked);
+void script_editor_draw_windows(bool _docked, bool _save_locked = false);
 
 /// Open editors and pending requests to select one in the workspace sidebar.
 bool script_editor_has_open();
 bool script_editor_focus_requested();
 
 /// Draw the same buffers as tabs in the workspace sidebar.
-void script_editor_draw_docked();
+void script_editor_draw_docked(bool _save_locked = false);
 
 /// @brief Release the preview textures and close the editors. Must run before
 /// the GL context goes away.

@@ -6,6 +6,7 @@ folds history.
 
 from __future__ import annotations
 
+import json
 import sys
 
 from langchain.agents.middleware import SummarizationMiddleware
@@ -27,51 +28,67 @@ import session
 # of it. The model in use has a 1,048,576-token window, verified against the
 # provider, so this sits at about a fifth of it.
 DEFAULT_CONTEXT_TOKENS = 200000
-# Mirrors `k_memory_max_chars` in `campcat/sources/cpp/include/core/llm/llm_memory.h`. The two cannot
-# share a constant, so keep them equal by hand: if this one is larger, the
-# sidecar writes notes the host then refuses, and memory stops updating.
-DEFAULT_MEMORY_MAX_CHARS = 4000
+# Mirror `k_entry_max_chars` and `k_max_ops_per_pass` in
+# `campcat/sources/cpp/include/core/llm/llm_memory.h`. The host enforces both;
+# these are here so the instructions ask for something it will accept.
+ENTRY_MAX_CHARS = 200
+MAX_OPS_PER_PASS = 40
 
 # Handed to the memory model, which never sees the conversation assistant's own
-# prompt: its only job is rewriting the notes.
+# prompt: its only job is proposing changes to the ledger.
 MEMORY_INSTRUCTIONS = (
     "你替一个操作 Android 设备的助手维护长期笔记，服务对象只有一位用户。"
-    "给你的内容是这个助手现有的笔记，以及刚结束那一轮会话的记录。"
-    "把笔记重写成下一次真正用得上的样子。\n"
+    "给你的内容是这个助手现有的笔记（每条前面有一个 [id]），"
+    "以及刚结束那一轮会话的记录。你的输出是一串操作，不是笔记本身："
+    "宿主会逐条校验再写进账本，落盘的格式由它决定。\n"
     "\n"
-    "只留经过这一轮之后仍然成立、而且是 bundle 里还没写下的内容：\n"
-    "- 用户用的某个叫法，一行写成「说法 -> bundle 或 anchor 名」\n"
+    "只提议经过这一轮之后仍然成立、而且是 bundle 里还没写下的内容：\n"
+    "- 用户用的某个叫法，section 写「叫法」，text 写成「说法 -> bundle 或 anchor 名」\n"
     "- 每一轮都成立的约束：用什么语言、这是哪个 app、以及用户总是拒绝的操作"
-    "（例如花掉货币）\n"
+    "（例如花掉货币），section 写「偏好」\n"
     "\n"
     "丢掉一次性的指令、关于当前界面的任何内容、已经存进 bundle 的流程、"
     "失败步骤的日志，以及机密：密码、token、API key、账号，"
     "或者用户要求保密的任何东西。\n"
     "\n"
-    "在「## 偏好」和「## 叫法」两个标题下，用第三人称写简短的事实条目。"
-    "只输出这些笔记，别的什么都不要：没有开场白、没有代码围栏，"
-    "总长不超过 {max_chars} 个字符。没有任何值得留下的东西时，"
-    "只留一个空标题也是可以的。"
+    "每条 text 不超过 {entry_chars} 个字符，一次最多 {max_ops} 条操作。"
+    "标着「钉」或「用户」的条目不归你管：不要 edit 或 retire 它们。"
+    "没有任何值得一提的东西时，输出 {\"ops\":[]}。\n"
+    "\n"
+    "只输出一个 JSON 对象，别的什么都不要：\n"
+    '{"ops":[{"op":"add","section":"叫法","text":"签到 -> campcat.tasks.checkin"},'
+    '{"op":"edit","id":"9b02","text":"用中文思考和回答"},'
+    '{"op":"retire","id":"f3a1","why":"campcat.home 已覆盖该流程"}]}\n'
+    "可用的 op：add（要 section 和 text）、edit（要 id 和 text）、"
+    "retire（要 id 和 why）。"
 )
 
 SCRIPTER_MEMORY_INSTRUCTIONS = (
-    "你替一个写设备脚本的助手维护踩坑笔记。给你的内容是这个助手现有的笔记，"
-    "以及它这一轮会话的记录。把笔记重写成下一次真正用得上的样子。\n"
+    "你替一个写设备脚本的助手维护踩坑笔记。给你的内容是这个助手现有的笔记"
+    "（每条前面有一个 [id]），以及它这一轮会话的记录。你的输出是一串操作，"
+    "不是笔记本身：宿主会逐条校验再写进账本。\n"
     "\n"
-    "每条还没被某个 bundle 表达出来的坑留一行。记录显示某个坑已经写进 bundle "
-    "了，就删掉那一行。\n"
+    "每条还没被某个 bundle 表达出来的坑，section 写「坑」，text 留一行。"
+    "记录显示某个坑已经写进 bundle 了，就用 retire 收掉那一条，"
+    "why 里写上是哪个 bundle。\n"
     "\n"
-    "这个软件的界面风格也留下，写在「## 风格」下：按钮多半是圆是方、常见的主色、"
-    "字多半衬在色块上还是直接写在背景上、弹窗通常从哪边出来。写成大多数控件的习惯，"
-    "别写成每条都这样，个别不一样的控件不必单列。只留下一轮还成立的；"
-    "某一屏上有什么不要写。\n"
+    "从有效交接的 Handoff.ui_style 提取游戏中可复用的界面规律，section 写「风格」。"
+    "每条保留游戏或图名和适用范围，例如按钮形状、文字底色、导航位置或弹窗布局。"
+    "单页观察只记作该页规律。重复则跳过，确认风格有变化就更新。"
+    "舍弃临时坐标、帧号和这一屏的即时状态。\n"
     "\n"
     "丢掉当前目标、当前这一屏上有什么、逐步的失败日志，以及任何关于用户怎么说话、"
     "禁止了什么的内容。\n"
     "\n"
-    "在「## 坑」和「## 风格」两个标题下写简短的事实条目。只输出这些笔记，别的什么都不要："
-    "没有开场白、没有代码围栏，总长不超过 {max_chars} 个字符。"
-    "没有任何值得留下的东西时，只留一个空标题也是可以的。"
+    "每条 text 不超过 {entry_chars} 个字符，一次最多 {max_ops} 条操作。"
+    "标着「钉」或「用户」的条目不归你管：不要 edit 或 retire 它们。"
+    "没有任何值得一提的东西时，输出 {\"ops\":[]}。\n"
+    "\n"
+    "只输出一个 JSON 对象，别的什么都不要：\n"
+    '{"ops":[{"op":"add","section":"坑","text":"screencap 偶发超时，重试一次"},'
+    '{"op":"retire","id":"1a2b","why":"campcat.home.harvest 已覆盖"}]}\n'
+    "可用的 op：add（要 section 和 text）、edit（要 id 和 text）、"
+    "retire（要 id 和 why）。"
 )
 
 # Prepended to the notes when they go into the prompt, so the model reads them as
@@ -82,27 +99,10 @@ MEMORY_FRAME = (
 )
 
 SCRIPTER_MEMORY_FRAME = (
-    "下面是你在之前会话里留下的坑和界面风格。风格只是大多数控件的习惯，"
-    "个别控件可以不一样。用得上的时候就用，和这份 brief 冲突的行"
-    "直接丢掉，绝不要提你收到过它们。\n\n"
+    "下面是你在之前会话里留下的坑和界面风格。只参考当前游戏和适用页面的风格，"
+    "用来缩小找控件和选模板的范围。以当前帧和 brief 为准，保存模板前核对实际控件。"
+    "不要复述记忆来源。\n\n"
 )
-
-
-def memory_max_chars() -> int:
-    """Character budget for the memory file.
-
-    Mirrors `k_memory_max_chars` in C++; the same plausibility floor keeps a bad
-    env var from shrinking the notes to nothing.
-    """
-    raw = models._env("CAMPCAT_LLM_MEMORY_MAX_CHARS")
-    if raw:
-        try:
-            value = int(raw)
-        except ValueError:
-            return DEFAULT_MEMORY_MAX_CHARS
-        if value >= 100:
-            return value
-    return DEFAULT_MEMORY_MAX_CHARS
 
 
 def memory_block(memory: str) -> str:
@@ -118,7 +118,7 @@ def memory_block(memory: str) -> str:
 
 
 def scripter_memory_block(memory: str) -> str:
-    """The scripter's pitfalls as a second paragraph of its system prompt.
+    """The scripter's pitfalls and UI style notes in its system prompt.
 
     Empty in, empty out, for the same reason as `memory_block`.
     """
@@ -153,36 +153,46 @@ _MW = None
 _SCRIPTER_MW = None
 
 
+def reset() -> None:
+    """Drop the cached summarizers with the conversation they summarized."""
+    global _MW, _SCRIPTER_MW
+    _MW = None
+    _SCRIPTER_MW = None
+
+
 def memorize(memory: str, agent: str) -> str | None:
-    """Fold one agent's new turns into `memory`, returning the new notes.
+    """Fold one agent's new turns into its ledger, returning the proposed ops.
 
     `agent` is `operator` or `scripter`. Each reads only its own history.
-    Returns `memory` unchanged when there is nothing new -- no model call --
-    and None when the call fails or `agent` is unknown, which leaves the
-    caller's file and cursor alone.
+    Returns an empty op list when there is nothing new -- no model call -- and
+    None when the call fails, the reply is not ops JSON, or `agent` is unknown.
+    None leaves the caller's ledger and cursor alone.
     """
     if agent == "operator":
-        start = session._MEMORIZED_UPTO
-        history = session._MESSAGES
         instructions = MEMORY_INSTRUCTIONS
     elif agent == "scripter":
-        start = session._SCRIPTER_MEMORIZED_UPTO
-        history = session._SCRIPTER_MESSAGES
         instructions = SCRIPTER_MEMORY_INSTRUCTIONS
     else:
         return None
-    if start >= len(history):
-        return memory
+    # Still a valid receipt: the host records that these turns are folded, so
+    # they are not paid for again on the next pass.
+    history = session.memory_history(agent)
+    if not history:
+        return json.dumps({"ops": [], "from": "", "to": ""})
     try:
         model = models.build_memory_model()
-        instructions = instructions.format(max_chars=memory_max_chars())
+        # Not `str.format`: the instructions carry JSON examples, and every
+        # brace in them would be read as a field.
+        instructions = (instructions
+                        .replace("{entry_chars}", str(ENTRY_MAX_CHARS))
+                        .replace("{max_ops}", str(MAX_OPS_PER_PASS)))
         with observability.turn("rewrite-memory") as callbacks:
             reply = model.invoke([
                 SystemMessage(content=instructions),
                 HumanMessage(content=(
                     "## 现有笔记\n" + (memory.strip() or "（无）") +
                     "\n\n## 本轮记录\n" +
-                    _transcript(history[start:])
+                    _transcript(history)
                 )),
             ], config={"callbacks": callbacks})
     except Exception as exc:  # noqa: BLE001 - a missed update, never fatal
@@ -191,13 +201,31 @@ def memorize(memory: str, agent: str) -> str | None:
     text = session.strip_tool_markup(
         session.content_text(getattr(reply, "content", reply))
     ).strip()
+    payload = _parse_ops(text)
+    if payload is None:
+        print("[sidecar] memory not updated: reply is not ops JSON",
+              file=sys.stderr)
+        return None
+    payload["from"], payload["to"] = session.turn_span(history, agent)
+    return json.dumps(payload, ensure_ascii=False)
+
+
+def _parse_ops(text: str) -> dict | None:
+    """The reply as `{"ops": [...]}`, or None when it is anything else.
+
+    Only the shape is checked here: whether an op is allowed is the host's call,
+    and duplicating those rules would be a second place to get them wrong.
+    """
     if not text:
         return None
-    if agent == "operator":
-        session._MEMORIZED_UPTO = len(session._MESSAGES)
-    else:
-        session._SCRIPTER_MEMORIZED_UPTO = len(session._SCRIPTER_MESSAGES)
-    return text
+    try:
+        payload = json.loads(text)
+    except ValueError:
+        return None
+    if (not isinstance(payload, dict) or not isinstance(payload.get("ops"), list)
+            or any(not isinstance(op, dict) for op in payload["ops"])):
+        return None
+    return {"ops": payload["ops"]}
 
 
 def _transcript(messages: list) -> str:
@@ -304,18 +332,19 @@ def compact() -> None:
     keeps this rare. A failure here is skipped, never fatal: the request is
     still far below the model's real limit, so it goes out unsummarized.
     """
-    if not session._MESSAGES:
+    history = session.history()
+    if not history:
         return
     try:
-        out = _middleware().before_model({"messages": list(session._MESSAGES)}, Runtime())
+        out = _middleware().before_model({"messages": history}, Runtime())
     except Exception as exc:  # noqa: BLE001 - summarizing must not lose history
         print(f"[sidecar] summarization skipped: {exc}", file=sys.stderr)
         return
     if not out or "messages" not in out:
         return
     # Drop the RemoveMessage sentinel: it signals a reducer this list has none of.
-    session._MESSAGES[:] = _without_orphan_tools(
-        [m for m in out["messages"] if not isinstance(m, RemoveMessage)])
+    session.replace_history(_without_orphan_tools(
+        [m for m in out["messages"] if not isinstance(m, RemoveMessage)]))
 
 
 def _scripter_middleware():
@@ -335,16 +364,16 @@ def _scripter_middleware():
 
 def compact_scripter() -> None:
     """`compact` for the scripter's history. Same budget, same failure rule."""
-    if not session._SCRIPTER_MESSAGES:
+    history = session.scripter_history()
+    if not history:
         return
     try:
         out = _scripter_middleware().before_model(
-            {"messages": list(session._SCRIPTER_MESSAGES)}, Runtime())
+            {"messages": history}, Runtime())
     except Exception as exc:  # noqa: BLE001 - summarizing must not lose history
         print(f"[sidecar] summarization skipped: {exc}", file=sys.stderr)
         return
     if not out or "messages" not in out:
         return
-    session._SCRIPTER_MESSAGES[:] = _without_orphan_tools(
-        [m for m in out["messages"] if not isinstance(m, RemoveMessage)])
-
+    session.replace_history(_without_orphan_tools(
+        [m for m in out["messages"] if not isinstance(m, RemoveMessage)]), "scripter")

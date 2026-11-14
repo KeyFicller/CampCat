@@ -58,6 +58,7 @@ ccat_script_automation::run_cycle(const std::function<bool()> &_should_stop) {
                 m_profile->source_rel)
                    .string();
         r.ok = false;
+        r.error_code = "script_missing";
         r.message = oss.str();
         automation_log::emit(std::string("[ccat] ") + r.message);
         return r;
@@ -71,6 +72,7 @@ ccat_script_automation::run_cycle(const std::function<bool()> &_should_stop) {
         oss << "parse error: " << ex.what() << " (line " << ex.line << ", col "
             << ex.col << ")";
         r.ok = false;
+        r.error_code = "parse_error";
         r.message = oss.str();
         automation_log::emit(std::string("[ccat] ") + r.message);
         return r;

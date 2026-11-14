@@ -13,6 +13,7 @@ from pydantic import BaseModel, Field
 
 import agent.scripter as scripter
 import models
+import tool_policy
 from agent.region_rules import REGION_RULES
 
 
@@ -44,14 +45,15 @@ class HandoffStep(BaseModel):
 @tool
 def author_script(
     goal: Annotated[str, Field(description=(
-        "分两段。第一段只说这一次要产出的那一个东西——一个锚点，或者一个动作，"
-        "用祈使句，用自己的话说这一屏。第二段以「上下文（不是这次要做的）」开头，"
+        "分两段。第一段只说本次交付——一个新锚点、一个动作，或者同图已知 page "
+        "之间的 2–3 条简单新边（列明每条起终点），"
+        "用祈使句，说清本次界面和移动。第二段以「上下文（不是这次要做的）」开头，"
         "放用户的整体要求和他说的每一条约束：写脚本的 agent 看不到这段对话，"
         "少了它就不知道边界。整张图的目标写进第一段，一次交接就会把整张图做完。"))],
     steps: Annotated[list[HandoffStep], Field(description=(
         "你已经在设备上做过的事，一个控件一项。写脚本的 agent 看不到这段对话。"))] = [],
     bundle: Annotated[str, Field(description=(
-        "要新建或修改的 bundle；留空让写脚本的 agent 自己选。"))] = "",
+        "要新建或修改的 bundle；新建时可留空让写脚本的 agent 自己选，修已有的必须填写。"))] = "",
     shots: Annotated[list[int], Field(description=(
         "能说明涉及到的界面的截图编号。"))] = [],
     last_error: Annotated[str, Field(description=(
@@ -63,8 +65,9 @@ def author_script(
     """把写、修、管理 .ccat bundle 的活交给写脚本的 agent，包括给某个游戏的
     图添加界面和移动。它能读写 bundle、切模板、跑脚本来验证，然后回报。
     把用户说过的每一条约束原样放进 `goal` 的第二段：写脚本的 agent 看不到这段
-    对话的其他内容，第一段只留这一次要产出的那一个东西。没有 `fix: true`
-    也没有 `last_error` 时，它改不动已经存在的 bundle。`steps` 是你自己在设备
+    对话的其他内容，第一段只留本次交付。没有 `fix: true`
+    也没有 `last_error` 时，它改不动已经存在的 bundle。修已有的 bundle 时必须
+    明确填写 `bundle`；修复权限只覆盖这个名字。`steps` 是你自己在设备
     上已经做过的事：一个控件一项——见过的界面、每点过的控件、它的最终区域和
     那里应该出现的东西。少了它，写脚本的 agent 会把每个控件重新找一遍。
     """
@@ -83,7 +86,8 @@ OPERATOR_PERSONA = (
     "`goal`。要改一个已经存在的 bundle 时必须传 `fix: true`——包括你自己这一轮"
     "刚建好、但判据不对的锚点（比如标题模板在别的屏也命中），不传就会被拒，"
     "同一个改法重交几次也不会成；一次只修这一处。"
-    "上一次 `run_script` 失败时传 `last_error`。其余任何交接都不许改动已存在"
+    "上一次 `run_script` 失败时传 `last_error`。这两种修复都必须在 `bundle`"
+    "明确填写要修的名字，只能改它；没有明确目标时不能改任何已有 bundle。其余任何交接都不许改动已存在"
     "的 bundle。"
     "把你查看过的每个界面、点过的每个控件写进 `steps`，一个控件一项；区域照抄"
     "工具结果里的写法（`box x,y wxh` / `circle cx,cy,r` / `diamond cx,cy,rx,ry`），"
@@ -100,18 +104,22 @@ OPERATOR_PERSONA = (
     "回答 `unknown` 就是新 anchor：当场 `author_script`，goal 里写清这一屏是什么、"
     "从哪个 anchor 过来（或者说明它是起始屏），`shots` 给当前这张。在这之前"
     "不要再点任何东西，也不要先走到下一屏——连着开两个新 anchor，那条边就没有起点了。"
-    "回答某个 anchor 就不是新屏，不交；`ambiguous` 是图本身的故障，不是新界面："
+    "回答某个 page anchor 就不是新屏，不交新锚点；`ambiguous` 是图本身的故障，不是新界面："
     "报告它，不要为它交接。"
     "一项任务做完、并且成功过一次，就交接：任务是在同一屏上开始、也在这一屏收尾的"
     "那件事，goal 写这件事加上用户的原话约束，`steps` 写这屏点过的每个控件。"
     "只回答一个问题、跑一个已保存的技能、或者跨了屏还没回到起始屏，都不算交接的时机。"
     "暂不交跨屏的任务：一条流程经过多屏也要回到起始屏收尾，动作仍挂在起始屏上。"
-    "不要攒着一起交：跨多屏的流程按「发现新屏→交锚点和那条边→在这屏把事做完→交动作」"
-    "一步一交。一次交接只产出一个东西——一个锚点（连带它的一条边），或者一个动作。"
-    "把要建的东西拆开交，写脚本的 agent 每次只面对一件小事，比你交一大堆做得快。"
-    "`goal` 的第一段只说这一次要产出的那一个东西，用户的整体要求（「把整张图建完整」"
+    "不要攒着一起交新屏或资源动作：跨多屏的流程按「发现新屏→交锚点和那条边→在这屏把事做完→交动作」"
+    "一步一交。只有同图已知 page 之间的简单新导航边可以每批交 2–3 条："
+    "逐条列清起终点、已观察的移动、帧号和控件；已有的边不重建。"
+    "帧号不足、遇到新屏、弹窗或资源状态变化时立即收尾交接，不继续凑批。"
+    "设备输入和每条边的验证仍按顺序执行。修已有 bundle 仍一次只修明确授权的那一个。"
+    "`goal` 的第一段只说本次交付，用户的整体要求（「把整张图建完整」"
     "这类）放进第二段，以「上下文（不是这次要做的）」开头——写进第一段，写脚本"
     "的 agent 就会在一次交接里把整张图都做完，你再没有机会把它拆开。"
+    "边只连接 page；popup 是盖在页面上的弹窗，交 `kind: popup` 和关闭它的 bundle，"
+    "触发它的点击属于页面 action，不建 page→popup 的边；transient 是短暂过渡，也不接边。"
     "一个图里装的第三样东西是 action：花掉资源或领取资源的那一下点击——"
     "收菜、签到、领奖——存成 `<graph>.<anchor>.<action>`。用 `author_script` "
     "交接，`bundle` 填这个名字，任务作为 goal，这个界面上的点击在 `steps` 里各写一项。"
@@ -121,6 +129,9 @@ OPERATOR_PERSONA = (
     "做完一下资源操作就当场交接，别等切走之后凭记忆写——一条流程中途跑去了别的屏，"
     "也先回到起始屏再交，动作挂在起始屏上。做了任务之后 `read_graph` 仍显示 `actions: 0`，"
     "说明这个图不是用户要的那个。"
+    "交接声称完成不等于已经完成：收尾前 `read_graph` 对照用户要求逐项核对锚点、边、"
+    "action 和 problems。动作脚本必须实际执行过输入并确认结果；你手动做过、脚本只跳过"
+    "已完成状态，不能算点击分支验证通过。不可重复的奖励保留为未验证，不为验收重置真实账号。"
     "先截屏（否则你看不到屏幕），看清结果再走下一步。`tap` 指定的区域，"
     "用的就是那张截图的像素。每张图的说明都写了它「按 WxH 显示，读到的数 ×k」："
     "在哪张图上量的就乘那张的 k，不要拿另一张的尺度。说明里写着`图片未附上`"
@@ -166,14 +177,6 @@ def _rules(names: tuple[str, ...]) -> str:
     return "\n\n".join(f"## {name}\n\n{_RULES[name]}" for name in names)
 
 
-def _name(tool: dict) -> str | None:
-    try:
-        name = tool["function"]["name"]
-    except (KeyError, TypeError):
-        return None
-    return name if isinstance(name, str) else None
-
-
 def shared_rules() -> str:
     """The blocks appended after either persona."""
     return _rules(_RULE_NAMES)
@@ -182,7 +185,7 @@ def shared_rules() -> str:
 def operator_tools(host_tools: list) -> list:
     """Host tools the operator may call, plus the handoff tool."""
     hidden = scripter.SCRIPTER_ONLY | scripter.HIDDEN
-    kept = [tool for tool in host_tools if _name(tool) not in hidden]
+    kept = [tool for tool in host_tools if tool_policy.name_of(tool) not in hidden]
     return kept + [author_script]
 
 

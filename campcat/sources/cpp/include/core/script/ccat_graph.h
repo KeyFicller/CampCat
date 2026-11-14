@@ -55,6 +55,9 @@ bool split_action_name(std::string_view _rest, std::string *_anchor,
 struct anchor_check {
     bool here = false;
     std::string error; ///< non-empty when the script failed; `here` is then false
+    bool device = false;
+    bool fatal = false;
+    std::string error_code;
 };
 
 /// Bundle `G.<id>` holding a `golden.md`.
@@ -158,6 +161,9 @@ struct locate_hit {
     locate_kind kind = locate_kind::unknown;
     std::string id;
     std::string detail;
+    bool device = false;
+    bool fatal = false;
+    std::string error_code;
 };
 
 using anchor_check_fn =
@@ -191,6 +197,9 @@ struct bundle_run {
     bool stopped = false;
     bool failed = false;
     std::string message;
+    bool device = false;
+    bool fatal = false;
+    std::string error_code;
 };
 
 struct nav_io {
@@ -208,6 +217,8 @@ struct nav_result {
     bool device = false;
     bool stopped = false;
     std::string message;
+    bool fatal = false;
+    std::string error_code;
 };
 
 /**

@@ -23,36 +23,15 @@ import agent.memorier as memorier
 import agent.reflector as reflector
 import observability
 import session
+import runner
 import subagent
 import tools
+import tool_policy
 from agent.region_rules import REGION_RULES
 
 
-# Only the scripter sees these. Anything the host sends that is not listed here
-# or in HIDDEN goes to the operator, so a new C++ tool lands with today's behaviour.
-SCRIPTER_ONLY = frozenset({
-    "read_script", "ccat_help",
-    "save_script", "update_script", "delete_script", "rename_script",
-    "save_template", "view_template", "view_crop",
-    "save_anchor",
-})
-# Registered in C++ for the review pipeline, which calls them itself. A model
-# is not offered them: the approval bubble already shows a region.
-HIDDEN = frozenset({"mark", "tight_crop"})
-# Offered to both: the operator runs saved skills, looks at the screen and
-# reads a graph before goto; the scripter verifies what it wrote and cuts
-# templates from fresh frames.
-SHARED = frozenset({
-    "list_scripts", "run_script", "screenshot", "view_shot", "read_graph",
-})
-
-
-def _name(tool: dict) -> str | None:
-    try:
-        name = tool["function"]["name"]
-    except (KeyError, TypeError):
-        return None
-    return name if isinstance(name, str) else None
+# Kept as module names for callers that already use the agent's tool table.
+from tool_policy import SCRIPTER_ONLY, SHARED, HIDDEN
 
 
 class Handoff(BaseModel):
@@ -66,6 +45,12 @@ class Handoff(BaseModel):
     summary: str = Field(
         default="",
         description="一到三句：做了什么，这次运行最后怎么样。")
+    ui_style: str = Field(
+        default="",
+        description=(
+            "供长期记忆使用。根据本次看过的截图，记一两条当前游戏可复用的 UI 规律，"
+            "如按钮形状、配色、文字底色、导航位置或弹窗布局。写清游戏或图名，附观察帧号。"
+            "只在一页看到的就注明页面。已有笔记覆盖或证据不足时留空。"))
 
 
 HANDOFF_TOOL = convert_to_openai_tool(Handoff)
@@ -74,7 +59,7 @@ HANDOFF_TOOL = convert_to_openai_tool(Handoff)
 def scripter_tools(host_tools: list) -> list:
     """Host tools the scripter may call, then diagnose_template and Handoff."""
     offered = SCRIPTER_ONLY | SHARED
-    return [tool for tool in host_tools if _name(tool) in offered] + [
+    return [tool for tool in host_tools if tool_policy.name_of(tool) in offered] + [
         diagnoser.diagnose_template, HANDOFF_TOOL]
 
 
@@ -150,10 +135,18 @@ def brief_of(args: dict) -> str:
 
 
 def handoff_may_change(args: dict) -> bool:
-    """True when this handoff may edit bundles that already exist."""
+    """Whether the handoff requests a repair; its bundle still limits the scope."""
     if str(args.get("last_error") or "").strip():
         return True
     return args.get("fix") is True
+
+
+def repair_targets(args: dict) -> frozenset[str]:
+    """Only the explicit bundle grants repair access, never goal or error prose."""
+    bundle = args.get("bundle")
+    if handoff_may_change(args) and isinstance(bundle, str) and bundle.strip():
+        return frozenset({bundle.strip()})
+    return frozenset()
 
 
 def bundle_names_of(listing: str) -> set[str]:
@@ -168,35 +161,12 @@ def bundle_names_of(listing: str) -> set[str]:
     return names
 
 
-# The field that names the bundle a write would change. `save_anchor` is
-# handled beside this: its name is `graph.anchor`.
-_FROZEN_FIELD = {
-    "update_script": "name",
-    "delete_script": "name",
-    "rename_script": "name",
-    "save_template": "bundle",
-}
-
-
 def refuse_existing(tool: str, args: dict, frozen: set[str]) -> str | None:
     """The refusal the model sees, or None when the call may reach the host."""
-    if tool == "save_anchor":
-        graph_name = args.get("graph")
-        anchor = args.get("anchor")
-        if (not isinstance(graph_name, str) or not isinstance(anchor, str)
-                or not graph_name or not anchor):
-            return None
-        target = graph_name + "." + anchor
-    else:
-        field = _FROZEN_FIELD.get(tool)
-        if field is None:
-            return None
-        target = args.get(field)
-        if not isinstance(target, str) or not target:
-            return None
-    if target not in frozen:
-        return None
-    return f"error: {target} 已存在；这次交接不能改它。要改它得让交接带上 fix: true，请把这一句写进你的总结。"
+    for target in tool_policy.write_targets(tool, args):
+        if target in frozen:
+            return f"error: {target} 已存在；这次交接不能改它。要改它得让交接带上 fix: true，请把这一句写进你的总结。"
+    return None
 
 
 # None means this handoff may change existing bundles. A set is the names
@@ -249,7 +219,9 @@ RULES = {
         "名字已存在会被拒绝。名字按这个形式起，全小写英文：边 "
         "`图.锚点-锚点`，动作 `图.锚点.动作`。起好了就不要为了风格再改名——"
         "`rename_script` 只在内容真的换了名字时才用。\n"
-        "5. `save_template`，脚本里出现的每一个 PNG 各调一次。手上没有这张"
+        "5. 已验证过的相同控件优先 `reuse_template(bundle, name, from_bundle, from_name, shot)`："
+        "工具确认当前帧能按原尺寸匹配，才把 PNG 复制到本 bundle；不共享坐标或外部路径。"
+        "不匹配、样式变了或没有可复用模板时才 `save_template`，脚本里每个 PNG 各存一张。手上没有这张"
         "界面的新鲜帧，才先截屏；已有的帧用 `shot` 指定，先 `view_shot` 看"
         "一眼。区域里的数按说明的 ×k 换成帧像素，在哪张图上量的就乘哪张的 k。"
         "围着不动的部分裁紧。"
@@ -281,7 +253,7 @@ RULES = {
         "`wait_until(\"expected.png\", ms)` 断言它本该产生的界面。没落地的动作"
         "会当场在那里失败并指名文件，而不是让下一条语句在一个过时的界面上执行。"
         "anchor 的模板要随脚本一起保存。模板路径就是这个 bundle 里的文件名；"
-        "带 `/` 或 `..` 的会被拒绝，所以在这里裁图，不要从别的 bundle 借。"
+        "带 `/` 或 `..` 的会被拒绝；用 `reuse_template` 复制验证过的 PNG，或者在这里裁图。"
         "复用技能仍然用 `run(\"../other/main.ccat\")`。\n"
         "  * 每一条 `log(...)` 都要有 anchor 依据：绝不要单独打印「任务完成」。"
         "声明某个状态的 `log(...)`，就放在确认该状态的那个模板的 `wait_until` 或 "
@@ -358,6 +330,8 @@ RULES = {
         "`save_script(\"{graph}.{anchor}.{action}\")` 和 `save_template` 保存。"
         "`stzb.kucang.claim` 带着 `[action of stzb on kucang]` 标签。"
         "用 `run_script` 加 `run(\"{graph}.{anchor}.{action}/main.ccat\")` 验证。"
+        "批量补边只处理 brief 列明的同图 2–3 条已知 page 新边，每条各自保存、依次验证；"
+        "新屏和已有 bundle 修复仍单独交接，不扩大写权限。"
     ),
     "图的规则": (
         "  * 一次运行起步的那个界面，anchor id 是 `entry`，即使 brief 里把它"
@@ -381,6 +355,9 @@ RULES = {
         "界面；`kind: transient` 是加载或过渡界面——你可能正处在上面，"
         "但它不是你该去的地方，所以没有边；`kind: popup` 配 "
         "`close: <关掉它的那个 bundle>`，是可以盖在任何界面上的弹窗。\n"
+        "  * 边的两端必须都是 page，popup 和 transient 都不接边。触发弹窗的点击是"
+        "起始 page 的 action，关闭逻辑放在 popup 的 close bundle。背景 page 在弹窗下"
+        "仍可识别是允许的，locate 会先认 popup，不用改匹配阈值。\n"
         "  * 一条边可以分支——冷启动和热启动走不同的路——但它不检查自己的两端，"
         "也绝不调用 `goto`：图会检查它从 a 起步，并给 b 20 秒出现的时间。\n"
         "  * 耗时更长的边自己等：对 b 的模板 `wait_until`，"
@@ -391,6 +368,11 @@ RULES = {
         "  * action 的脚本不调用 `goto`，也不自己 `at`；它中途可以离开页面。"
         "一个任务就是 `goto` 到那个页面，"
         "`run(\"{graph}.{anchor}.{action}/main.ccat\")`，然后核对结果。\n"
+        "  * action 的返回值表示目标是否达成：看到明确的已完成状态也返回 true，"
+        "控件缺失且没有完成证据时返回 false，不能都当作已完成。图引擎把 false 视为失败。"
+        "点击分支必须在输入后用 `wait_until` 确认完成状态。验证时分别记录：实际执行输入并"
+        "断言成功、已完成而安全跳过、控件缺失而失败；只跑过跳过分支时明确写点击分支未验证。"
+        "过渡画面没观察到就写未确认，不能从没有报错推断它发生过。\n"
     ),
 }
 
@@ -445,7 +427,8 @@ SCRIPTER_PERSONA = (
     "你替 operator 写和修 .ccat bundle。你从不和用户说话；你的回复就是一次"
     "工具结果。干完之后调用 Handoff 收尾：status 是 `saved`、`updated` 或 "
     "`failed` 之一（这三个词照抄英文，不要翻译），summary 用一到三句话说明"
-    "你做了什么、这次运行最后怎么样了。回答之前先用工具把活干完：读和写 bundle、"
+    "你做了什么、这次运行最后怎么样了。把写脚本时从截图确认的新界面规律放入 "
+    "ui_style，供下次定位控件和选模板时参考。回答之前先用工具把活干完：读和写 bundle、"
     "把每个模板都裁好、跑一遍、再按报错修好。之前交接的记录只作参考。"
     "这次要产出什么，只看最后这份 brief。brief 里没有的约束，对你来说不存在。"
 )
@@ -484,37 +467,38 @@ HANDOFF_MAX_ROUNDS = 60
 
 
 def run_scripter(args: dict, host_tools: list,
-                 max_model_rounds: int | None = None) -> str:
+                 max_model_rounds: int | None = None) -> runner.ToolResult:
     """Run the scripter to the end and return the text the operator should see.
 
     A failure here is a tool result, not a failed operator turn.
     """
     goal = str(args.get("goal") or "").strip()
     if not goal:
-        return "error: goal 为空"
+        return runner.ToolResult("error: goal 为空", error_code="invalid_args")
     _CALLS.clear()
     brief = brief_of(args)
     with observability.span("author-script", brief) as (callbacks, obs):
-        def note(text: str) -> str:
+        def note(text: str, error_code: str = "") -> runner.ToolResult:
             if obs is not None:
                 obs.update(output={"reply": text})
-            return text
+            return runner.ToolResult(text, error_code=error_code)
 
         token = None
+        scope_token = None
         begun = False
         entered = False
         try:
             import graph
-            graph.begin_fail_counts()
+            runner.begin_fail_counts()
             begun = True
-            if handoff_may_change(args):
-                token = arm_freeze(None)
-            else:
-                listed = tools.call_cpp("list_scripts", {})
-                if not listed.get("ok"):
-                    return note("error: " + str(listed.get("error", "")))
-                token = arm_freeze(frozenset(
-                    bundle_names_of(str(listed.get("text") or ""))))
+            allowed = repair_targets(args)
+            scope_token = tools.arm_write_scope(allowed)
+            listed = tools.call_cpp("list_scripts", {})
+            if not listed.get("ok"):
+                return note("error: " + str(listed.get("error", "")),
+                            str(listed.get("error_code") or "host_error"))
+            token = arm_freeze(frozenset(
+                bundle_names_of(str(listed.get("text") or ""))) - allowed)
             if max_model_rounds is None:
                 max_model_rounds = graph.MAX_MODEL_ROUNDS
             max_model_rounds = min(max_model_rounds, HANDOFF_MAX_ROUNDS)
@@ -539,13 +523,14 @@ def run_scripter(args: dict, host_tools: list,
             # shows only that the handoff came back with nothing.
             if os.environ.get("CAMPCAT_LLM_TRACE"):
                 print(f"[handoff] error: {exc}", file=sys.stderr, flush=True)
-            return note("error: " + str(exc))
+            return note("error: " + str(exc), "handoff_error")
         finally:
             if token is not None:
                 disarm_freeze(token)
+            if scope_token is not None:
+                tools.disarm_write_scope(scope_token)
             if begun:
-                import graph
-                graph.end_fail_counts()
+                runner.end_fail_counts()
             if entered:
                 import agent.region_review as region_review
                 region_review.end_handoff()
@@ -561,13 +546,16 @@ def run_scripter(args: dict, host_tools: list,
                       file=sys.stderr, flush=True)
                 print("[handoff] roles: " + _roles(out.get("messages") or []),
                       file=sys.stderr, flush=True)
-            return note("error: " + str(out["error"]))
+            return note("error: " + str(out["error"]), "model_error")
         reply = (out.get("reply") or "").strip()
         if not reply:
             own = session.own_since(out.get("messages") or [],
                                     out.get("turn_mark"))
-            return note(_no_summary(own))
-        return note(reply)
+            return note(_no_summary(own), "handoff_failed")
+        # Older model histories end with a bare status instead of Handoff.
+        legacy_failed = reply.split(None, 1)[0].rstrip(":") == "failed"
+        return note(reply, out.get("failure_code") or (
+            "handoff_failed" if legacy_failed else ""))
 
 
 def _roles(messages: list) -> str:
@@ -608,7 +596,7 @@ def _scripter_build(state: dict) -> dict:
     frame = session.latest_frame()
     if frame is not None:
         messages.append(frame)
-    mark = session.new_mark("brief")
+    mark = session.new_mark("scripter-turn")
     # Lessons ride on the brief, not the system prefix: a new note would
     # otherwise make every earlier handoff miss the provider's cache.
     messages.append(HumanMessage(
@@ -624,20 +612,18 @@ def _scripter_invoke(state: dict) -> dict:
     handoff result is the last round alone: an announcement before a tool
     call must not prefix `saved`, and must not hide an empty ending.
     """
-    import graph
     fresh = dict(state)
     fresh["reply"] = ""
-    return graph._invoke(fresh, state.get("tools") or [], subagent.chunk_sink)
+    return runner.invoke(fresh, state.get("tools") or [], subagent.chunk_sink)
 
 
 def _apply_scripter_tools(state: dict) -> dict:
-    import graph
     messages = list(state.get("messages") or [])
     calls = getattr(messages[-1], "tool_calls", None) or []
 
-    done: list[str] = []
+    done: list[runner.ToolResult] = []
 
-    def run_one(call: dict) -> tuple[object, list]:
+    def run_one(call: dict) -> runner.ToolResult:
         name = call.get("name", "")
         args = call.get("args") or {}
         if name == "Handoff":
@@ -646,57 +632,62 @@ def _apply_scripter_tools(state: dict) -> dict:
             try:
                 got = Handoff.model_validate(args)
             except ValidationError:
-                return "error: Handoff 的 status 只能是 saved、updated 或 failed", []
+                return runner.ToolResult(
+                    "error: Handoff 的 status 只能是 saved、updated 或 failed",
+                    error_code="invalid_handoff")
             text = got.status if not got.summary.strip() else (
                 got.status + "\n" + got.summary.strip())
-            done.append(text)
-            return text, []
+            outcome = runner.ToolResult(
+                text, error_code="handoff_failed" if got.status == "failed" else "")
+            done.append(outcome)
+            return outcome
         if name == diagnoser.DIAGNOSE_TEMPLATE_NAME:
             # The shot this diagnosis takes is the one a re-cut is checked
             # against, so it has to stay in the scripter's messages.
-            before = session._LATEST_NUM
+            before = session.latest_shot()
             with subagent.working(
                     "diagnoser",
                     f"{args.get('bundle', '')}/{args.get('template', '')}") as run:
-                content = diagnoser.run_diagnoser(args)
-                run.settle(content)
+                outcome = diagnoser.run_diagnoser(args)
+                run.settle(outcome.content, ok=not outcome.failed)
             pics: list = []
-            if session._LATEST_NUM != before:
+            if session.latest_shot() != before:
                 frame = session.latest_frame()
                 if frame is not None:
                     pics.append(frame)
-            return content, pics
+            return runner.ToolResult(outcome.content, pics, outcome.error_code)
         frozen = _frozen.get()
         if frozen is not None:
             refusal = refuse_existing(name, args, frozen)
             if refusal:
-                return refusal, []
-        return graph._host_result(name, args)
+                return runner.ToolResult(refusal, error_code="write_scope")
+        return runner.host_result(name, args)
 
-    def record(call: dict) -> tuple[object, list]:
+    def record(call: dict) -> runner.ToolResult:
         """`run_one`, plus a line in the trajectory the reflection reads.
 
         Recorded after the call so a failure is recorded as one. An interrupt
         raises before reaching this, which is right: the handoff never finished.
         """
         out = run_one(call)
-        text = str(out[0])
-        failed = text.startswith("error:")
+        text = str(out.content)
         _CALLS.append({
             "name": call.get("name", ""),
             "args": call.get("args") or {},
-            "failed": failed,
-            "error": text[:150] if failed else "",
+            "failed": out.failed,
+            "error": text[:150] if out.failed else "",
+            "error_code": out.error_code,
         })
         return out
 
-    results, pictures, interrupted = graph._run_calls(calls, record)
+    results, pictures, interrupted = runner.run_calls(calls, record)
     out = {
         "messages": session.demote_pictures(messages + results + pictures),
         "tool_rounds": state.get("tool_rounds", 0) + 1,
     }
     if done:
-        out["reply"] = done[-1]
+        out["reply"] = done[-1].content
+        out["failure_code"] = done[-1].error_code
         out["finished"] = True
     if interrupted:
         out["interrupted"] = True
@@ -718,9 +709,10 @@ def _scripter_commit(state: dict) -> dict:
         if kept:
             session.append_scripter_turn(
                 state.get("text", ""),
-                kept + [AIMessage(content=graph.stopped_note(state["error"]))])
+                kept + [AIMessage(content=graph.stopped_note(state["error"]))],
+                mark=state.get("turn_mark"))
         return {}
-    session.append_scripter_turn(state.get("text", ""), own)
+    session.append_scripter_turn(state.get("text", ""), own, mark=state.get("turn_mark"))
     return {}
 
 

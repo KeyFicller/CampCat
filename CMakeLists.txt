@@ -143,10 +143,11 @@ FetchContent_Declare(
   portable_file_dialogs
   GIT_REPOSITORY "https://github.com/samhocevar/portable-file-dialogs.git"
   GIT_TAG        c12ea8c9a727f5320a2b4570aee863bbede2a204
-  GIT_SHALLOW    TRUE
   GIT_PROGRESS   TRUE
   GIT_SUBMODULES ""
 )
+# No GIT_SHALLOW: a pinned commit is not on a branch tip, and a shallow fetch of
+# one is not something every server allows.
 FetchContent_MakeAvailable(portable_file_dialogs)
 
 # Markdown rendering for the LLM reply bubbles. Upstream ships only a header,
@@ -156,10 +157,11 @@ FetchContent_Declare(
   imgui_markdown
   GIT_REPOSITORY "https://github.com/juliettef/imgui_markdown.git"
   GIT_TAG        4acbf80584753e15ea54eb271129995862daac8f
-  GIT_SHALLOW    TRUE
   GIT_PROGRESS   TRUE
   GIT_SUBMODULES ""
 )
+# No GIT_SHALLOW: a pinned commit is not on a branch tip, and a shallow fetch of
+# one is not something every server allows.
 FetchContent_MakeAvailable(imgui_markdown)
 
 add_library(imgui_markdown INTERFACE)
@@ -172,10 +174,11 @@ FetchContent_Declare(
   imgui_colortextedit
   GIT_REPOSITORY "https://github.com/KeyFicller/ImGuiColorTextEdit.git"
   GIT_TAG        14fdfd4c2f19846aac6c6f8010899021022a9c16
-  GIT_SHALLOW    TRUE
   GIT_PROGRESS   TRUE
   GIT_SUBMODULES ""
 )
+# No GIT_SHALLOW: a pinned commit is not on a branch tip, and a shallow fetch of
+# one is not something every server allows.
 FetchContent_MakeAvailable(imgui_colortextedit)
 
 # ImGuizmo's GraphEditor: the canvas the Graph page draws. Only that widget is
@@ -248,17 +251,23 @@ add_library(campcat_core STATIC
   campcat/sources/cpp/src/core/app/automation_log.cpp
   campcat/sources/cpp/src/core/script/ccat_lexer.cpp
   campcat/sources/cpp/src/core/script/ccat_bundle.cpp
+  campcat/sources/cpp/src/core/script/bundle_store.cpp
   campcat/sources/cpp/src/core/script/ccat_graph.cpp
   campcat/sources/cpp/src/core/script/ccat_parser.cpp
   campcat/sources/cpp/src/core/script/ccat_interpreter.cpp
+  campcat/sources/cpp/src/core/script/replay_audit.cpp
   campcat/sources/cpp/src/core/script/ccat_repl.cpp
   campcat/sources/cpp/src/core/process.cpp
   campcat/sources/cpp/src/core/llm/llm_protocol.cpp
   campcat/sources/cpp/src/core/llm/llm_memory.cpp
+  campcat/sources/cpp/src/core/llm/frame_store.cpp
+  campcat/sources/cpp/src/app/llm_controller.cpp
+  campcat/sources/cpp/src/app/shell_state.cpp
   campcat/sources/cpp/src/core/llm/llm_tools.cpp
   campcat/sources/cpp/src/core/llm/llm_consult.cpp
   campcat/sources/cpp/src/core/llm/llm_host.cpp
   campcat/sources/cpp/src/core/smoke/smoke_run.cpp
+  campcat/sources/cpp/src/core/smoke/smoke_verify.cpp
   campcat/sources/cpp/src/core/mcp/script_server.cpp
   campcat/sources/cpp/src/ccat_driver/ccat_script_profile.cpp
   campcat/sources/cpp/src/ccat_driver/ccat_script_automation.cpp
@@ -285,7 +294,6 @@ endif()
 
 add_executable(campcat
   campcat/sources/cpp/src/app/main.cpp
-  campcat/sources/cpp/src/app/shell_state.cpp
   campcat/sources/cpp/src/app/ui/llm_panel.cpp
   campcat/sources/cpp/src/app/ui/log_panel.cpp
   campcat/sources/cpp/src/app/ui/console_panel.cpp

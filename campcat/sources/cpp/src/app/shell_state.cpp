@@ -41,11 +41,6 @@ std::tm local_now() {
     return tm;
 }
 
-inline bool acquire_cycle(std::atomic<bool> &_cycle_running) {
-    bool expected = false;
-    return _cycle_running.compare_exchange_strong(expected, true);
-}
-
 inline void release_cycle(std::atomic<bool> &_cycle_running) {
     _cycle_running.store(false);
 }
@@ -222,8 +217,7 @@ void shell_state::run_automation_thread_body(
             &adb, &_snap_shell, &_snap_ccat,
             campcat::make_consult_ask(
                 &adb, &campcat::consult_host(),
-                std::filesystem::path(_snap_shell.config_home)
-                    .parent_path(),
+                _snap_shell.project_root(),
                 _snap_shell.llm.provider,
                 [this]() { return stop_requested.load(); }));
         const auto should_stop = [this]() { return stop_requested.load(); };
@@ -244,10 +238,12 @@ shell_state::capture_bundle_snapshot() {
 }
 
 void shell_state::run_single_job() {
-    if (!acquire_cycle(cycle_running)) {
+    auto owner = device_tasks.try_acquire();
+    if (!owner) {
         append_log("[job] busy");
         return;
     }
+    cycle_running.store(true);
     stop_requested.store(false);
 
     if (worker_thread.joinable()) {
@@ -257,7 +253,8 @@ void shell_state::run_single_job() {
     try {
         auto snap = capture_bundle_snapshot();
         worker_thread =
-            std::thread([this, shell = std::move(std::get<0>(snap)),
+            std::thread([this, owner = std::move(*owner),
+                         shell = std::move(std::get<0>(snap)),
                          ccat_bundle = std::move(std::get<1>(snap))]() mutable {
                 run_automation_thread_body(std::move(shell),
                                            std::move(ccat_bundle));
@@ -269,17 +266,20 @@ void shell_state::run_single_job() {
 }
 
 void shell_state::run_console_source_job(std::string _source) {
-    if (!acquire_cycle(cycle_running)) {
+    auto owner = device_tasks.try_acquire();
+    if (!owner) {
         append_log("[console] busy");
         return;
     }
+    cycle_running.store(true);
     stop_requested.store(false);
     if (worker_thread.joinable()) {
         worker_thread.join();
     }
     try {
         auto snap = capture_bundle_snapshot();
-        worker_thread = std::thread([this, source = std::move(_source),
+        worker_thread = std::thread([this, owner = std::move(*owner),
+                                     source = std::move(_source),
                                      shell = std::move(std::get<0>(snap)),
                                      ccat_bundle = std::move(
                                          std::get<1>(snap))]() mutable {
@@ -306,7 +306,7 @@ void shell_state::run_console_source_job(std::string _source) {
                 };
                 const auto ask = campcat::make_consult_ask(
                     &adb, &campcat::consult_host(),
-                    std::filesystem::path(shell.config_home).parent_path(),
+                    shell.project_root(),
                     shell.llm.provider, should_stop);
                 const auto res = campcat::run_ccat_program(
                     &adb, &shell, images, script_abs, *prog, should_stop, ask);
@@ -327,20 +327,29 @@ void shell_state::run_console_source_job(std::string _source) {
 }
 
 campcat::mumu_status
-shell_state::start_mumu_blocking(const std::function<bool()> &_should_stop) {
+shell_state::start_mumu_blocking(
+    const std::function<bool()> &_should_stop,
+    const device_task_lease::owner *_owner) {
+    std::optional<device_task_lease::owner> own_launch;
+    if (_owner) {
+        if (!device_tasks.owns(*_owner)) {
+            return {campcat::mumu_state::failed, "invalid device task owner"};
+        }
+    } else {
+        own_launch = device_tasks.try_acquire();
+        if (!own_launch) {
+            return {campcat::mumu_state::failed, "another device task is running"};
+        }
+    }
     if (mumu_launching.exchange(true)) {
         return {campcat::mumu_state::failed,
                 "another launch is already in flight"};
     }
-    if (!acquire_cycle(cycle_running)) {
-        mumu_launching.store(false);
-        return {campcat::mumu_state::failed, "an automation cycle is running"};
-    }
-    campcat::mumu_status st =
-        mumu_launch_sequence(snapshot_cfg(), _should_stop);
-    mumu_launching.store(false);
-    release_cycle(cycle_running);
-    return st;
+    struct reset_launch {
+        std::atomic<bool> &launching;
+        ~reset_launch() { launching.store(false); }
+    } reset{mumu_launching};
+    return mumu_launch_sequence(snapshot_cfg(), _should_stop);
 }
 
 campcat::mumu_status
@@ -378,8 +387,8 @@ void shell_state::refresh_scheduler_locked(bool _immediate_first_tick) {
         [this]() {
             // run_single_job() would catch this too, but its "[job] busy" reads
             // as a UI murmur; a missed tick is worth an error.
-            if (cycle_running.load()) {
-                append_log("[sched] ERROR: previous cycle still running; tick "
+            if (device_tasks.busy()) {
+                append_log("[sched] ERROR: another device task is running; tick "
                            "skipped, waiting for the next interval");
                 return;
             }

@@ -16,7 +16,14 @@ import sys
 import time
 from uuid import uuid4
 
-from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.messages import (
+    AIMessage,
+    HumanMessage,
+    SystemMessage,
+    ToolMessage,
+    messages_from_dict,
+    messages_to_dict,
+)
 
 try:                       # optional: without it the older frames are dropped
     from PIL import Image  # instead of scaled, which is what this did before
@@ -173,6 +180,29 @@ LEDGER_MAX_CHARS = 1500
 _LESSONS: list[str] = []
 
 
+# The conversation's event log, appended as it happens so a crash costs the
+# current turn at most. Empty until a request names the file, which is what
+# `--once`, a unit test and a host that predates the field all look like: no log
+# at all, and every function below is a no-op.
+LOG_VERSION = 1
+# Turns kept in the file. `compact` has long since folded the older ones into
+# the rolling summary, which lives in the history -- and the history is what
+# this log restores, so nothing is lost by trimming.
+LOG_KEEP_TURNS = 50
+# Closing notes for a turn the log ends in the middle of. Two of them, because
+# the two states call for different next moves: nothing ran, or something may
+# have moved the device.
+LOG_NOT_STARTED = "上一轮还没开始任何操作"
+# `tool_calls` with no result is a 400 on the next request, and `_paired` would
+# otherwise drop the whole assistant message -- taking "the device may have
+# moved" with it.
+LOG_INTERRUPTED = "上一轮在进程中断前没跑完；设备可能已经被动过，先重新截屏再判断"
+
+_LOG_PATH = ""
+_LOG = None
+_LOG_MARK: str | None = None
+
+
 def set_scripter_memory(text: str) -> None:
     """Remember the scripter notes the host sent with this turn."""
     global _SCRIPTER_MEMORY
@@ -216,16 +246,29 @@ def reset() -> None:
     global _LATEST_NUM, _LATEST_B64, _LATEST_TIME, _MEMORIZED_UPTO, _TURN_PREV_SHOT
     global _SCRIPTER_MEMORIZED_UPTO, _SCRIPTER_MEMORY, _LESSONS
     global _TURN_SEQ, _LLM_CALLS, _TOOL_CALLS, _CONTEXT
+    global _LOG_PATH, _LOG, _LOG_MARK
     import agent.memorier as memorier
     _review_turn()
     _MESSAGES.clear()
+    # Deleted rather than truncated: the path is forgotten too, so the next turn
+    # rebuilds the file through `attach_log` instead of appending to a leftover
+    # of the conversation the user just dropped.
+    if _LOG is not None:
+        _LOG.close()
+        _LOG = None
+    if _LOG_PATH:
+        try:
+            os.remove(_LOG_PATH)
+        except OSError:
+            pass
+    _LOG_PATH = ""
+    _LOG_MARK = None
     _SCRIPTER_MESSAGES.clear()
     _LATEST_NUM = 0
     _LATEST_B64 = ""
     _LATEST_TIME = 0.0
     _TURN_PREV_SHOT = None
-    memorier._MW = None
-    memorier._SCRIPTER_MW = None
+    memorier.reset()
     _MEMORIZED_UPTO = 0
     _SCRIPTER_MEMORIZED_UPTO = 0
     _SCRIPTER_MEMORY = ""
@@ -281,13 +324,59 @@ def size() -> int:
                if isinstance(m.id, str) and m.id.startswith(_TURN_MARK))
 
 
-def history() -> list:
+def history(agent: str = "operator") -> list:
     """The conversation, for the request being assembled.
 
     A copy: the caller extends it into its own list, so nothing outside this
     module ends up holding the live one.
     """
-    return list(_MESSAGES)
+    return list(_history_state(agent)[0])
+
+
+def _history_state(agent: str) -> tuple[list, int, str]:
+    if agent == "operator":
+        return _MESSAGES, _MEMORIZED_UPTO, _TURN_MARK
+    if agent == "scripter":
+        return _SCRIPTER_MESSAGES, _SCRIPTER_MEMORIZED_UPTO, _SCRIPTER_TURN_MARK
+    raise ValueError(f"unknown history agent: {agent}")
+
+
+def _set_memory_cursor(cursor: int, agent: str) -> None:
+    global _MEMORIZED_UPTO, _SCRIPTER_MEMORIZED_UPTO
+    if agent == "operator":
+        _MEMORIZED_UPTO = cursor
+    else:
+        _SCRIPTER_MEMORIZED_UPTO = cursor
+
+
+def memory_history(agent: str = "operator") -> list:
+    """Only the messages not yet covered by a durable host memory receipt."""
+    messages, cursor, _ = _history_state(agent)
+    return list(messages[cursor:])
+
+
+def replace_history(messages: list, agent: str = "operator") -> None:
+    """Install a compacted history without moving its memory cursor past new work."""
+    old, cursor, _ = _history_state(agent)
+    covered = {id(message) for message in old[:cursor]}
+    if cursor == len(old):
+        end = len(messages)
+    else:
+        # A new summary may include pending turns. Revisit it rather than
+        # assuming that a replacement at the old offset is already committed.
+        end = next((i for i, message in enumerate(messages)
+                    if id(message) not in covered), len(messages))
+    old[:] = messages
+    _set_memory_cursor(end, agent)
+
+
+def turn_span(messages: list, agent: str = "operator") -> tuple[str, str]:
+    """The first and last actual turn marks in a memory proposal."""
+    _, _, prefix = _history_state(agent)
+    marks = [str(message.id) for message in messages
+             if isinstance(message, HumanMessage)
+             and str(message.id).startswith(prefix + ":")]
+    return (marks[0], marks[-1]) if marks else ("", "")
 
 
 def start_turn() -> None:
@@ -297,7 +386,7 @@ def start_turn() -> None:
     _review_turn()
 
 
-def append_turn(text: str, raw: list) -> None:
+def append_turn(text: str, raw: list, *, mark: str | None = None) -> None:
     """Add one turn to the conversation, as it really happened.
 
     `raw` is the turn's own messages: the model's calls and the host's own
@@ -307,16 +396,310 @@ def append_turn(text: str, raw: list) -> None:
     captions, and a caption is where the frame number lives.
     """
     global _TURN_SEQ
-    _TURN_SEQ += 1
-    _MESSAGES.append(HumanMessage(content=text, id=f"{_TURN_MARK}:{_TURN_SEQ}"))
+    mark = mark or new_mark(_TURN_MARK)
+    _TURN_SEQ = max(_TURN_SEQ, _seq_of(mark))
+    _MESSAGES.append(HumanMessage(content=text, id=mark))
     _MESSAGES.extend(_detach_picture(m) if _is_picture(m) else m for m in raw)
+
+
+# --------------------------------------------------------------------------
+# The event log: what lets the next launch remember this conversation.
+
+
+def attach_log(path: str) -> int:
+    """Point the conversation at its log and load what an earlier run wrote.
+
+    Called on every turn with the host's path, so a repeat is a no-op: without
+    that, the second turn of a session would replay the file into a history it
+    is already in. Returns the turns restored, for the host to show.
+    """
+    global _LOG_PATH, _LOG
+    if not path:
+        return 0
+    if _LOG is not None:
+        return 0
+    _LOG_PATH = path
+    restored = _restore(path)
+    try:
+        _LOG = open(path, "a", encoding="utf-8", buffering=1)
+    except OSError as exc:  # noqa: BLE001 - no log, but the turn still runs
+        print(f"[sidecar] transcript not written: {exc}", file=sys.stderr)
+    return restored
+
+
+def log_turn(text: str, mark: str) -> None:
+    """Record the turn's instruction, before the model has done anything.
+
+    `mark` becomes the id of the message `append_turn` will store, so a replay
+    rebuilds exactly the history the turn would have had.
+    """
+    global _LOG_MARK
+    if _LOG is None:
+        return
+    _LOG_MARK = mark
+    _write({"v": LOG_VERSION, "kind": "turn", "id": mark, "text": text,
+            "at": time.time()})
+
+
+def log_intent(message: object) -> None:
+    """Record what the model asked for, before any of it runs.
+
+    This is the record the whole log turns on. The device moves when a tool
+    runs, and a result can only be written if the process lives to see it.
+    Without a record taken beforehand, "nothing ran" and "it ran and the process
+    died" leave the same bytes on disk.
+    """
+    if _LOG is None:
+        return
+    _write({"v": LOG_VERSION, "kind": "intent", "msgs": _encode([message])})
+
+
+def log_round(messages: list) -> None:
+    """Record the turn so far, replacing the copy the last record holds.
+
+    Replaced rather than appended: `run_tools` hands the whole turn each time,
+    and a turn that grew by one batch must not be replayed twice. Replacing also
+    makes the write self-correcting -- a picture the history has since dropped
+    stops being in the log too.
+    """
+    if _LOG is None:
+        return
+    _write({"v": LOG_VERSION, "kind": "round",
+            "msgs": _encode(own_since(messages, _LOG_MARK))})
+
+
+def log_end(note: str = "") -> None:
+    """Close the turn in flight. A turn that ends without a note ended well."""
+    if _LOG is None:
+        return
+    _write({"v": LOG_VERSION, "kind": "end", "note": note})
+
+
+def _write(record: dict) -> None:
+    """One line, flushed at once: a batched line is a line a crash can take."""
+    try:
+        _LOG.write(json.dumps(record, ensure_ascii=False,
+                              separators=(",", ":"), default=str) + "\n")
+        _LOG.flush()
+    except OSError as exc:  # noqa: BLE001 - a lost line is not a lost turn
+        print(f"[sidecar] transcript write failed: {exc}", file=sys.stderr)
+
+
+def _encode(messages: list) -> list:
+    """The messages as JSON, with every picture's bytes dropped.
+
+    Same rule as `append_turn`: the caption and frame number survive, the base64
+    does not. A log carrying screenshots would be megabytes a round.
+    """
+    return messages_to_dict(
+        [_detach_picture(m) if _is_picture(m) else m for m in messages])
+
+
+def _restore(path: str) -> int:
+    """Load the log into the history this process will serve.
+
+    A file that cannot be read starts the conversation empty, and is left alone:
+    overwriting something we failed to look at is how a log becomes no log.
+    """
+    global _TURN_SEQ, _MEMORIZED_UPTO, _SCRIPTER_MEMORIZED_UPTO
+    try:
+        with open(path, "rb") as f:
+            data = f.read()
+    except FileNotFoundError:
+        return 0
+    except OSError as exc:
+        print(f"[sidecar] transcript unreadable, starting empty: {exc}",
+              file=sys.stderr)
+        return 0
+
+    end = data.rfind(b"\n") + 1
+    if end != len(data):
+        # Nothing is ever rewritten in the middle, so a half-written line can
+        # only be the last one. Cutting it keeps the next append a whole line.
+        try:
+            with open(path, "r+b") as f:
+                f.truncate(end)
+        except OSError as exc:
+            print(f"[sidecar] transcript tail not repaired: {exc}",
+                  file=sys.stderr)
+            return 0
+        data = data[:end]
+
+    turns = _replay(_decode(data))
+    if len(turns) > LOG_KEEP_TURNS:
+        turns = turns[-LOG_KEEP_TURNS:]
+        _rewrite(path, turns)
+
+    for turn in turns:
+        _TURN_SEQ = max(_TURN_SEQ, _seq_of(turn["id"]))
+        _MESSAGES.append(HumanMessage(content=turn["text"], id=turn["id"]))
+        _MESSAGES.extend(turn["msgs"])
+    # How much of this the notes already cover is known only to the host, which
+    # sends the mark its last pass reached on the next turn. Assuming "all of
+    # it" is what silently dropped every turn written after the last pass; 0
+    # errs toward folding something twice instead.
+    _MEMORIZED_UPTO = 0
+    # The scripter's history is not in this log, so it starts empty here. A
+    # cursor left at its pre-restart value would fold the same words twice.
+    _SCRIPTER_MEMORIZED_UPTO = 0
+    return len(turns)
+
+
+def set_memory_upto(mark: str, agent: str = "operator") -> None:
+    """Skip the history the notes already cover, as told by the host.
+
+    `mark` is the turn a memory pass reached. That turn's own replies were
+    folded with it, so the cursor goes to the *next* turn's start. An unknown
+    mark leaves the cursor alone: the host's ledger and this history disagree,
+    and folding everything again only costs one pass.
+    """
+    if not mark:
+        return
+    messages, cursor, prefix = _history_state(agent)
+    for i, m in enumerate(messages):
+        if not isinstance(m, HumanMessage) or str(m.id) != mark:
+            continue
+        end = len(messages)
+        for j in range(i + 1, len(messages)):
+            if str(getattr(messages[j], "id", "")).startswith(prefix + ":"):
+                end = j
+                break
+        # `reset` may already have moved it past this; never go backwards.
+        _set_memory_cursor(max(cursor, end), agent)
+        return
+
+
+def _decode(data: bytes) -> list[dict]:
+    """The records, skipping any line that is not one."""
+    records = []
+    for line in data.decode("utf-8", "replace").splitlines():
+        if not line.strip():
+            continue
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError as exc:
+            print(f"[sidecar] transcript line skipped: {exc}", file=sys.stderr)
+            continue
+        if isinstance(record, dict):
+            records.append(record)
+    return records
+
+
+def _replay(records: list[dict]) -> list[dict]:
+    """Rebuild the turns, one `end` or one interruption at a time."""
+    turns: list[dict] = []
+    turn: dict | None = None
+    how = ""
+    for record in records:
+        kind = record.get("kind")
+        if kind == "turn":
+            if turn is not None:
+                turns.append(_close(turn, how))
+            turn = {"id": str(record.get("id") or ""),
+                    "text": str(record.get("text") or ""),
+                    "at": float(record.get("at") or 0.0), "msgs": []}
+            how = "turn"
+        elif turn is None:
+            continue  # a record before any turn: nothing to attach it to
+        elif kind in ("intent", "round"):
+            turn["msgs"] = messages_from_dict(record.get("msgs") or [])
+            how = kind
+        elif kind == "end":
+            turn["note"] = str(record.get("note") or "")
+            how = "end"
+    if turn is not None:
+        turns.append(_close(turn, how))
+    return turns
+
+
+def _close(turn: dict, how: str) -> dict:
+    """Finish one turn: it ended, or the log stops in the middle of it.
+
+    `intent` is the one that matters. The model had asked for those calls and
+    the process died before any result came back, so every call gets a
+    placeholder -- and the note says so, because the device may have moved
+    without the history showing it.
+    """
+    messages = turn["msgs"]
+    if how == "end":
+        messages = _drop_dangling(messages)
+        if turn.get("note"):
+            messages = messages + [AIMessage(content=turn["note"])]
+    elif how == "intent":
+        calls = getattr(messages[-1], "tool_calls", None) if messages else None
+        for call in calls or []:
+            messages.append(ToolMessage(content=LOG_INTERRUPTED,
+                                        tool_call_id=str(call.get("id") or "")))
+        messages.append(AIMessage(content=LOG_INTERRUPTED))
+    elif how == "turn":
+        messages.append(AIMessage(content=LOG_NOT_STARTED))
+    else:
+        messages.append(AIMessage(content=LOG_INTERRUPTED))
+    turn["msgs"] = messages
+    turn.pop("note", None)
+    return turn
+
+
+def _drop_dangling(messages: list) -> list:
+    """Drop a trailing call the host never answered.
+
+    `commit` does the same repair before recording a failed turn -- mirrored
+    here rather than imported, because `memorier` imports this module. Left in,
+    the next request is a 400, and no later repair reaches it: it is no longer
+    the last message once the closing note follows it.
+    """
+    kept = list(messages)
+    while kept:
+        calls = getattr(kept[-1], "tool_calls", None) or []
+        if not calls:
+            break
+        answered = {str(getattr(m, "tool_call_id", "")) for m in kept
+                    if isinstance(m, ToolMessage)}
+        if all(str(c.get("id") or "") in answered for c in calls):
+            break
+        kept.pop()
+    return kept
+
+
+def _rewrite(path: str, turns: list) -> None:
+    """Replace the file with these turns, atomically.
+
+    A temp file and a rename: a process killed mid-write leaves the old log,
+    never half of a new one.
+    """
+    tmp = path + ".tmp"
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            for turn in turns:
+                f.write(json.dumps({"v": LOG_VERSION, "kind": "turn",
+                                    "id": turn["id"], "text": turn["text"],
+                                    "at": turn["at"]},
+                                   ensure_ascii=False,
+                                   separators=(",", ":")) + "\n")
+                if turn["msgs"]:
+                    f.write(json.dumps({"v": LOG_VERSION, "kind": "round",
+                                        "msgs": _encode(turn["msgs"])},
+                                       ensure_ascii=False,
+                                       separators=(",", ":")) + "\n")
+            f.flush()
+        os.replace(tmp, path)
+    except OSError as exc:
+        print(f"[sidecar] transcript not trimmed: {exc}", file=sys.stderr)
+
+
+def _seq_of(mark: str) -> int:
+    """The turn number a mark carries, or 0 for one that carries none."""
+    _, _, suffix = mark.partition(":")
+    number = suffix.partition(":")[0]
+    return int(number) if number.isdigit() else 0
 
 
 def new_mark(prefix: str) -> str:
     """A unique id for the message that starts a turn."""
     global _TURN_SEQ
     _TURN_SEQ += 1
-    return f"{prefix}:{_TURN_SEQ}"
+    # Ledger receipts outlive resets and the scripter's unlogged history.
+    return f"{prefix}:{_TURN_SEQ}:{uuid4().hex}"
 
 
 def own_since(messages: list, mark: str | None) -> list:
@@ -339,22 +722,27 @@ def own_since(messages: list, mark: str | None) -> list:
 
 def scripter_history() -> list:
     """The scripter's conversation. A copy, for the same reason as `history`."""
-    return list(_SCRIPTER_MESSAGES)
+    return history("scripter")
 
 
-def append_scripter_turn(brief: str, raw: list) -> None:
+def append_scripter_turn(brief: str, raw: list, *, mark: str | None = None) -> None:
     """One handoff, kept where the operator's history cannot see it.
 
     Same rule as `append_turn`: pictures lose their bytes and keep the caption
     that names the frame. The id prefix is not `turn`, so `size()` ignores it.
     """
     global _TURN_SEQ
-    _TURN_SEQ += 1
+    mark = mark or new_mark(_SCRIPTER_TURN_MARK)
+    _TURN_SEQ = max(_TURN_SEQ, _seq_of(mark))
     _SCRIPTER_MESSAGES.append(
-        HumanMessage(content=brief, id=f"{_SCRIPTER_TURN_MARK}:{_TURN_SEQ}"))
+        HumanMessage(content=brief, id=mark))
     _SCRIPTER_MESSAGES.extend(
         _detach_picture(m) if _is_picture(m) else m for m in raw)
 
+
+def latest_shot() -> int:
+    """The newest frame number, for detecting a nested agent's screenshot."""
+    return _LATEST_NUM
 
 
 def latest_frame() -> HumanMessage | None:

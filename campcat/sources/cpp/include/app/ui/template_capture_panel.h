@@ -26,4 +26,4 @@ void template_capture_panel_shutdown_gl();
  */
 void template_capture_panel_draw(campcat::app_config &cfg,
                                  const campcat::ccat_script_profile *ccat_ui,
-                                 bool disable_capture);
+                                 bool disable_capture, bool save_locked = false);

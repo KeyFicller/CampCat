@@ -291,6 +291,10 @@ may leave that screen briefly. It must not call `goto` or `at`. Templates live i
 bundle. `run("{graph}.{anchor}.{action}/main.ccat")` checks both ends the way an edge does,
 once, and does not retry: not on the anchor fails without running, back on it is success,
 another page or a 20000 ms timeout is a failure. Spending or claiming goes in an action.
+An action's answer means whether its goal is satisfied: an explicitly observed already-done
+state returns `true` without input; a missing control without completion evidence returns
+`false`. The graph treats `false` as a failed action. After input, assert the expected
+result with `wait_until`. A successful skip does not validate the input branch.
 
 ### Locating
 

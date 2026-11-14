@@ -1,5 +1,7 @@
 #pragma once
 
+#include <optional>
+#include <vector>
 #include <string>
 #include <string_view>
 
@@ -22,7 +24,8 @@ namespace campcat::llm_protocol {
 ///     script waits, and `consult_result` answers it.
 /// 11: `subagent` reports what a scripter, diagnoser or region check is doing,
 ///     for the window that shows it while it works.
-constexpr int k_protocol_version = 11;
+/// 12: scoped tool writes, structured failures and committed memory cursors.
+constexpr int k_protocol_version = 12;
 
 /**
  * @brief One decoded line from the sidecar's stdout.
@@ -58,6 +61,7 @@ struct message {
     // tool_call (the sidecar is asking us to run a tool)
     std::string call_id; ///< echoed back in the answering tool_result
     std::string tool_name;
+    std::optional<std::vector<std::string>> write_scope;
     std::string tool_args_json; ///< the model's raw arguments object, unparsed
 
     // consult_result: `text` is unused; `ok` and `answer` are the reply
@@ -144,6 +148,13 @@ std::string base64_encode(const unsigned char *_data, std::size_t _len);
  * training samples, so one sample holds one agent's regions. Omitting the
  * field (the default) leaves the ordinary toolset, which is what older
  * sidecars read.
+ * @param[in] _transcript Where the sidecar appends this conversation's event
+ * log. Omitted when empty, which is what `--once`, a unit test and a host that
+ * predates the field all ask for: no log at all.
+ * @param[in] _memory_upto The turn mark the last memory pass reached, so a
+ * restored conversation is not folded into the notes twice. Omitted when empty,
+ * which means "fold everything you hold" -- the safe side, since the cost of
+ * being wrong is one repeated pass.
  */
 std::string build_turn_request(long _id, std::string_view _text,
                                std::string_view _tools_json,
@@ -151,7 +162,9 @@ std::string build_turn_request(long _id, std::string_view _text,
                                std::string_view _scripter_memory,
                                std::string_view _provider,
                                int _max_model_rounds,
-                               bool _operator_only = false);
+                               bool _operator_only = false,
+                               std::string_view _transcript = "",
+                               std::string_view _memory_upto = "");
 
 /**
  * @brief Build one `tool_result` line answering a `tool_call`.
@@ -166,7 +179,8 @@ std::string build_turn_request(long _id, std::string_view _text,
  */
 std::string build_tool_result(std::string_view _call_id, bool _ok,
                               std::string_view _text, std::string_view _error,
-                              std::string_view _image_b64, int _shot = 0);
+                              std::string_view _image_b64, int _shot = 0,
+                              std::string_view _error_code = {});
 
 /**
  * @brief Build one `reset` request line, dropping the sidecar's history.
@@ -196,7 +210,8 @@ std::string build_interrupt_request(long _id);
  */
 std::string build_memorize_request(long _id, std::string_view _memory,
                                    std::string_view _provider,
-                                   std::string_view _agent);
+                                   std::string_view _agent,
+                                   std::string_view _memory_upto = {});
 
 /**
  * @brief Build one `consult` line: a question for the sidecar's model to

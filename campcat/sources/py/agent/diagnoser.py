@@ -16,6 +16,7 @@ from langgraph.graph import END, StateGraph
 
 import models
 import session
+import runner
 import subagent
 import tools
 
@@ -77,6 +78,7 @@ class DiagnoseState(TypedDict, total=False):
     verdict: str
     reason: str
     fix: str
+    failure_code: str
 
 
 def parse_match(error: str, template: str) -> dict | None:
@@ -108,7 +110,8 @@ def _from_reply(reply) -> dict:
                 raw = str(args)
         else:
             return {"verdict": got.verdict, "reason": got.reason, "fix": got.fix}
-    return {"verdict": "inconclusive", "reason": raw, "fix": ""}
+    return {"verdict": "inconclusive", "reason": raw, "fix": "",
+            "failure_code": "invalid_model_reply"}
 
 
 def _host_fail(reply: dict, shot: int = 0) -> dict:
@@ -117,6 +120,7 @@ def _host_fail(reply: dict, shot: int = 0) -> dict:
         "shot": shot,
         "reason": str(reply.get("error") or "宿主调用失败"),
         "fix": "",
+        "failure_code": str(reply.get("error_code") or "host_error"),
     }
 
 
@@ -128,6 +132,7 @@ def diagnose_parse(state: DiagnoseState) -> dict:
             "shot": 0,
             "reason": "报错里没有这个模板的匹配结论",
             "fix": "",
+            "failure_code": "invalid_args",
         }
     return {"match": match, "shot": 0}
 
@@ -185,6 +190,7 @@ def diagnose_judge(state: DiagnoseState) -> dict:
             "verdict": "inconclusive",
             "reason": "模型出错：" + str(exc),
             "fix": "",
+            "failure_code": "model_error",
         }
     return _from_reply(reply)
 
@@ -242,7 +248,7 @@ def _report(state: dict) -> str:
     )
 
 
-def run_diagnoser(args: dict) -> str:
+def run_diagnoser(args: dict) -> runner.ToolResult:
     """The four-line report. A user interrupt propagates."""
     import graph
     out = graph.run_subgraph(_graph(), {
@@ -251,4 +257,4 @@ def run_diagnoser(args: dict) -> str:
         "error": str(args.get("error") or ""),
         "expect": str(args.get("expect") or ""),
     })
-    return _report(out)
+    return runner.ToolResult(_report(out), error_code=out.get("failure_code") or "")

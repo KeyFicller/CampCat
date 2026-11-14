@@ -111,6 +111,9 @@ public:
      * this turn carries, and its parent anchors `.venv`/`llm/`.
      * @param[in] _provider Which model provider the sidecar should build, from
      * the settings. Taken from a snapshot, so a change mid-turn waits its turn.
+     * @param[in] _bundle The selected graph, whose ledger holds that graph's own
+     * names. Empty means no graph is selected, so only the library ledger is
+     * read.
      * @param[in] _prompt The user's instruction. Blank is rejected.
      * @param[in] _max_dispatches How many tools the host may run this turn.
      * Values below 1 use the default. A change mid-turn waits for the next one.
@@ -126,29 +129,32 @@ public:
      */
     llm_result run_turn(const std::filesystem::path &_config_home,
                         const std::string &_provider,
-                        const std::string &_prompt, int _max_dispatches,
-                        int _max_model_rounds, bool _operator_only,
+                        const std::string &_bundle, const std::string &_prompt,
+                        int _max_dispatches, int _max_model_rounds,
+                        bool _operator_only,
                         const std::filesystem::path &_repo_root = {});
 
     /// The latest usage the sidecar reported. Safe to call from the UI thread.
     llm_protocol::usage_stats usage() const;
 
     /**
-     * @brief Fold this session into the long-term notes on disk.
+     * @brief Fold this session into the long-term ledger on disk.
      *
-     * Reads the notes, has the sidecar rewrite them from the conversation it
-     * already holds, and writes the result back. A failed read is fatal to this
-     * call: notes that cannot be read are never overwritten.
+     * Reads the ledger's projection, has the sidecar propose changes from the
+     * conversation it already holds, and writes the accepted ones back. A
+     * failed read is fatal to this call: a ledger that cannot be read is never
+     * written to.
      *
-     * @param[in] _config_home The config directory, holding the memory file.
+     * @param[in] _config_home The config directory, holding the ledgers.
      * @param[in] _provider Which model provider to consolidate on. Must be the
      * same one turns use, or a Qwen-only setup fails here.
+     * @param[in] _bundle The selected graph, for the same reason as `run_turn`.
      * @param[in] _timeout_ms Hard limit on the whole request. Consolidation can
      * be slow, but the shutdown call must not be.
      */
     llm_result memorize(const std::filesystem::path &_config_home,
-                        const std::string &_provider, llm::memory_kind _kind,
-                        int _timeout_ms);
+                        const std::string &_provider, const std::string &_bundle,
+                        llm::memory_kind _kind, int _timeout_ms);
 
     /**
      * @brief Ask this host's model one yes/no question about a picture.
@@ -179,12 +185,20 @@ public:
      * @brief Clear the sidecar's conversation history.
      *
      * Succeeds without spawning anything when no child is running, since there
-     * is then no history to clear.
+     * is then no live history -- but the transcript outlives the process, so
+     * `_config_home` is what lets that case still delete it. Without it a clear
+     * would look like it worked and the conversation would come back on the
+     * next launch.
      *
      * Does not touch the memory file: callers that want the session kept run
      * `memorize` first, because this is what forgets the conversation it reads.
+     *
+     * @param[in] _repo_root Where the sidecar is launched from.
+     * @param[in] _config_home Holds `turns.jsonl`. Empty skips the file, which
+     * is what a caller that has no config home means.
      */
-    llm_result reset(const std::filesystem::path &_repo_root);
+    llm_result reset(const std::filesystem::path &_repo_root,
+                     const std::filesystem::path &_config_home = {});
 
     /**
      * @brief Supply the state tools read, or a default context to disable them.
