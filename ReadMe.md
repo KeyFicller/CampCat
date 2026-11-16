@@ -4,15 +4,11 @@
 
 ## 两条路
 
-![intro](campcat/sources/cpp/assets/images/intro.jpg)
-
 **脚本驱动** —— 为了确定性，定时调度的时候不漂移。OpenCV 在本地匹配模板，没有大模型参与：同一个屏幕，每次都是同一串点击，稳定，可复现。技能包是一段 `.ccat` 脚本加上它的模板图，语言见 [CCAT.md](CCAT.md)。
 
 **LLM 探索** —— 为了把写脚本的迭代成本压下来。人只说一句目标，视觉模型看屏幕去探索，跑通的经验写成脚本落盘，再交给上面那条路，本质上是个脚本作者。
 
 ## LLM 探索工作流
-
-![workflow](campcat/sources/cpp/assets/images/workflow.jpg)
 
 
 | Agent         | 何时上场      | 做什么                              |
@@ -28,9 +24,6 @@
 ![exploring](campcat/sources/cpp/assets/images/exploring.png)
 
 ## 图的三件套
-
-![memory](campcat/sources/cpp/assets/images/memory.jpg)
-
 
 | 落盘图内的元素     | 做什么                   |
 | ----------- | --------------------- |
