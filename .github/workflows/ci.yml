@@ -72,7 +72,6 @@ jobs:
     env:
       HOMEBREW_NO_AUTO_UPDATE: '1'
       CPPREF_LLVM_ROOT: ${{ github.workspace }}/.ci/clang-p2996
-      CAMPCAT_TOOLCHAIN_WORK: ${{ runner.temp }}/clang-p2996-build
     steps:
       - uses: actions/checkout@v4
 
@@ -85,6 +84,10 @@ jobs:
           key: clang-p2996-9ffb96e3ce36-macos15-${{ runner.arch }}-${{ hashFiles('misc/scripts/bootstrap_macos_toolchain.sh') }}
 
       - name: Pinned reflective compiler and libc++
+        # Not job-level env: the runner context is unavailable there, and an
+        # unrecognized context fails the workflow before any job starts.
+        env:
+          CAMPCAT_TOOLCHAIN_WORK: ${{ runner.temp }}/clang-p2996-build
         run: sh misc/scripts/bootstrap_macos_toolchain.sh
 
       - name: Configure
