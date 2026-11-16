@@ -174,9 +174,10 @@ async def answer(
     for block in screen.content:
         if block.type == "image":
             content.insert(0, _picture(block))
-    reply = await models.build_chat_model().ainvoke(
-        [SystemMessage(content=consult.SYSTEM), HumanMessage(content=content)]
-    )
+    reply = await models.build_chat_model().ainvoke([
+        SystemMessage(content=consult.system_prompt()),
+        HumanMessage(content=content),
+    ])
     word = consult.parse_answer(message_text(reply.content))
     if not word:
         # A guess picks a branch the user may not want; a cancelled run says the

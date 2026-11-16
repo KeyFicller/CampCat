@@ -22,6 +22,7 @@ from pydantic import BaseModel, Field, ValidationError
 
 import models
 import observability
+import prompt_host
 import session
 
 # Longest a note may be. It rides on the next handoff's brief, so a new note
@@ -59,7 +60,7 @@ INSTRUCTIONS = (
     "最后答复只是助手的说法，不能替代工具证据；没有观察到的状态保留为未确认，"
     "不要把没有报错、没有截到过渡画面解释成已经验证成功。\n"
     "\n"
-    f"notes 拼起来总长不超过 {MAX_CHARS} 个字符。"
+    "notes 拼起来总长不超过 {max_chars} 个字符。"
 )
 
 FRAME = (
@@ -181,7 +182,8 @@ def reflect(calls: list[dict], operator_rounds: int,
         model = models.bind_schema(models.build_chat_model(), Lessons)
         with observability.turn("reflect") as callbacks:
             answer = model.invoke([
-                SystemMessage(content=INSTRUCTIONS),
+                SystemMessage(content=prompt_host.text(
+                    prompt_host.REFLECTOR, INSTRUCTIONS, max_chars=MAX_CHARS)),
                 HumanMessage(content=(
                     head + "\n\n## 轨迹\n" + _trajectory(calls) +
                     "\n\n## 它最后的答复\n" + (reply or "（没有）")

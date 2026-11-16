@@ -22,6 +22,7 @@ import agent.diagnoser as diagnoser
 import agent.memorier as memorier
 import agent.reflector as reflector
 import observability
+import prompt_host
 import session
 import runner
 import subagent
@@ -458,8 +459,13 @@ def _rules(names: tuple[str, ...]) -> str:
 
 
 def scripter_prompt() -> str:
-    """Who the scripter is, plus the language reference the operator no longer carries."""
-    return SCRIPTER_PERSONA + "\n\n" + _rules(SCRIPTER_RULE_NAMES) + "\n\n" + _CCAT_CHEATSHEET
+    """Who the scripter is, plus the language reference the operator no longer carries.
+
+    Langfuse may replace the whole text. This assembly is the fallback.
+    """
+    return prompt_host.text(
+        prompt_host.SCRIPTER,
+        SCRIPTER_PERSONA + "\n\n" + _rules(SCRIPTER_RULE_NAMES) + "\n\n" + _CCAT_CHEATSHEET)
 
 
 def _no_summary(messages: list) -> str:

@@ -22,6 +22,7 @@ from langgraph.runtime import Runtime
 
 import models
 import observability
+import prompt_host
 import session
 
 # The line compaction triggers at, not the size afterwards: `keep` is a quarter
@@ -118,7 +119,8 @@ def memory_block(memory: str) -> str:
     """
     if not memory.strip():
         return ""
-    return "\n\n" + MEMORY_FRAME + memory.strip() + "\n"
+    frame = prompt_host.text(prompt_host.MEMORY_FRAME, MEMORY_FRAME)
+    return "\n\n" + frame + memory.strip() + "\n"
 
 
 def scripter_memory_block(memory: str) -> str:
@@ -128,7 +130,8 @@ def scripter_memory_block(memory: str) -> str:
     """
     if not memory.strip():
         return ""
-    return "\n\n" + SCRIPTER_MEMORY_FRAME + memory.strip() + "\n"
+    frame = prompt_host.text(prompt_host.SCRIPTER_MEMORY_FRAME, SCRIPTER_MEMORY_FRAME)
+    return "\n\n" + frame + memory.strip() + "\n"
 
 
 def context_tokens() -> int:
@@ -173,9 +176,9 @@ def memorize(memory: str, agent: str) -> str | None:
     None leaves the caller's ledger and cursor alone.
     """
     if agent == "operator":
-        instructions = MEMORY_INSTRUCTIONS
+        name, fallback = prompt_host.MEMORY_OPERATOR, MEMORY_INSTRUCTIONS
     elif agent == "scripter":
-        instructions = SCRIPTER_MEMORY_INSTRUCTIONS
+        name, fallback = prompt_host.MEMORY_SCRIPTER, SCRIPTER_MEMORY_INSTRUCTIONS
     else:
         return None
     # Still a valid receipt: the host records that these turns are folded, so
@@ -185,11 +188,9 @@ def memorize(memory: str, agent: str) -> str | None:
         return json.dumps({"ops": [], "from": "", "to": ""})
     try:
         model = models.build_memory_model()
-        # Not `str.format`: the instructions carry JSON examples, and every
-        # brace in them would be read as a field.
-        instructions = (instructions
-                        .replace("{entry_chars}", str(ENTRY_MAX_CHARS))
-                        .replace("{max_ops}", str(MAX_OPS_PER_PASS)))
+        instructions = prompt_host.text(
+            name, fallback,
+            entry_chars=ENTRY_MAX_CHARS, max_ops=MAX_OPS_PER_PASS)
         with observability.turn("rewrite-memory") as callbacks:
             reply = model.invoke([
                 SystemMessage(content=instructions),

@@ -3,6 +3,8 @@
 Langfuse reads its credentials when the client is built, and `main` imports
 this module before `load_env_file` runs, so nothing here may touch the client
 at import time -- every entry point resolves it lazily.
+
+Prompt text is not fetched here. `prompt_host` uses this same client.
 """
 
 from __future__ import annotations
@@ -42,9 +44,15 @@ def start() -> None:
 
 
 def new_session() -> str:
-    """Start a new conversation id, so its turns group in Langfuse Sessions."""
+    """Start a new conversation id, so its turns group in Langfuse Sessions.
+
+    Also drops cached prompt templates, so the next turn sees edits made in
+    Langfuse Prompt Management.
+    """
     global _session_id
     _session_id = uuid.uuid4().hex
+    import prompt_host
+    prompt_host.reset()
     return _session_id
 
 

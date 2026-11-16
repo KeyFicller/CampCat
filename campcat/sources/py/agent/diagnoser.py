@@ -15,6 +15,7 @@ from pydantic import BaseModel, Field, ValidationError
 from langgraph.graph import END, StateGraph
 
 import models
+import prompt_host
 import session
 import runner
 import subagent
@@ -180,7 +181,8 @@ def diagnose_judge(state: DiagnoseState) -> dict:
     try:
         model = models.bind_schema(models.build_chat_model(), Diagnosis)
         reply = models.streamed(model, [
-            SystemMessage(content=JUDGE_PROMPT),
+            SystemMessage(content=prompt_host.text(
+                prompt_host.DIAGNOSE, JUDGE_PROMPT)),
             HumanMessage(content=content),
         ], subagent.chunk_sink)
     except tools.TurnInterrupted:

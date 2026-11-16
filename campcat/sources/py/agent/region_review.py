@@ -21,6 +21,7 @@ from langgraph.graph import END, StateGraph
 from concurrent.futures import ThreadPoolExecutor
 
 import models
+import prompt_host
 import session
 import subagent
 import tools
@@ -141,7 +142,10 @@ def _review_system(kind: str) -> str:
             "box、circle、diamond 里只填你收到的这个区域本身的形状，"
             "另外两个留空。"
         )
-    return REVIEW_PROMPT + "\n" + extra
+    # `extra` stays in the repo either way: a hosted prompt includes it by
+    # writing `{{extra}}`. One fetch serves both kinds.
+    return prompt_host.text(
+        prompt_host.REGION_REVIEW, REVIEW_PROMPT + "\n" + extra, extra=extra)
 
 
 _HUMAN_REGION = re.compile(
@@ -660,8 +664,10 @@ def review_pick(state: ReviewState) -> dict:
     lines.append(session.ASK_IN_CHINESE.strip())
     try:
         model = models.bind_schema(models.build_chat_model(), Pick)
-        prompt = (TEMPLATE_PICK_PROMPT if state.get("kind") == "template"
-                  else PICK_PROMPT)
+        prompt = (prompt_host.text(
+            prompt_host.REGION_TEMPLATE_PICK, TEMPLATE_PICK_PROMPT)
+            if state.get("kind") == "template"
+            else prompt_host.text(prompt_host.REGION_PICK, PICK_PROMPT))
         response = models.streamed(model, [
             SystemMessage(content=prompt),
             HumanMessage(content=[
