@@ -93,7 +93,10 @@ def test_operator_hands_off_at_a_new_screen_and_at_a_finished_task():
     # scripter then has to re-find every control it touched. Measured on one
     # full demo run: 89 exploring calls, one handoff carrying four screens.
     text = operator.operator_prompt()
-    assert "交接的时机是「一件事刚做完」，不是「整轮走完」" in text
+    # Hand off when the thing just succeeded, not after the whole tour.
+    assert "在确认成功后立即调用 `author_script`" in text
+    assert "可重复的任务做完、并且成功过一次，就交接" in text
+    assert "一步一交" in text
     assert "回答 `unknown` 就是新 anchor" in text
     # A handoff that adds two anchors leaves the edge with no start.
     assert "连着开两个新 anchor，那条边就没有起点了" in text
@@ -105,10 +108,10 @@ def test_operator_hands_off_at_a_new_screen_and_at_a_finished_task():
     assert "上下文（不是这次要做的）" in text
     assert "就会在一次交接里把整张图都做完" in text
     assert "2–3 条简单新边" in operator.author_script.args["goal"]["description"]
-    # The escape hatch: an action that leaves the screen still lands on the
-    # screen it started from, so it is not a reason to pile work up.
+    # A repeatable action that wandered still belongs to the screen it started
+    # on. Hand it off, then go back and verify.
     assert "暂不交跨屏的任务" in text
-    assert "也先回到起始屏再交" in text
+    assert "交接完成后再回起始屏验证" in text
     # A frame whose picture was dropped is one it already saw; walking the flow
     # again to get it back costs a dozen calls.
     assert "不要 `go_home` 重走一遍" in text

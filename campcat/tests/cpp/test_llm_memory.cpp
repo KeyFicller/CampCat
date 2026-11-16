@@ -606,11 +606,15 @@ TEST(LlmMemory, InterruptedPassRecoversWithoutDuplicatingItsLibraryWrite) {
     using namespace campcat::llm;
     ASSERT_TRUE(
         append_pass(dir, memory_kind::operator_notes, "", "turn:1", "turn:4"));
-    const auto graph_dir = dir / "graph" / "memory";
-    std::filesystem::create_directories(graph_dir);
-    std::filesystem::permissions(graph_dir,
-                                 std::filesystem::perms::owner_read |
-                                     std::filesystem::perms::owner_exec);
+    // The graph ledger lives in graph/memory/. A directory mode does not stop
+    // root, which is who the CI container runs as, so the pass would commit
+    // and advance the cursor. A file in that path blocks the write for both.
+    std::filesystem::create_directories(dir / "graph");
+    const auto blocked = dir / "graph" / "memory";
+    {
+        std::ofstream out(blocked);
+        out << "blocked";
+    }
     const auto failed =
         commit_pass(dir, memory_kind::operator_notes, "graph",
                     {op_of(memory_op::kind::add, "", "偏好", "library"),
@@ -618,7 +622,7 @@ TEST(LlmMemory, InterruptedPassRecoversWithoutDuplicatingItsLibraryWrite) {
                     {"turn:5", "turn:9"}, "turn:5", "turn:9", nullptr);
     EXPECT_FALSE(failed.storage_ok);
     EXPECT_EQ(last_pass_to(dir, memory_kind::operator_notes, ""), "turn:4");
-    std::filesystem::permissions(graph_dir, std::filesystem::perms::owner_all);
+    std::filesystem::remove(blocked);
     const auto recovered = ledger_entries(dir, "graph");
     ASSERT_EQ(recovered.size(), 2U);
     EXPECT_EQ(last_pass_to(dir, memory_kind::operator_notes, "graph"),
