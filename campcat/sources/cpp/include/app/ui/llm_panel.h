@@ -34,8 +34,9 @@ void llm_panel_shutdown_finish();
  */
 void llm_panel_draw_panel(campcat::shell_state &_st, campcat::app_config &_cfg);
 
-/// Update the worker's UI state even while another page is selected.
-void llm_panel_tick();
+/// Process worker results and idle memory even while another page is selected.
+void llm_panel_tick(campcat::shell_state &_st, const campcat::app_config &_cfg,
+                    bool _on_llm_page);
 
 /// Agent status and Stop in the shell sidebar. Returns true to open the LLM page.
 bool llm_panel_draw_sidebar_task(bool _on_llm_page);

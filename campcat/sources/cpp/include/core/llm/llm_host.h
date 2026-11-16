@@ -81,10 +81,8 @@ struct llm_approval {
 /// exists only because a turn chains many tool rounds.
 constexpr int k_memorize_timeout_ms = 120000;
 
-/// How long the process may stay alive behind an already-closed window to
-/// finish the last consolidation. Only the tail of the session is at stake: the
-/// idle pass has usually folded everything else already.
-constexpr int k_shutdown_memorize_timeout_ms = 5000;
+/// Give each final memory model call time to finish after the window closes.
+constexpr int k_shutdown_memorize_timeout_ms = 30000;
 
 /**
  * @brief Owns the persistent Python sidecar and speaks NDJSON to it.

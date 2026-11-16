@@ -58,6 +58,9 @@ struct memory_proposal {
     std::vector<memory_op> ops;
     std::string from, to;
 };
+/// JSON Schema for the tool arguments, excluding the host cursor envelope.
+std::string_view memory_proposal_schema();
+
 /// Parse the complete model reply before any operation or cursor is persisted.
 bool parse_memory_proposal(std::string_view _json, memory_proposal *_out,
                            std::string *_error);

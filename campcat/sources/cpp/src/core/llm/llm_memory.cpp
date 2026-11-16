@@ -14,6 +14,7 @@
 #include <unordered_set>
 #include <utility>
 
+#include <llm/reflection_json.h>
 #include <nlohmann/json.hpp>
 
 namespace campcat::llm {
@@ -22,38 +23,45 @@ namespace {
 
 using json = nlohmann::json;
 
-bool parse_memory_op(const nlohmann::json &_j, memory_op *_out) {
-    if (!_j.is_object() || _out == nullptr) {
-        return false;
+enum class memory_add_op { add };
+enum class memory_edit_op { edit };
+enum class memory_retire_op { retire };
+enum class memory_section { preference, alias, pitfall, ui_style };
+
+constexpr std::string_view ledger_section(memory_section _section) {
+    switch (_section) {
+    case memory_section::preference: return "偏好";
+    case memory_section::alias: return "叫法";
+    case memory_section::pitfall: return "坑";
+    case memory_section::ui_style: return "风格";
     }
-    for (const char *field : {"op", "id", "section", "text", "why"}) {
-        const auto it = _j.find(field);
-        if (it != _j.end() && !it->is_string()) return false;
-    }
-    const std::string name = _j.value("op", std::string());
-    if (name == "add") {
-        _out->k = memory_op::kind::add;
-    } else if (name == "edit") {
-        _out->k = memory_op::kind::edit;
-    } else if (name == "pin") {
-        _out->k = memory_op::kind::pin;
-    } else if (name == "unpin") {
-        _out->k = memory_op::kind::unpin;
-    } else if (name == "retire") {
-        _out->k = memory_op::kind::retire;
-    } else if (name == "restore") {
-        _out->k = memory_op::kind::restore;
-    } else if (name == "delete") {
-        _out->k = memory_op::kind::remove;
-    } else {
-        return false;
-    }
-    _out->id = _j.value("id", std::string());
-    _out->section = _j.value("section", std::string());
-    _out->text = _j.value("text", std::string());
-    _out->why = _j.value("why", std::string());
-    return true;
+    return {};
 }
+
+struct memory_add {
+    memory_add_op op;
+    memory_section section;
+    std::string text;
+};
+
+struct memory_edit {
+    memory_edit_op op;
+    std::string id;
+    std::string text;
+};
+
+struct memory_retire {
+    memory_retire_op op;
+    std::string id;
+    std::string why;
+};
+
+struct memory_model_proposal {
+    std::vector<std::variant<memory_add, memory_edit, memory_retire>> ops;
+};
+
+constexpr std::string_view k_memory_proposal_schema =
+    std::define_static_string(::js::param_schema<memory_model_proposal>());
 
 /// The UI thread (the memory window) and the LLM worker (a pass) both touch
 /// these files, so every path through them takes this lock.
@@ -399,6 +407,10 @@ bool recover_pass(const std::filesystem::path &_home, memory_kind _kind);
 
 } // namespace
 
+std::string_view memory_proposal_schema() {
+    return k_memory_proposal_schema;
+}
+
 bool parse_memory_proposal(std::string_view _json, memory_proposal *_out,
                            std::string *_error) {
     if (!_out || !_error) return false;
@@ -413,11 +425,29 @@ bool parse_memory_proposal(std::string_view _json, memory_proposal *_out,
         const auto it = j.find(field);
         if (it != j.end() && !it->is_string()) return fail();
     }
+    if (j.size() != 1 + j.contains("from") + j.contains("to")) return fail();
     memory_proposal parsed;
-    for (const auto &raw : j["ops"]) {
-        memory_op op;
-        if (!parse_memory_op(raw, &op)) return fail();
-        parsed.ops.push_back(std::move(op));
+    try {
+        auto reply = ::js::from_json<memory_model_proposal>({{"ops", j["ops"]}});
+        parsed.ops.reserve(reply.ops.size());
+        for (auto &op : reply.ops) {
+            if (auto *add = std::get_if<memory_add>(&op)) {
+                parsed.ops.push_back({.k = memory_op::kind::add,
+                                      .section = std::string(ledger_section(add->section)),
+                                      .text = std::move(add->text)});
+            } else if (auto *edit = std::get_if<memory_edit>(&op)) {
+                parsed.ops.push_back({.k = memory_op::kind::edit,
+                                      .id = std::move(edit->id),
+                                      .text = std::move(edit->text)});
+            } else {
+                auto &retire = std::get<memory_retire>(op);
+                parsed.ops.push_back({.k = memory_op::kind::retire,
+                                      .id = std::move(retire.id),
+                                      .why = std::move(retire.why)});
+            }
+        }
+    } catch (const ::js::bind_error &) {
+        return fail();
     }
     parsed.from = j.value("from", std::string());
     parsed.to = j.value("to", std::string());

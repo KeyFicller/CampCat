@@ -71,3 +71,9 @@ def no_reflection(monkeypatch):
     """
     import agent.reflector as reflector
     monkeypatch.setattr(reflector, "reflect", lambda *a, **k: ("", ""))
+
+
+@pytest.fixture
+def memory_schema():
+    """Minimal stand-in for the schema supplied by the C++ host."""
+    return {"type": "object", "properties": {"ops": {"type": "array"}}}

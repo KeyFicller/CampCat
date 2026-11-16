@@ -1,4 +1,5 @@
 #include "core/llm/llm_protocol.h"
+#include "core/llm/llm_memory.h"
 
 #include <cstddef>
 
@@ -134,6 +135,7 @@ std::string build_memorize_request(long _id, std::string_view _memory,
     j["memory"] = std::string(_memory);
     j["provider"] = std::string(_provider);
     j["agent"] = std::string(_agent);
+    j["schema"] = nlohmann::json::parse(llm::memory_proposal_schema());
     j["memory_upto"] = std::string(_memory_upto);
     return j.dump();
 }

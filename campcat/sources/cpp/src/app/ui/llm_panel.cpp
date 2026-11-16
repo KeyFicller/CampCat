@@ -146,6 +146,7 @@ campcat::llm_controller g_controller(g_host);
 /// UI-thread only. Time of the last LLM request, which is what "idle" is
 /// measured from: an agent nobody is talking to is an agent that can tidy up.
 double g_last_llm = 0.0;
+bool g_memory_pending = false;
 /// How long the conversation must have been quiet before consolidating.
 constexpr double k_idle_seconds = 600.0; // 10 minutes
 /// Remembered every frame so the shutdown pass knows where the memory file is,
@@ -923,13 +924,20 @@ bool consume_handoff() {
     g_last_llm = ImGui::GetTime();
 
     if (h.kind == campcat::llm_controller::completion_kind::memory) {
+        if (h.result.ok) {
+            g_memory_pending = false;
+            if (g_mem_open) {
+                reload_memory();
+            }
+        }
         campcat::automation_log::emit(
-            h.result.ok ? "[llm] operator long-term memory updated"
+            h.result.ok ? "[llm] long-term memory updated"
                      : "[llm] memory not saved: " + h.result.error);
         return true;
     }
 
     if (h.kind == campcat::llm_controller::completion_kind::turn) {
+        g_memory_pending = true;
         fill_reply(h.result, h.timeline);
         if (h.result.ok) {
             // Reported by the sidecar on a successful turn only: a result
@@ -946,6 +954,7 @@ bool consume_handoff() {
         return true;
     }
     drop_all_turns();
+    g_memory_pending = false;
     g_sub_cleared_run = g_host.subagent().runs;
     release_sub_items();
     g_sidecar_turns = 0;
@@ -1871,7 +1880,8 @@ campcat::activity_status llm_panel_activity() {
     return {campcat::activity_level::idle, "Idle"};
 }
 
-void llm_panel_tick() {
+void llm_panel_tick(campcat::shell_state &_st, const campcat::app_config &_cfg,
+                    bool _on_llm_page) {
     while (consume_handoff()) {
     }
     if (g_controller.stopping() && g_controller.running()) {
@@ -1880,6 +1890,14 @@ void llm_panel_tick() {
         request_task_stop();
     }
     pump_stream();
+    if (g_memory_pending && !g_controller.running() &&
+        !g_host.pending_approval().pending &&
+        (!_on_llm_page || is_blank(g_input)) && !_cfg.config_home.empty() &&
+        ImGui::GetTime() - g_last_llm >= k_idle_seconds) {
+        auto cfg = _cfg;
+        cfg.memory_graph = _st.workspace.graph;
+        g_controller.start_memorize(_st, cfg);
+    }
 }
 
 bool llm_panel_draw_sidebar_task(bool _on_llm_page) {
@@ -1966,17 +1984,6 @@ void llm_panel_draw_panel(campcat::shell_state &_st, campcat::app_config &_cfg) 
     ImGui::EndDisabled();
     ImGui::TextUnformatted(awaiting ? "Correction for this operation"
                                     : "Message to agent");
-
-    // Idle consolidation. Measured from the last LLM request rather than from
-    // mouse or keyboard activity: an agent nobody is talking to is an agent
-    // that can tidy up, and a turn in flight or a half-typed prompt means
-    // somebody is still here. Runs on the same worker as a turn, so the two
-    // never interleave on the sidecar's stdin.
-    if (!g_controller.running() && !awaiting && !g_turns.empty() &&
-        is_blank(g_input) && !g_config_home.empty() &&
-        ImGui::GetTime() - g_last_llm > k_idle_seconds) {
-        g_controller.start_memorize(_st, _cfg);
-    }
 
     // The action label makes an approval correction distinct from a new message.
     const bool memorizing = g_controller.memorizing();

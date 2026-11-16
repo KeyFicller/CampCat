@@ -223,9 +223,14 @@ bool llm_controller::memorize_both(const app_config &_cfg, int _timeout_ms,
         cfg.config_home, cfg.llm.provider, cfg.memory_graph,
         llm::memory_kind::scripter_notes, _timeout_ms);
     if (!scripter.ok) {
-        automation_log::emit("[llm] scripter memory not saved: " + scripter.error);
+        if (_operator_out->ok) {
+            _operator_out->ok = false;
+            _operator_out->error = "scripter memory: " + scripter.error;
+        } else {
+            _operator_out->error += "; scripter memory: " + scripter.error;
+        }
     }
-    return _operator_out->ok && scripter.ok && !m_host.interrupt_pending();
+    return _operator_out->ok && !m_host.interrupt_pending();
 }
 
 bool llm_controller::start_memorize(shell_state &_st, const app_config &_cfg) {

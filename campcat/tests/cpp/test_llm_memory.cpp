@@ -20,13 +20,26 @@ TEST(LlmMemory, ModelProposalRejectsMalformedTypesWithoutPartialAcceptance) {
     campcat::llm::memory_proposal proposal;
     std::string error;
     EXPECT_TRUE(campcat::llm::parse_memory_proposal(
-        R"({"ops":[{"op":"add","section":"偏好","text":"中文"}],"from":"turn:1","to":"turn:2"})",
+        R"({"ops":[{"op":"add","section":"preference","text":"中文"}],"from":"turn:1","to":"turn:2"})",
         &proposal, &error));
     ASSERT_EQ(proposal.ops.size(), 1U);
+    EXPECT_EQ(proposal.ops[0].section, "偏好");
     EXPECT_EQ(proposal.to, "turn:2");
+    ASSERT_TRUE(campcat::llm::parse_memory_proposal(
+        R"({"ops":[{"op":"edit","id":"0001","text":"new"},{"op":"retire","id":"0002","why":"obsolete"}]})",
+        &proposal, &error));
+    ASSERT_EQ(proposal.ops.size(), 2U);
+    EXPECT_EQ(proposal.ops[0].k, campcat::llm::memory_op::kind::edit);
+    EXPECT_EQ(proposal.ops[0].text, "new");
+    EXPECT_EQ(proposal.ops[1].k, campcat::llm::memory_op::kind::retire);
+    EXPECT_EQ(proposal.ops[1].why, "obsolete");
     for (auto raw : {R"({"ops":[{"op":12}]})", R"({"ops":[{"op":"add","text":false}]})",
                     R"({"ops":[{"op":"invented"}]})", R"({"ops":[],"to":[]})",
-                    R"({"ops":[{"op":"add"},12]})"}) {
+                    R"({"ops":[{"op":"add"},12]})",
+                    R"({"ops":[{"op":"pin","id":"0001"}]})",
+                    R"({"ops":[{"op":"retire","id":"0001"}]})",
+                    R"({"ops":[{"op":"edit","id":"0001","text":"x","why":"extra"}]})",
+                    R"({"ops":[{"op":"add","section":"unknown","text":"x"}]})"}) {
         EXPECT_FALSE(campcat::llm::parse_memory_proposal(raw, &proposal, &error));
         EXPECT_TRUE(proposal.ops.empty());
         EXPECT_FALSE(error.empty());

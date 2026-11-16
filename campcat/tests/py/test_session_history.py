@@ -81,7 +81,7 @@ def test_reset_clears_scripter_history():
     assert memorier._SCRIPTER_MW is None
 
 
-def test_memorize_ignores_scripter_history(monkeypatch):
+def test_memorize_ignores_scripter_history(monkeypatch, memory_schema):
     session.reset()
     session.append_turn("operator said hello", [AIMessage(content="ok")])
     session.append_scripter_turn(
@@ -89,14 +89,19 @@ def test_memorize_ignores_scripter_history(monkeypatch):
     seen = {}
 
     class _Model:
+        def bind_tools(self, tools):
+            return self
+
         def invoke(self, messages, config=None):
             seen["text"] = messages[-1].content
-            return AIMessage(
-                content='{"ops":[{"op":"add","section":"偏好","text":"kept"}]}')
+            return AIMessage(content="", tool_calls=[{
+                "name": "submit_memory", "id": "mem",
+                "args": {"ops": [{"op": "add", "section": "preference", "text": "kept"}]},
+            }])
 
     monkeypatch.setattr(models, "build_memory_model", lambda: _Model())
-    notes = json.loads(memorier.memorize("", "operator"))
-    assert notes["ops"] == [{"op": "add", "section": "偏好", "text": "kept"}]
+    notes = json.loads(memorier.memorize("", "operator", memory_schema))
+    assert notes["ops"] == [{"op": "add", "section": "preference", "text": "kept"}]
     assert "operator said hello" in seen["text"]
     assert "scripter secret handoff" not in seen["text"]
 

@@ -99,6 +99,14 @@ TEST(LlmProtocol, MemorizeCarriesTheSelectedProvider) {
     EXPECT_EQ(j["type"], "memorize");
     EXPECT_EQ(j["provider"], "qwen");
     EXPECT_EQ(j["memory"], "notes");
+    const auto &schema = j.at("schema");
+    EXPECT_EQ(schema.at("required"), nlohmann::json::array({"ops"}));
+    const auto &branches = schema.at("properties").at("ops").at("items").at("anyOf");
+    ASSERT_EQ(branches.size(), 3U);
+    EXPECT_EQ(branches.at(0).at("properties").at("op").at("enum"),
+              nlohmann::json::array({"add"}));
+    EXPECT_EQ(branches.at(0).at("properties").at("section").at("enum"),
+              nlohmann::json::array({"preference", "alias", "pitfall", "ui_style"}));
 }
 
 TEST(LlmProtocol, SubagentCarriesAgentAndEvent) {

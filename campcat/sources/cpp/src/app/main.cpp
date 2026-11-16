@@ -488,11 +488,10 @@ int main(int argc, char **argv) {
             ImGui::EndMenuBar();
         }
 
+        static shell_page page = shell_page::Script;
+        llm_panel_tick(st, cfg_view, page == shell_page::Llm);
         const bool busy_now = st.device_tasks.busy();
         const bool lock_manual_single = busy_now || st.sched.running();
-        llm_panel_tick();
-
-        static shell_page page = shell_page::Script;
 
         // What the title row reports. Per page, because the badge sits next to
         // the page's own title: one global flag there either claimed the LLM
