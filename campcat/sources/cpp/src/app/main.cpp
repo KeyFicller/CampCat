@@ -5,6 +5,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <string>
+#include <system_error>
 #include <utility>
 #include <vector>
 
@@ -29,6 +30,7 @@
 #include "app/ui/script_editor_panel.h"
 #include "app/ui/script_panel.h"
 #include "app/ui/settings_panel.h"
+#include "app/ui/shell_dock.h"
 #include "app/ui/template_capture_panel.h"
 #include "ccat_driver/ccat_script_profile.h"
 #include "core/app_config.h"
@@ -231,6 +233,83 @@ workspace_destination draw_workspace_toolbar(campcat::shell_state &_st,
     return destination;
 }
 
+/// The words next to the page title. Graph and Settings have no activity of
+/// their own; the caller skips the chip there. An untouched status is Idle,
+/// which is what Script shows when nothing is running.
+campcat::activity_status page_activity(shell_page _page, campcat::shell_state &_st,
+                                      bool _busy) {
+    switch (_page) {
+    case shell_page::Llm:
+        return llm_panel_activity();
+    case shell_page::Script:
+        if (_st.mumu_launching.load()) {
+            return {campcat::activity_level::waiting, "Booting"};
+        }
+        if (_busy) {
+            return {campcat::activity_level::busy, "Running"};
+        }
+        if (_st.sched.running()) {
+            return {campcat::activity_level::waiting, "Scheduled"};
+        }
+        break;
+    case shell_page::Console:
+        if (_busy) {
+            return {campcat::activity_level::busy, "Running"};
+        }
+        break;
+    case shell_page::Graph:
+    case shell_page::Settings:
+        break;
+    }
+    return {};
+}
+
+const char *page_window_name(shell_page _page) {
+    switch (_page) {
+    case shell_page::Llm:
+        return k_dock_llm;
+    case shell_page::Console:
+        return k_dock_console;
+    case shell_page::Graph:
+        return k_dock_graph;
+    case shell_page::Settings:
+        return k_dock_settings;
+    case shell_page::Script:
+        return k_dock_script;
+    }
+    return k_dock_script;
+}
+
+/// Title in the large face, chips on its midline, then the rule under both.
+/// The chips used to sit in the one content header; each page window draws its
+/// own now that more than one page can be on screen.
+void draw_page_heading(const char *_title, const campcat::activity_status &_page,
+                       bool _show_page, const campcat::activity_status &_device) {
+    const ImVec2 title_at = ImGui::GetCursorScreenPos();
+    float title_h = 0.0F;
+    WITH_FONT(title, {
+        title_h = ImGui::GetTextLineHeight();
+        ImGui::TextUnformatted(_title);
+    });
+    WITH_FONT(bold, {
+        const float chips_w =
+            (_show_page ? chip_width(_page) + k_chip_gap : 0.0F) +
+            chip_width(_device);
+        ImGui::SameLine(ImGui::GetWindowContentRegionMax().x - chips_w);
+        const float dy = (title_h - ImGui::GetTextLineHeight()) * 0.5F;
+        const ImVec2 at = ImGui::GetCursorScreenPos();
+        ImGui::SetCursorScreenPos(ImVec2(at.x, at.y + dy));
+        if (_show_page) {
+            draw_chip(_page);
+            ImGui::SameLine(0.0F, k_chip_gap);
+        }
+        draw_chip(_device);
+        ImGui::SetCursorScreenPos(ImVec2(title_at.x, title_at.y + title_h));
+    });
+    ImGui::Separator();
+    ImGui::Spacing();
+}
+
 } // namespace
 
 int main(int argc, char **argv) {
@@ -338,10 +417,28 @@ int main(int argc, char **argv) {
     glfwMakeContextCurrent(window);
     glfwSwapInterval(1);
 
+    // Beside config.json, not inside ccat_library. That directory is the script
+    // pack submodule; the ini is shell state, and the repo already ignores the
+    // name `imgui.ini`. The pointer has to outlive the context.
+    static std::string imgui_ini;
+    {
+        const std::filesystem::path library(st.snapshot_cfg().config_home);
+        std::filesystem::path ini_dir =
+            library.empty() ? cfg_path.parent_path() : library.parent_path();
+        if (ini_dir.empty()) {
+            ini_dir = ".";
+        }
+        std::error_code ini_ec;
+        std::filesystem::create_directories(ini_dir, ini_ec);
+        imgui_ini = (ini_dir / "imgui.ini").string();
+    }
+
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
     ImGuiIO &io = ImGui::GetIO();
-    io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
+    io.IniFilename = imgui_ini.c_str();
+    io.ConfigFlags |=
+        ImGuiConfigFlags_NavEnableKeyboard | ImGuiConfigFlags_DockingEnable;
     ImGui::StyleColorsDark();
     {
         ImGuiStyle &style = ImGui::GetStyle();
@@ -441,6 +538,9 @@ int main(int argc, char **argv) {
         c[ImGuiCol_TableRowBgAlt] = ImVec4(1.0F, 1.0F, 1.0F, 0.015F);
         c[ImGuiCol_TextLink] = accent_hi;
         c[ImGuiCol_TextSelectedBg] = wash_hi;
+        c[ImGuiCol_DockingPreview] =
+            ImVec4(accent.x, accent.y, accent.z, 0.55F);
+        c[ImGuiCol_DockingEmptyBg] = bg;
         c[ImGuiCol_DragDropTarget] = accent_hi;
         c[ImGuiCol_NavCursor] = accent_hi;
         c[ImGuiCol_NavWindowingHighlight] = ImVec4(1.0F, 1.0F, 1.0F, 0.70F);
@@ -467,64 +567,71 @@ int main(int argc, char **argv) {
         ImGui_ImplGlfw_NewFrame();
         ImGui::NewFrame();
 
-        ImGui::SetNextWindowPos(ImVec2(0.0F, 0.0F), ImGuiCond_Always);
-        ImGui::SetNextWindowSize(io.DisplaySize, ImGuiCond_Always);
-
+        const ImGuiViewport *viewport = ImGui::GetMainViewport();
+        ImGui::SetNextWindowPos(viewport->WorkPos);
+        ImGui::SetNextWindowSize(viewport->WorkSize);
+        ImGui::SetNextWindowViewport(viewport->ID);
+        // The host is the frame around the dockspace. Zero padding so the
+        // splits reach the window edge; popped immediately so the panels keep
+        // the themed padding.
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0F, 0.0F));
         ImGui::Begin("campcat-shell", nullptr,
-                     ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoResize |
-                         ImGuiWindowFlags_NoMove | ImGuiWindowFlags_MenuBar);
+                     ImGuiWindowFlags_NoDocking | ImGuiWindowFlags_NoTitleBar |
+                         ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoResize |
+                         ImGuiWindowFlags_NoMove |
+                         ImGuiWindowFlags_NoBringToFrontOnFocus |
+                         ImGuiWindowFlags_NoNavFocus |
+                         ImGuiWindowFlags_NoScrollbar |
+                         ImGuiWindowFlags_NoScrollWithMouse |
+                         ImGuiWindowFlags_MenuBar |
+                         ImGuiWindowFlags_NoSavedSettings);
+        ImGui::PopStyleVar();
 
         campcat::app_config cfg_view = st.snapshot_cfg();
         // Re-read every frame: the Script page's bundle picker publishes
         // through `set_script_bundle`, so this view is the shell's, not ours.
 
+        bool reset_layout = false;
         if (ImGui::BeginMenuBar()) {
             if (ImGui::BeginMenu("File")) {
                 if (ImGui::MenuItem("Save config")) {
                     st.save_config(cfg_view);
+                }
+                ImGui::Separator();
+                if (ImGui::MenuItem("Reset layout")) {
+                    reset_layout = true;
                 }
                 ImGui::EndMenu();
             }
             ImGui::EndMenuBar();
         }
 
-        static shell_page page = shell_page::Script;
-        llm_panel_tick(st, cfg_view, page == shell_page::Llm);
+        const bool layout_built = shell_dock_submit(reset_layout);
+        ImGui::End();
+
         const bool busy_now = st.device_tasks.busy();
         const bool lock_manual_single = busy_now || st.sched.running();
 
-        // What the title row reports. Per page, because the badge sits next to
-        // the page's own title: one global flag there either claimed the LLM
-        // was idle while it thought, or said "Running" on the LLM page because
-        // an automation cycle happened to be running. The device chip is the
-        // opposite -- an app level fact, so every page shows it.
-        campcat::activity_status page_status{};
-        switch (page) {
-        case shell_page::Llm:
-            page_status = llm_panel_activity();
-            break;
-        case shell_page::Script:
-            if (st.mumu_launching.load()) {
-                page_status = {campcat::activity_level::waiting, "Booting"};
-            } else if (busy_now) {
-                page_status = {campcat::activity_level::busy, "Running"};
-            } else if (st.sched.running()) {
-                page_status = {campcat::activity_level::waiting, "Scheduled"};
-            }
-            break;
-        case shell_page::Console:
-            if (busy_now) {
-                page_status = {campcat::activity_level::busy, "Running"};
-            }
-            break;
-        case shell_page::Graph:
-            break; // no activity of its own; the device chip below still shows
-        case shell_page::Settings:
-            break; // no activity of its own; the device chip below still shows
-        }
-        const bool show_page_chip =
-            page != shell_page::Settings && page != shell_page::Graph;
+        static shell_page page = shell_page::Script;
+        llm_panel_tick(st, cfg_view, page == shell_page::Llm);
 
+        static bool focus_queued = false;
+        static shell_page focus_page = shell_page::Script;
+        if (layout_built) {
+            page = shell_page::Script;
+            focus_queued = true;
+            focus_page = shell_page::Script;
+        }
+        auto show_page = [&](shell_page target) {
+            page = target;
+            focus_queued = true;
+            focus_page = target;
+        };
+
+        // The device chip is an app level fact, so every page shows it. The
+        // page chip is computed inside that page: one shared flag either
+        // claimed the LLM was idle while it thought, or said "Running" on the
+        // LLM page because an automation cycle happened to be running.
         campcat::activity_status device_status{};
         if (st.device_online.load()) {
             // The poll connects before it reads, so this is ground truth: a
@@ -549,45 +656,14 @@ int main(int argc, char **argv) {
                 ImGui::PushStyleColor(ImGuiCol_ButtonActive, k_accent_lo);
             }
             if (campcat::app::button(label, ImVec2(-1.0F, 0.0F))) {
-                page = target;
+                show_page(target);
             }
             if (selected) {
                 ImGui::PopStyleColor(3);
             }
         };
 
-        constexpr float k_left_w = 210.0F;
-        const float body_h = ImGui::GetContentRegionAvail().y;
-        bool editor_can_dock = false;
-
-        if (ImGui::BeginTable("shell_layout", 2,
-                              ImGuiTableFlags_BordersInnerV |
-                                  ImGuiTableFlags_NoPadOuterX |
-                                  ImGuiTableFlags_Resizable |
-                                  ImGuiTableFlags_SizingStretchProp,
-                              ImVec2(-1.0F, body_h))) {
-            ImGui::TableSetupColumn("left", ImGuiTableColumnFlags_WidthFixed,
-                                    k_left_w);
-            ImGui::TableSetupColumn("content",
-                                    ImGuiTableColumnFlags_WidthStretch);
-            ImGui::TableNextRow(ImGuiTableRowFlags_None, body_h);
-            ImGui::TableSetColumnIndex(0);
-
-            // Collapsed, the log shrinks to its header, so the nav block above
-            // takes the rest of the column instead of leaving it empty. It
-            // cannot simply fill: the log is submitted after it, so by then the
-            // nav's height is fixed and the header would be pushed off the
-            // bottom. The nav therefore stops short of the header, whose height
-            // `log_panel` owns and derives from the style.
-            const bool log_open = log_panel_open();
-            const bool nav_fills = !log_open;
-            ImGui::BeginChild(
-                "shell_nav",
-                ImVec2(0.0F, nav_fills ? -(log_panel_collapsed_height() +
-                                           ImGui::GetStyle().ItemSpacing.y)
-                                       : 0.0F),
-                ImGuiChildFlags_Borders |
-                    (nav_fills ? 0 : ImGuiChildFlags_AutoResizeY));
+        if (ImGui::Begin(k_dock_campcat, nullptr, k_dock_panel_flags)) {
             ImGui::Spacing();
             WITH_FONT(title, { ImGui::TextUnformatted("CampCat"); });
             ImGui::Spacing();
@@ -602,168 +678,108 @@ int main(int argc, char **argv) {
             ImGui::Spacing();
             nav_item("Settings", shell_page::Settings);
             if (llm_panel_draw_sidebar_task(page == shell_page::Llm)) {
-                page = shell_page::Llm;
+                show_page(shell_page::Llm);
             }
-            ImGui::EndChild();
-
-            // The other half of the pair above: one fills, the other fits.
-            log_panel_draw(st);
-
-            ImGui::TableSetColumnIndex(1);
-            ImGui::BeginChild("shell_content", ImVec2(0.0F, 0.0F),
-                              ImGuiChildFlags_Borders);
-
-            {
-                const char *page_title = "Script";
-                switch (page) {
-                case shell_page::Llm:
-                    page_title = "LLM";
-                    break;
-                case shell_page::Console:
-                    page_title = "Console";
-                    break;
-                case shell_page::Graph:
-                    page_title = "Graph";
-                    break;
-                case shell_page::Settings:
-                    page_title = "Settings";
-                    break;
-                case shell_page::Script:
-                default:
-                    page_title = "Script";
-                    break;
-                }
-                // The chips are drawn in the smaller bold face beside a title
-                // in the larger one, and `SameLine` only shares the line's top.
-                // Both the title's line height and where it starts are needed
-                // to centre them on it.
-                const ImVec2 title_at = ImGui::GetCursorScreenPos();
-                float title_h = 0.0F;
-                WITH_FONT(title, {
-                    title_h = ImGui::GetTextLineHeight();
-                    ImGui::TextUnformatted(page_title);
-                });
-                WITH_FONT(bold, {
-                    const float chips_w =
-                        (show_page_chip ? chip_width(page_status) + k_chip_gap
-                                        : 0.0F) +
-                        chip_width(device_status);
-                    ImGui::SameLine(ImGui::GetWindowContentRegionMax().x -
-                                    chips_w);
-                    const float dy =
-                        (title_h - ImGui::GetTextLineHeight()) * 0.5F;
-                    const ImVec2 at = ImGui::GetCursorScreenPos();
-                    ImGui::SetCursorScreenPos(ImVec2(at.x, at.y + dy));
-                    if (show_page_chip) {
-                        draw_chip(page_status);
-                        ImGui::SameLine(0.0F, k_chip_gap);
-                    }
-                    draw_chip(device_status);
-                    // Back to the title's own bottom, so the offset does not
-                    // push the separator under it.
-                    ImGui::SetCursorScreenPos(
-                        ImVec2(title_at.x, title_at.y + title_h));
-                });
-                ImGui::Separator();
-                ImGui::Spacing();
-            }
-
-            static bool details_open = false;
-            const auto activity = llm_panel_activity();
-            const bool run_locked = lock_manual_single || st.mumu_launching.load() ||
-                activity.level == campcat::activity_level::busy ||
-                activity.level == campcat::activity_level::waiting;
-            switch (draw_workspace_toolbar(st, cfg_view, run_locked,
-                                            &details_open, page)) {
-            case workspace_destination::graph:
-                page = shell_page::Graph;
-                break;
-            case workspace_destination::script:
-                page = shell_page::Script;
-                break;
-            case workspace_destination::current:
-                break;
-            }
-
-            const auto draw_page = [&] {
-                if (page == shell_page::Script) {
-                    script_panel_draw(st, cfg_view, st.snapshot_ccat_live(),
-                                      lock_manual_single);
-                } else if (page == shell_page::Llm) {
-                    llm_panel_draw_panel(st, cfg_view);
-                } else if (page == shell_page::Console) {
-                    console_panel_draw(st, cfg_view, lock_manual_single);
-                } else if (page == shell_page::Graph) {
-                    graph_panel_draw(cfg_view, st.workspace);
-                } else if (page == shell_page::Settings) {
-                    settings_panel_draw(st, cfg_view);
-                }
-            };
-            const bool have_details = details_open && !st.workspace.bundle.empty() &&
-                (page == shell_page::Graph || page == shell_page::Llm);
-            const bool have_editor = script_editor_has_open();
-            editor_can_dock = ImGui::GetContentRegionAvail().x >= 900.0F;
-            const bool dock_sidebar = editor_can_dock && (have_details || have_editor);
-            const float workspace_h = ImGui::GetContentRegionAvail().y;
-            // Keep the page's child ID stable when the inspector opens/closes.
-            if (ImGui::BeginTable("workspace_panes", 2,
-                                  ImGuiTableFlags_Resizable |
-                                      ImGuiTableFlags_NoSavedSettings |
-                                      ImGuiTableFlags_SizingStretchProp,
-                                  ImVec2(-1.0F, workspace_h))) {
-                ImGui::TableSetupColumn("view", ImGuiTableColumnFlags_WidthStretch, 1.0F);
-                ImGui::TableSetupColumn("details",
-                    ImGuiTableColumnFlags_WidthFixed |
-                        (dock_sidebar ? 0 : ImGuiTableColumnFlags_Disabled),
-                    440.0F);
-                ImGui::TableNextRow(ImGuiTableRowFlags_None, workspace_h);
-                ImGui::TableSetColumnIndex(0);
-                ImGui::BeginChild("workspace_view", ImVec2(0.0F, 0.0F));
-                draw_page();
-                ImGui::EndChild();
-                if (dock_sidebar) {
-                    ImGui::TableSetColumnIndex(1);
-                    ImGui::BeginChild("workspace_details", ImVec2(0.0F, 0.0F),
-                                      ImGuiChildFlags_Borders);
-                    if (ImGui::BeginTabBar("sidebar_tabs",
-                                           ImGuiTabBarFlags_AutoSelectNewTabs)) {
-                        if (have_editor && ImGui::BeginTabItem("Editor", nullptr,
-                                script_editor_focus_requested()
-                                    ? ImGuiTabItemFlags_SetSelected : 0)) {
-                            script_editor_draw_docked(st.device_tasks.busy() ||
-                                                       st.sched.running());
-                            ImGui::EndTabItem();
-                        }
-                        if (have_details && ImGui::BeginTabItem("Details", &details_open)) {
-                            script_editor_inspector_draw(cfg_view.config_home,
-                                                          st.workspace.bundle);
-                            ImGui::EndTabItem();
-                        }
-                        ImGui::EndTabBar();
-                    }
-                    ImGui::EndChild();
-                }
-                ImGui::EndTable();
-            }
-            if (have_details && !editor_can_dock) {
-                ImGui::SetNextWindowSize(
-                    ImVec2(std::min(480.0F, io.DisplaySize.x * 0.9F),
-                           io.DisplaySize.y * 0.7F), ImGuiCond_Appearing);
-                if (ImGui::Begin("Selected skill details", &details_open)) {
-                    script_editor_inspector_draw(cfg_view.config_home,
-                                                  st.workspace.bundle);
-                }
-                ImGui::End();
-            }
-
-            ImGui::EndChild();
-            ImGui::EndTable();
         }
-
         ImGui::End();
 
-        script_editor_draw_windows(editor_can_dock, st.device_tasks.busy() ||
-                                                        st.sched.running());
+        log_panel_draw(st);
+
+        static bool details_open = false;
+        const auto activity = llm_panel_activity();
+        const bool run_locked = lock_manual_single || st.mumu_launching.load() ||
+            activity.level == campcat::activity_level::busy ||
+            activity.level == campcat::activity_level::waiting;
+        const bool save_locked = st.device_tasks.busy() || st.sched.running();
+
+        auto begin_page = [&](shell_page which) {
+            // A nav click queues the target before this runs. An earlier page
+            // that is still focused this frame must not write `page` back.
+            const bool want_focus = focus_queued && focus_page == which;
+            if (want_focus) {
+                ImGui::SetNextWindowFocus();
+            }
+            const bool open =
+                ImGui::Begin(page_window_name(which), nullptr, k_dock_panel_flags);
+            if (want_focus) {
+                focus_queued = false;
+                page = which;
+            } else if (open && !focus_queued &&
+                       ImGui::IsWindowFocused(
+                           ImGuiFocusedFlags_RootAndChildWindows)) {
+                page = which;
+            }
+            if (open) {
+                const bool show_chip = which != shell_page::Settings &&
+                                       which != shell_page::Graph;
+                draw_page_heading(page_window_name(which),
+                                  page_activity(which, st, busy_now), show_chip,
+                                  device_status);
+                if (which == shell_page::Llm || which == shell_page::Graph) {
+                    switch (draw_workspace_toolbar(st, cfg_view, run_locked,
+                                                   &details_open, which)) {
+                    case workspace_destination::graph:
+                        show_page(shell_page::Graph);
+                        break;
+                    case workspace_destination::script:
+                        show_page(shell_page::Script);
+                        break;
+                    case workspace_destination::current:
+                        break;
+                    }
+                }
+            }
+            return open;
+        };
+
+        if (begin_page(shell_page::Script)) {
+            script_panel_draw(st, cfg_view, st.snapshot_ccat_live(),
+                              lock_manual_single);
+        }
+        ImGui::End();
+        if (begin_page(shell_page::Llm)) {
+            llm_panel_draw_panel(st, cfg_view);
+        }
+        ImGui::End();
+        if (begin_page(shell_page::Console)) {
+            console_panel_draw(st, cfg_view, lock_manual_single);
+        }
+        ImGui::End();
+        if (begin_page(shell_page::Graph)) {
+            graph_panel_draw(cfg_view, st.workspace);
+        }
+        ImGui::End();
+        if (begin_page(shell_page::Settings)) {
+            settings_panel_draw(st, cfg_view);
+        }
+        ImGui::End();
+
+        // Same right-hand node as Details. Hidden until a script is open, so
+        // the first frame does not reserve an empty column.
+        if (script_editor_has_open()) {
+            if (script_editor_focus_requested()) {
+                ImGui::SetNextWindowFocus();
+            }
+            if (ImGui::Begin(k_dock_editor, nullptr, k_dock_panel_flags)) {
+                script_editor_draw_docked(save_locked);
+            }
+            ImGui::End();
+        }
+
+        static bool details_was_open = false;
+        const bool show_details =
+            details_open && !st.workspace.bundle.empty();
+        if (show_details) {
+            if (!details_was_open) {
+                ImGui::SetNextWindowFocus();
+            }
+            if (ImGui::Begin(k_dock_details, &details_open, k_dock_panel_flags)) {
+                script_editor_inspector_draw(cfg_view.config_home,
+                                             st.workspace.bundle);
+            }
+            ImGui::End();
+        }
+        details_was_open = show_details;
 
         // Top level, not inside the shell window: the user may switch pages
         // while correcting a box, and the window must survive that.

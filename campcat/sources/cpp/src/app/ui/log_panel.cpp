@@ -3,6 +3,7 @@
 #include "app/shell_state.h"
 #include "app/ui/buttons.h"
 #include "app/ui/icon_texture.h"
+#include "app/ui/shell_dock.h"
 
 #include <imgui.h>
 
@@ -16,9 +17,10 @@ namespace {
 /// rather than by whoever emitted.
 constexpr size_t k_max_scroll_lines = 2000;
 
-/// Whether the log is expanded. Read by `log_panel_open` before the nav block
-/// is drawn, flipped by the header's icon button.
-bool g_open = false;
+/// Whether the lines are shown. Starts open: the window is a dock node whose
+/// height does not follow this flag, and a closed log would leave that node
+/// empty. The chevron still hides the lines.
+bool g_open = true;
 
 /// How wide the chevron is drawn inside its square button, in pixels. Smaller
 /// than the button so the frame stays visible around it.
@@ -35,12 +37,6 @@ constexpr char k_chevron_right_path[] = "campcat/sources/cpp/assets/icons/chevro
 
 } // namespace
 
-float log_panel_collapsed_height() {
-    return ImGui::GetFrameHeight() + ImGui::GetStyle().WindowPadding.y * 2.0F;
-}
-
-bool log_panel_open() { return g_open; }
-
 void log_panel_draw(campcat::shell_state &_st) {
     // Drained every frame, expanded or not: a collapsed log that stopped
     // collecting would hand the whole backlog over on the next expand.
@@ -55,19 +51,14 @@ void log_panel_draw(campcat::shell_state &_st) {
         }
     }
 
-    // This frame's state, taken once: the click below flips `g_open` for the
-    // next frame, so the box, the icon and the nav across the column all change
-    // together instead of splitting across a frame.
+    // Taken once: the click below flips `g_open` for the next frame, so the
+    // icon and the lines agree.
     const bool open = g_open;
 
-    // Both states want a height of 0: expanded, 0 fills the cell's remaining
-    // height (the same amount the collapsed box leaves below it); collapsed,
-    // AutoResizeY shrinks the box to its header. Sizing the expanded one
-    // `-ItemSpacing.y` instead leaves an 8px strip the collapsed state does not
-    // have, and the two should end at the same place.
-    ImGui::BeginChild("shell_log", ImVec2(0.0F, 0.0F),
-                      ImGuiChildFlags_Borders |
-                          (open ? 0 : ImGuiChildFlags_AutoResizeY));
+    if (!ImGui::Begin(k_dock_log, nullptr, k_dock_panel_flags)) {
+        ImGui::End();
+        return;
+    }
 
     const float side = ImGui::GetFrameHeight();
     if (campcat::app::button("##log_toggle", ImVec2(side, side))) {
@@ -111,5 +102,5 @@ void log_panel_draw(campcat::shell_state &_st) {
         }
         ImGui::EndChild();
     }
-    ImGui::EndChild();
+    ImGui::End();
 }
