@@ -43,8 +43,8 @@ MEMORY_INSTRUCTIONS = (
     "宿主会逐条校验再写进账本，落盘的格式由它决定。\n"
     "\n"
     "只提议经过这一轮之后仍然成立、而且是 bundle 里还没写下的内容：\n"
-    "- 用户用的某个叫法，section 写「叫法」，text 写成「说法 -> bundle 或 anchor 名」\n"
-    "- 跨图、跨会话仍适用，且用户明确表达或确认的长期要求，section 写「偏好」。\n"
+    "- 用户用的某个叫法，section 写 alias，text 写成「说法 -> bundle 或 anchor 名」\n"
+    "- 跨图、跨会话仍适用，且用户明确表达或确认的长期要求，section 写 preference。\n"
     "  可参考这些类型：回复语言；多个动作都匹配时如何消歧；哪些操作需要事先确认"
     "（如购买、消耗稀缺资源或不可撤销的操作）；失败时希望看到哪些信息"
     "（如卡住的步骤、当前界面、操作是否可能已成功）。\n"
@@ -55,16 +55,14 @@ MEMORY_INSTRUCTIONS = (
     "失败步骤的日志，以及机密：密码、token、API key、账号，"
     "或者用户要求保密的任何东西。\n"
     "\n"
+    "先与现有同作用域条目对照。内容等价时跳过；有明确证据纠正旧条目时，"
+    "优先 edit 原条目。确认旧条目已失效且没有替代内容时，才 retire 并写明依据。"
+    "遇到冲突但真伪未定，或旧条目受保护时，不追加互相矛盾的条目。"
+    "不同图、不同页面或不同条件下成立的内容保留各自的适用范围。\n"
+    "\n"
     "每条 text 不超过 {entry_chars} 个字符，一次最多 {max_ops} 条操作。"
     "标着「钉」或「用户」的条目不归你管：不要 edit 或 retire 它们。"
-    "没有任何值得一提的东西时，输出 {\"ops\":[]}。\n"
-    "\n"
-    "只输出一个 JSON 对象，别的什么都不要：\n"
-    '{"ops":[{"op":"add","section":"叫法","text":"签到 -> campcat.tasks.checkin"},'
-    '{"op":"edit","id":"9b02","text":"用中文思考和回答"},'
-    '{"op":"retire","id":"f3a1","why":"campcat.home 已覆盖该流程"}]}\n'
-    "可用的 op：add（要 section 和 text）、edit（要 id 和 text）、"
-    "retire（要 id 和 why）。"
+    "调用 submit_memory 提交提案。没有更新时也调用一次，传入空的 ops。\n"
 )
 
 SCRIPTER_MEMORY_INSTRUCTIONS = (
@@ -72,11 +70,11 @@ SCRIPTER_MEMORY_INSTRUCTIONS = (
     "（每条前面有一个 [id]），以及它这一轮会话的记录。你的输出是一串操作，"
     "不是笔记本身：宿主会逐条校验再写进账本。\n"
     "\n"
-    "每条还没被某个 bundle 表达出来的坑，section 写「坑」，text 留一行。"
+    "每条还没被某个 bundle 表达出来的坑，section 写 pitfall，text 留一行。"
     "记录显示某个坑已经写进 bundle 了，就用 retire 收掉那一条，"
     "why 里写上是哪个 bundle。\n"
     "\n"
-    "从有效交接的 Handoff.ui_style 提取游戏中可复用的界面规律，section 写「风格」。"
+    "从有效交接的 Handoff.ui_style 提取游戏中可复用的界面规律，section 写 ui_style。"
     "每条保留游戏或图名和适用范围，例如按钮形状、文字底色、导航位置或弹窗布局。"
     "单页观察只记作该页规律。重复则跳过，确认风格有变化就更新。"
     "舍弃临时坐标、帧号和这一屏的即时状态。\n"
@@ -84,15 +82,14 @@ SCRIPTER_MEMORY_INSTRUCTIONS = (
     "丢掉当前目标、当前这一屏上有什么、逐步的失败日志，以及任何关于用户怎么说话、"
     "禁止了什么的内容。\n"
     "\n"
+    "先与现有同作用域条目对照。内容等价时跳过；有明确证据纠正旧条目时，"
+    "优先 edit 原条目。确认旧条目已失效且没有替代内容时，才 retire 并写明依据。"
+    "遇到冲突但真伪未定，或旧条目受保护时，不追加互相矛盾的条目。"
+    "不同图、不同页面或不同条件下成立的内容保留各自的适用范围。\n"
+    "\n"
     "每条 text 不超过 {entry_chars} 个字符，一次最多 {max_ops} 条操作。"
     "标着「钉」或「用户」的条目不归你管：不要 edit 或 retire 它们。"
-    "没有任何值得一提的东西时，输出 {\"ops\":[]}。\n"
-    "\n"
-    "只输出一个 JSON 对象，别的什么都不要：\n"
-    '{"ops":[{"op":"add","section":"坑","text":"screencap 偶发超时，重试一次"},'
-    '{"op":"retire","id":"1a2b","why":"campcat.home.harvest 已覆盖"}]}\n'
-    "可用的 op：add（要 section 和 text）、edit（要 id 和 text）、"
-    "retire（要 id 和 why）。"
+    "调用 submit_memory 提交提案。没有更新时也调用一次，传入空的 ops。\n"
 )
 
 # Prepended to the notes when they go into the prompt, so the model reads them as
@@ -164,12 +161,12 @@ def reset() -> None:
     _SCRIPTER_MW = None
 
 
-def memorize(memory: str, agent: str) -> str | None:
+def memorize(memory: str, agent: str, schema: dict | None) -> str | None:
     """Fold one agent's new turns into its ledger, returning the proposed ops.
 
     `agent` is `operator` or `scripter`. Each reads only its own history.
     Returns an empty op list when there is nothing new -- no model call -- and
-    None when the call fails, the reply is not ops JSON, or `agent` is unknown.
+    None when the call fails, the proposal tool is missing, or the agent is unknown.
     None leaves the caller's ledger and cursor alone.
     """
     if agent == "operator":
@@ -183,10 +180,20 @@ def memorize(memory: str, agent: str) -> str | None:
     history = session.memory_history(agent)
     if not history:
         return json.dumps({"ops": [], "from": "", "to": ""})
+    if not isinstance(schema, dict) or schema.get("type") != "object":
+        print("[sidecar] memory not updated: missing proposal schema", file=sys.stderr)
+        return None
+    tool_name = "submit_memory"
+    tool = {
+        "type": "function",
+        "function": {
+            "name": tool_name,
+            "description": "Submit one batch of proposed long-term memory operations.",
+            "parameters": schema,
+        },
+    }
     try:
-        model = models.build_memory_model()
-        # Not `str.format`: the instructions carry JSON examples, and every
-        # brace in them would be read as a field.
+        model = models.build_memory_model().bind_tools([tool])
         instructions = (instructions
                         .replace("{entry_chars}", str(ENTRY_MAX_CHARS))
                         .replace("{max_ops}", str(MAX_OPS_PER_PASS)))
@@ -202,34 +209,15 @@ def memorize(memory: str, agent: str) -> str | None:
     except Exception as exc:  # noqa: BLE001 - a missed update, never fatal
         print(f"[sidecar] memory not updated: {exc}", file=sys.stderr)
         return None
-    text = session.strip_tool_markup(
-        session.content_text(getattr(reply, "content", reply))
-    ).strip()
-    payload = _parse_ops(text)
-    if payload is None:
-        print("[sidecar] memory not updated: reply is not ops JSON",
+    calls = reply.tool_calls
+    if (reply.invalid_tool_calls or len(calls) != 1
+            or calls[0]["name"] != tool_name or set(calls[0]["args"]) != {"ops"}):
+        print("[sidecar] memory not updated: expected one proposal tool call",
               file=sys.stderr)
         return None
+    payload = dict(calls[0]["args"])
     payload["from"], payload["to"] = session.turn_span(history, agent)
     return json.dumps(payload, ensure_ascii=False)
-
-
-def _parse_ops(text: str) -> dict | None:
-    """The reply as `{"ops": [...]}`, or None when it is anything else.
-
-    Only the shape is checked here: whether an op is allowed is the host's call,
-    and duplicating those rules would be a second place to get them wrong.
-    """
-    if not text:
-        return None
-    try:
-        payload = json.loads(text)
-    except ValueError:
-        return None
-    if (not isinstance(payload, dict) or not isinstance(payload.get("ops"), list)
-            or any(not isinstance(op, dict) for op in payload["ops"])):
-        return None
-    return {"ops": payload["ops"]}
 
 
 def _transcript(messages: list) -> str:

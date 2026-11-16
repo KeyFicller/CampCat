@@ -1,7 +1,7 @@
 #include "app/ui/script_panel.h"
 
 #include "app/shell_state.h"
-#include "app/ui/fonts.h"
+#include "app/ui/buttons.h"
 #include "app/ui/icon_texture.h"
 #include "app/ui/script_editor_panel.h"
 #include "app/ui/template_capture_panel.h"
@@ -36,7 +36,7 @@ constexpr float k_icon_side = 20.0F;
 bool icon_button(const char *_id, const char *_icon_path,
                  const char *_tooltip) {
     const float side = ImGui::GetFrameHeight();
-    const bool clicked = ImGui::Button(_id, ImVec2(side, 0.0F));
+    const bool clicked = campcat::app::button(_id, ImVec2(side, 0.0F));
     const bool hovered =
         ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled);
     const GLuint tex = campcat::app::load_icon(_icon_path);
@@ -149,7 +149,7 @@ void script_panel_draw(campcat::shell_state &_st,
             ImGui::PushStyleColor(
                 ImGuiCol_ButtonActive,
                 ImGui::GetStyleColorVec4(ImGuiCol_FrameBgActive));
-            if (ImGui::Button("Run Once")) {
+            if (campcat::app::button("Run Once")) {
                 _st.push_job_snapshot(&_cfg_view);
                 _st.run_single_job();
             }
@@ -165,7 +165,7 @@ void script_panel_draw(campcat::shell_state &_st,
             if (!can_stop_cycle) {
                 ImGui::BeginDisabled();
             }
-            if (ImGui::Button("Stop")) {
+            if (campcat::app::button("Stop")) {
                 _st.stop_requested.store(true);
                 _st.sched.stop();
                 _st.append_log("[ui] stop cycle");
@@ -181,7 +181,7 @@ void script_panel_draw(campcat::shell_state &_st,
             if (start_locked) {
                 ImGui::BeginDisabled();
             }
-            if (ImGui::Button("Run Scheduled")) {
+            if (campcat::app::button("Run Scheduled")) {
                 // Arm from what the sliders currently hold: push first, because
                 // refresh reads the config back out of shell_state.
                 _st.push_job_snapshot(&_cfg_view);

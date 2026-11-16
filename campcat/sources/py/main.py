@@ -63,7 +63,7 @@ def handle_request(req: dict) -> Iterator[dict]:
         agent = req.get("agent") or ""
         if agent in {"operator", "scripter"}:
             session.set_memory_upto(req.get("memory_upto") or "", agent)
-        ops = memorier.memorize(req.get("memory") or "", agent)
+        ops = memorier.memorize(req.get("memory") or "", agent, req.get("schema"))
         if ops is None:
             yield protocol.build_error_result(
                 rid, "memory not updated", **session.usage_fields())

@@ -2,7 +2,7 @@
 #include "app/workspace_selection.h"
 
 #include "app/ui/ccat_highlight.h"
-#include "app/ui/fonts.h"
+#include "app/ui/buttons.h"
 #include "app/ui/gl_texture.h"
 #include "core/script/ccat_bundle.h"
 #include "core/script/ccat_graph.h"
@@ -537,7 +537,7 @@ std::optional<std::string> draw_list(const std::filesystem::path &_dir,
 /// and a refusal is shown inside it so the name can be corrected in place.
 bool mutation_button(const char *_label, bool _locked) {
     ImGui::BeginDisabled(_locked);
-    const bool clicked = ImGui::Button(_label);
+    const bool clicked = campcat::app::button(_label);
     ImGui::EndDisabled();
     return clicked && !_locked;
 }
@@ -611,7 +611,7 @@ void draw_rename_modal(const std::filesystem::path &_dir,
         }
     }
     ImGui::SameLine();
-    if (ImGui::Button("Cancel")) {
+    if (campcat::app::button("Cancel")) {
         ImGui::CloseCurrentPopup();
         g_rename_name.clear();
         g_rename_referrers.clear();
@@ -667,7 +667,7 @@ void draw_new_action_modal(const std::filesystem::path &_dir,
     if (!ready) {
         ImGui::BeginDisabled();
     }
-    if ((ImGui::Button("Create") || entered) && ready) {
+    if ((campcat::app::button("Create") || entered) && ready) {
         const std::string err = campcat::ccat_lang::create_action_bundle(
             _dir, g_graph, g_new_action_anchor, g_new_action_name);
         if (err.empty()) {
@@ -687,7 +687,7 @@ void draw_new_action_modal(const std::filesystem::path &_dir,
         ImGui::EndDisabled();
     }
     ImGui::SameLine();
-    if (ImGui::Button("Cancel")) {
+    if (campcat::app::button("Cancel")) {
         ImGui::CloseCurrentPopup();
         g_new_action_anchor.clear();
         g_new_action_name.clear();
@@ -713,7 +713,7 @@ void draw_delete_modal(const std::filesystem::path &_dir,
 
     if (!g_delete_error.empty()) {
         ImGui::TextWrapped("%s", g_delete_error.c_str());
-        if (ImGui::Button("OK")) {
+        if (campcat::app::button("OK")) {
             ImGui::CloseCurrentPopup();
             g_delete_name.clear();
             g_delete_error.clear();
@@ -747,7 +747,7 @@ void draw_delete_modal(const std::filesystem::path &_dir,
         }
     }
     ImGui::SameLine();
-    if (ImGui::Button("Cancel")) {
+    if (campcat::app::button("Cancel")) {
         ImGui::CloseCurrentPopup();
         g_delete_name.clear();
     }
@@ -792,7 +792,7 @@ void draw_editor_contents(script_editor &_e, bool _save_locked) {
     ImGui::EndChild();
 
     ImGui::BeginDisabled(_save_locked);
-    if (ImGui::Button("Save")) {
+    if (campcat::app::button("Save")) {
         save_editor(_e.dir, _e);
     }
     if (ImGui::IsItemHovered()) {
@@ -800,7 +800,7 @@ void draw_editor_contents(script_editor &_e, bool _save_locked) {
     }
     ImGui::EndDisabled();
     ImGui::SameLine();
-    if (ImGui::Button("Reload")) {
+    if (campcat::app::button("Reload")) {
         reload_editor(_e);
     }
     if (ImGui::IsItemHovered()) {
@@ -821,28 +821,6 @@ void draw_editor_contents(script_editor &_e, bool _save_locked) {
         ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiKey_S)) {
         save_editor(_e.dir, _e);
     }
-}
-
-void draw_editor(script_editor &_e, bool _save_locked) {
-    if (!_e.open) {
-        return;
-    }
-    const bool dirty = _e.editor->GetText() != _e.loaded;
-    // Root and file path distinguish same-named scripts in different libraries.
-    const std::string title = "script: " + _e.name + (dirty ? " *" : "") +
-                              "###script_editor_" + _e.main_path.string();
-    if (_e.focus) {
-        ImGui::SetNextWindowFocus();
-        _e.focus = false;
-    }
-    const ImVec2 display = ImGui::GetIO().DisplaySize;
-    ImGui::SetNextWindowSize(
-        ImVec2(std::min(760.0F, display.x * 0.9F),
-               std::min(560.0F, display.y * 0.85F)), ImGuiCond_Appearing);
-    if (ImGui::Begin(title.c_str(), &_e.open)) {
-        draw_editor_contents(_e, _save_locked);
-    }
-    ImGui::End();
 }
 
 void prune_closed_editors() {
@@ -890,16 +868,6 @@ void script_editor_draw_docked(bool _save_locked) {
             }
         }
         ImGui::EndTabBar();
-    }
-    prune_closed_editors();
-}
-
-void script_editor_draw_windows(bool _docked, bool _save_locked) {
-    prune_closed_editors();
-    if (!_docked) {
-        for (const std::unique_ptr<script_editor> &entry : g_editors) {
-            draw_editor(*entry, _save_locked);
-        }
     }
     prune_closed_editors();
 }

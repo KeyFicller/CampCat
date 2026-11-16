@@ -13,67 +13,73 @@ import main
 import session
 from langchain_core.messages import AIMessage
 
-_OPS = '{"ops":[{"op":"add","section":"偏好","text":"用中文"}]}'
+_OPS = '{"ops":[{"op":"add","section":"preference","text":"用中文"}]}'
 
 
-def test_operator_transcript_skips_scripter_and_scripter_skips_operator(monkeypatch):
+def test_operator_transcript_skips_scripter_and_scripter_skips_operator(monkeypatch, memory_schema):
     session.reset()
     session.append_turn("operator said hello", [AIMessage(content="ok")])
     session.append_scripter_turn("goal: x", [AIMessage(content="scripter secret handoff")])
     seen = []
 
     class _Model:
+        def bind_tools(self, tools):
+            assert tools[0]["function"]["parameters"] is memory_schema
+            return self
+
         def invoke(self, messages, config=None):
             seen.append(messages[-1].content)
-            return AIMessage(content=_OPS)
+            return AIMessage(content="", tool_calls=[{
+                "name": "submit_memory", "args": json.loads(_OPS), "id": "mem",
+            }])
 
     monkeypatch.setattr(models, "build_memory_model", lambda: _Model())
-    assert json.loads(memorier.memorize("", "operator"))["ops"]
-    assert json.loads(memorier.memorize("", "scripter"))["ops"]
+    assert json.loads(memorier.memorize("", "operator", memory_schema))["ops"]
+    assert json.loads(memorier.memorize("", "scripter", memory_schema))["ops"]
     assert "operator said hello" in seen[0]
     assert "scripter secret handoff" not in seen[0]
     assert "scripter secret handoff" in seen[1]
     assert "operator said hello" not in seen[1]
 
 
-def test_nothing_new_does_not_call_the_model(monkeypatch):
+def test_nothing_new_does_not_call_the_model(monkeypatch, memory_schema):
     session.reset()
     monkeypatch.setattr(models, "build_memory_model", lambda: (_ for _ in ()).throw(AssertionError("called")))
     # Still a receipt: the host records that these turns are folded, so they are
     # not paid for twice.
     for agent in ("operator", "scripter"):
-        payload = json.loads(memorier.memorize("notes", agent))
+        payload = json.loads(memorier.memorize("notes", agent, memory_schema))
         assert payload["ops"] == []
         assert payload["to"] == ""
 
 
-def test_the_pass_reports_which_turns_it_folded(monkeypatch):
+def test_the_pass_reports_which_turns_it_folded(monkeypatch, memory_schema):
     session.reset()
     monkeypatch.setattr(models, "build_memory_model", lambda: _Model())
     session.append_turn("first", [AIMessage(content="ok")])
     session.append_turn("second", [AIMessage(content="ok")])
-    payload = json.loads(memorier.memorize("", "operator"))
+    payload = json.loads(memorier.memorize("", "operator", memory_schema))
     marks = [m.id for m in session._MESSAGES if str(m.id).startswith("turn:")]
     assert payload["from"] == marks[0]
     assert payload["to"] == marks[-1]
 
 
 @pytest.mark.parametrize("agent", ["operator", "scripter"])
-def test_proposals_repeat_until_host_commits_their_turn_mark(monkeypatch, agent):
+def test_proposals_repeat_until_host_commits_their_turn_mark(monkeypatch, agent, memory_schema):
     session.reset()
     append = session.append_turn if agent == "operator" else session.append_scripter_turn
     append("first", [AIMessage(content="first reply")])
     monkeypatch.setattr(models, "build_memory_model", lambda: _Model())
 
-    first = json.loads(memorier.memorize("", agent))
-    repeated = json.loads(memorier.memorize("", agent))
+    first = json.loads(memorier.memorize("", agent, memory_schema))
+    repeated = json.loads(memorier.memorize("", agent, memory_schema))
     history = session.history() if agent == "operator" else session.scripter_history()
     assert first == repeated
     assert first["from"] == first["to"] == history[0].id
 
     append("second", [AIMessage(content="second reply")])
     response = list(main.handle_request({
-        "type": "memorize", "id": "memory", "agent": agent,
+        "type": "memorize", "schema": memory_schema, "id": "memory", "agent": agent,
         "memory_upto": first["to"],
     }))[-1]
     assert response["ok"]
@@ -82,7 +88,7 @@ def test_proposals_repeat_until_host_commits_their_turn_mark(monkeypatch, agent)
     assert second["from"] == second["to"] == history[2].id
 
 
-def test_compaction_cannot_skip_uncommitted_turns(monkeypatch):
+def test_compaction_cannot_skip_uncommitted_turns(monkeypatch, memory_schema):
     session.reset()
     session.append_turn("committed", [AIMessage(content="old reply")])
     session.append_turn("still pending", [AIMessage(content="pending reply")])
@@ -95,13 +101,13 @@ def test_compaction_cannot_skip_uncommitted_turns(monkeypatch):
     monkeypatch.setattr(memorier, "_middleware", lambda: Cutter())
     memorier.compact()
     monkeypatch.setattr(models, "build_memory_model", lambda: _Model())
-    proposal = json.loads(memorier.memorize("", "operator"))
+    proposal = json.loads(memorier.memorize("", "operator", memory_schema))
     assert proposal["ops"]
     assert proposal["to"] == session.history()[0].id
 
 
 @pytest.mark.parametrize("agent", ["operator", "scripter"])
-def test_previous_conversation_receipt_cannot_skip_a_new_turn(monkeypatch, agent):
+def test_previous_conversation_receipt_cannot_skip_a_new_turn(monkeypatch, agent, memory_schema):
     session.reset()
     append = session.append_turn if agent == "operator" else session.append_scripter_turn
     append("old conversation", [])
@@ -111,7 +117,7 @@ def test_previous_conversation_receipt_cannot_skip_a_new_turn(monkeypatch, agent
     monkeypatch.setattr(models, "build_memory_model", lambda: _Model())
 
     result = list(main.handle_request({
-        "type": "memorize", "id": "memory", "agent": agent, "memory_upto": old_mark,
+        "type": "memorize", "schema": memory_schema, "id": "memory", "agent": agent, "memory_upto": old_mark,
     }))[-1]
     proposal = json.loads(result["text"])
     assert proposal["ops"]
@@ -119,56 +125,53 @@ def test_previous_conversation_receipt_cannot_skip_a_new_turn(monkeypatch, agent
     assert proposal["to"] != old_mark
 
 
-def test_a_reply_that_is_not_ops_nothing_is_written(monkeypatch):
+def test_json_in_plain_text_does_not_submit_a_proposal(monkeypatch, memory_schema):
     session.reset()
     session.append_turn("hi", [AIMessage(content="ok")])
 
     class _Proud:
+        def bind_tools(self, tools):
+            assert tools[0]["function"]["parameters"] is memory_schema
+            return self
+
         def invoke(self, messages, config=None):
-            return AIMessage(content="## 偏好\n- 用中文回答")
+            return AIMessage(content=_OPS)
 
     monkeypatch.setattr(models, "build_memory_model", lambda: _Proud())
-    assert memorier.memorize("old", "operator") is None
+    assert memorier.memorize("old", "operator", memory_schema) is None
     # The cursor stays put, so the next pass tries this turn again.
     assert session._MEMORIZED_UPTO == 0
 
 
-def test_parse_ops_keeps_only_the_shape(monkeypatch):
-    assert memorier._parse_ops("") is None
-    assert memorier._parse_ops("nope") is None
-    assert memorier._parse_ops("[]") is None
-    assert memorier._parse_ops('{"ops":{}}') is None
-    # A malformed container cannot be turned into a successful empty receipt.
-    assert memorier._parse_ops('{"ops":[1,{"op":"add"}]}') is None
-    # Object policy stays with the host, including operations it may reject.
-    assert memorier._parse_ops('{"ops":[{"op":"unknown"}]}') == {"ops": [{"op": "unknown"}]}
-
-
-def test_empty_reply_and_unknown_agent_leave_cursors(monkeypatch):
+def test_empty_reply_and_unknown_agent_leave_cursors(monkeypatch, memory_schema):
     session.reset()
     session.append_turn("hi", [AIMessage(content="ok")])
     session.append_scripter_turn("goal", [AIMessage(content="did")])
 
     class _Empty:
+        def bind_tools(self, tools):
+            assert tools[0]["function"]["parameters"] is memory_schema
+            return self
+
         def invoke(self, messages, config=None):
             return AIMessage(content="  ")
 
     monkeypatch.setattr(models, "build_memory_model", lambda: _Empty())
-    assert memorier.memorize("old", "operator") is None
-    assert memorier.memorize("old", "nope") is None
+    assert memorier.memorize("old", "operator", memory_schema) is None
+    assert memorier.memorize("old", "nope", memory_schema) is None
     assert session._MEMORIZED_UPTO == 0
     assert session._SCRIPTER_MEMORIZED_UPTO == 0
 
 
 def test_instructions_name_the_sections():
-    assert "偏好" in memorier.MEMORY_INSTRUCTIONS
-    assert "叫法" in memorier.MEMORY_INSTRUCTIONS
+    assert "preference" in memorier.MEMORY_INSTRUCTIONS
+    assert "alias" in memorier.MEMORY_INSTRUCTIONS
     assert "Device & skills" not in memorier.MEMORY_INSTRUCTIONS
     assert "密码" in memorier.MEMORY_INSTRUCTIONS
-    assert '"ops"' in memorier.MEMORY_INSTRUCTIONS
+    assert "submit_memory" in memorier.MEMORY_INSTRUCTIONS
     assert "钉" in memorier.MEMORY_INSTRUCTIONS
-    assert "坑" in memorier.SCRIPTER_MEMORY_INSTRUCTIONS
-    assert "风格" in memorier.SCRIPTER_MEMORY_INSTRUCTIONS
+    assert "pitfall" in memorier.SCRIPTER_MEMORY_INSTRUCTIONS
+    assert "ui_style" in memorier.SCRIPTER_MEMORY_INSTRUCTIONS
     assert "bundle" in memorier.SCRIPTER_MEMORY_INSTRUCTIONS
     assert "{entry_chars}" in memorier.MEMORY_INSTRUCTIONS
     assert memorier.scripter_memory_block("  ") == ""
@@ -178,8 +181,13 @@ def test_instructions_name_the_sections():
 class _Model:
     """A memory model that always proposes one fact."""
 
+    def bind_tools(self, tools):
+        return self
+
     def invoke(self, messages, config=None):
-        return AIMessage(content=_OPS)
+        return AIMessage(content="", tool_calls=[{
+            "name": "submit_memory", "args": json.loads(_OPS), "id": "mem",
+        }])
 
 
 def test_empty_notes_leave_both_prompts_byte_identical():

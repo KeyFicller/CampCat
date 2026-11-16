@@ -20,13 +20,26 @@ TEST(LlmMemory, ModelProposalRejectsMalformedTypesWithoutPartialAcceptance) {
     campcat::llm::memory_proposal proposal;
     std::string error;
     EXPECT_TRUE(campcat::llm::parse_memory_proposal(
-        R"({"ops":[{"op":"add","section":"偏好","text":"中文"}],"from":"turn:1","to":"turn:2"})",
+        R"({"ops":[{"op":"add","section":"preference","text":"中文"}],"from":"turn:1","to":"turn:2"})",
         &proposal, &error));
     ASSERT_EQ(proposal.ops.size(), 1U);
+    EXPECT_EQ(proposal.ops[0].section, "偏好");
     EXPECT_EQ(proposal.to, "turn:2");
+    ASSERT_TRUE(campcat::llm::parse_memory_proposal(
+        R"({"ops":[{"op":"edit","id":"0001","text":"new"},{"op":"retire","id":"0002","why":"obsolete"}]})",
+        &proposal, &error));
+    ASSERT_EQ(proposal.ops.size(), 2U);
+    EXPECT_EQ(proposal.ops[0].k, campcat::llm::memory_op::kind::edit);
+    EXPECT_EQ(proposal.ops[0].text, "new");
+    EXPECT_EQ(proposal.ops[1].k, campcat::llm::memory_op::kind::retire);
+    EXPECT_EQ(proposal.ops[1].why, "obsolete");
     for (auto raw : {R"({"ops":[{"op":12}]})", R"({"ops":[{"op":"add","text":false}]})",
                     R"({"ops":[{"op":"invented"}]})", R"({"ops":[],"to":[]})",
-                    R"({"ops":[{"op":"add"},12]})"}) {
+                    R"({"ops":[{"op":"add"},12]})",
+                    R"({"ops":[{"op":"pin","id":"0001"}]})",
+                    R"({"ops":[{"op":"retire","id":"0001"}]})",
+                    R"({"ops":[{"op":"edit","id":"0001","text":"x","why":"extra"}]})",
+                    R"({"ops":[{"op":"add","section":"unknown","text":"x"}]})"}) {
         EXPECT_FALSE(campcat::llm::parse_memory_proposal(raw, &proposal, &error));
         EXPECT_TRUE(proposal.ops.empty());
         EXPECT_FALSE(error.empty());
@@ -136,7 +149,7 @@ TEST(LlmMemory, PassCannotTouchWhatTheUserWrote) {
 
     // Adding is still the pass's job: it is the only way facts accumulate.
     EXPECT_EQ(
-        apply(dir, "", {op_of(kind::add, "", "叫法", "收菜 -> x")}, false), 1);
+        apply(dir, "", {op_of(kind::add, "", "偏好", "简短回复")}, false), 1);
     EXPECT_EQ(ledger_entries(dir).size(), 2U);
     std::filesystem::remove_all(dir);
 }
@@ -317,6 +330,11 @@ TEST(LlmMemory, TheTwoLedgersStayApart) {
                   dir, mo::scripter_notes, "",
                   {op_of(campcat::llm::memory_op::kind::add, "", "坑", "pit")},
                   {}, false, &notes),
+              0);
+    EXPECT_EQ(campcat::llm::apply_ops(
+                  dir, mo::scripter_notes, "demo",
+                  {op_of(campcat::llm::memory_op::kind::add, "", "坑", "pit")},
+                  {}, false, &notes),
               1);
 
     std::string op;
@@ -324,11 +342,16 @@ TEST(LlmMemory, TheTwoLedgersStayApart) {
     EXPECT_NE(op.find("keep"), std::string::npos);
     EXPECT_EQ(op.find("pit"), std::string::npos);
 
-    EXPECT_TRUE(campcat::llm::clear_memory(dir, mo::scripter_notes, ""));
+    std::string pit;
+    ASSERT_TRUE(campcat::llm::read_memory(dir, mo::scripter_notes, "demo", &pit));
+    EXPECT_NE(pit.find("pit"), std::string::npos);
+    ASSERT_TRUE(campcat::llm::read_memory(dir, mo::scripter_notes, "another", &pit));
+    EXPECT_TRUE(pit.empty());
+
+    EXPECT_TRUE(campcat::llm::clear_memory(dir, mo::scripter_notes, "demo"));
     ASSERT_TRUE(campcat::llm::read_memory(dir, mo::operator_notes, "", &op));
     EXPECT_NE(op.find("keep"), std::string::npos);
-    std::string pit;
-    ASSERT_TRUE(campcat::llm::read_memory(dir, mo::scripter_notes, "", &pit));
+    ASSERT_TRUE(campcat::llm::read_memory(dir, mo::scripter_notes, "demo", &pit));
     EXPECT_TRUE(pit.empty());
     std::filesystem::remove_all(dir);
 }
@@ -477,6 +500,26 @@ TEST(LlmMemory, EntryLimitCountsUnicodeCodepoints) {
     ASSERT_EQ(entries.size(), 1U);
     EXPECT_EQ(entries[0].text, text);
     std::filesystem::remove_all(dir);
+}
+
+TEST(LlmMemory, BudgetRanksAcrossSections) {
+    using namespace campcat::llm;
+    memory_entry newer;
+    newer.section = "叫法";
+    newer.text = "新";
+    newer.at = 20;
+    memory_entry user;
+    user.section = "偏好";
+    user.text = "旧";
+    user.at = 10;
+    user.by_user = true;
+    int dropped = 0;
+    EXPECT_EQ(render_memory({newer, user}, 10, &dropped), "## 偏好\n- 旧\n");
+    EXPECT_EQ(dropped, 1);
+
+    newer.pinned = true;
+    EXPECT_EQ(render_memory({user, newer}, 9, &dropped), "## 叫法\n- 新\n");
+    EXPECT_EQ(dropped, 1);
 }
 
 TEST(LlmMemory, PromptBudgetCountsUnicodeCodepointsIncludingFormatting) {

@@ -151,6 +151,8 @@ struct app_config {
     /// Script 页选中的 bundle 名（`<config_home>/<name>/main.ccat`）；空 =
     /// 未选。
     std::string script_bundle{};
+    /// Workspace graph captured for an Agent request. Kept out of config JSON.
+    std::string memory_graph{};
 
     /**
      * @brief Factory defaults mirrored when load_from_file fails.

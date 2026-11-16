@@ -81,10 +81,8 @@ struct llm_approval {
 /// exists only because a turn chains many tool rounds.
 constexpr int k_memorize_timeout_ms = 120000;
 
-/// How long the process may stay alive behind an already-closed window to
-/// finish the last consolidation. Only the tail of the session is at stake: the
-/// idle pass has usually folded everything else already.
-constexpr int k_shutdown_memorize_timeout_ms = 5000;
+/// Give each final memory model call time to finish after the window closes.
+constexpr int k_shutdown_memorize_timeout_ms = 30000;
 
 /**
  * @brief Owns the persistent Python sidecar and speaks NDJSON to it.
@@ -111,7 +109,7 @@ public:
      * this turn carries, and its parent anchors `.venv`/`llm/`.
      * @param[in] _provider Which model provider the sidecar should build, from
      * the settings. Taken from a snapshot, so a change mid-turn waits its turn.
-     * @param[in] _bundle The selected graph, whose ledger holds that graph's own
+     * @param[in] _graph The selected graph, whose ledger holds that graph's own
      * names. Empty means no graph is selected, so only the library ledger is
      * read.
      * @param[in] _prompt The user's instruction. Blank is rejected.
@@ -129,7 +127,7 @@ public:
      */
     llm_result run_turn(const std::filesystem::path &_config_home,
                         const std::string &_provider,
-                        const std::string &_bundle, const std::string &_prompt,
+                        const std::string &_graph, const std::string &_prompt,
                         int _max_dispatches, int _max_model_rounds,
                         bool _operator_only,
                         const std::filesystem::path &_repo_root = {});
@@ -148,12 +146,12 @@ public:
      * @param[in] _config_home The config directory, holding the ledgers.
      * @param[in] _provider Which model provider to consolidate on. Must be the
      * same one turns use, or a Qwen-only setup fails here.
-     * @param[in] _bundle The selected graph, for the same reason as `run_turn`.
+     * @param[in] _graph The selected graph, for the same reason as `run_turn`.
      * @param[in] _timeout_ms Hard limit on the whole request. Consolidation can
      * be slow, but the shutdown call must not be.
      */
     llm_result memorize(const std::filesystem::path &_config_home,
-                        const std::string &_provider, const std::string &_bundle,
+                        const std::string &_provider, const std::string &_graph,
                         llm::memory_kind _kind, int _timeout_ms);
 
     /**

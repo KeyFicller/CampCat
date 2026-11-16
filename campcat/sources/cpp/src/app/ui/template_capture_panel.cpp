@@ -1,6 +1,6 @@
 #include "app/ui/template_capture_panel.h"
 
-#include "app/ui/fonts.h"
+#include "app/ui/buttons.h"
 #include "ccat_driver/ccat_script_profile.h"
 #include "core/adb_client.h"
 #include "core/app_config.h"
@@ -291,7 +291,7 @@ void template_capture_panel_draw(campcat::app_config &_cfg,
         ImGui::BeginDisabled();
     }
     WITH_FONT(bold, {
-        if (ImGui::Button("Capture##adb_tpl")) {
+        if (campcat::app::button("Capture##adb_tpl")) {
             capture_clicked(_cfg);
         }
     })
@@ -307,14 +307,14 @@ void template_capture_panel_draw(campcat::app_config &_cfg,
         ImGui::BeginDisabled();
     }
     bool save_crop = false;
-    WITH_FONT(bold, { save_crop = ImGui::Button("Save##adb_tpl"); })
+    save_crop = campcat::app::button("Save##adb_tpl");
     if (!can_save) {
         ImGui::EndDisabled();
     }
 
     ImGui::SameLine();
     WITH_FONT(bold, {
-        if (ImGui::Button("Clear##adb_tpl")) {
+        if (campcat::app::button("Clear##adb_tpl")) {
             clear_capture();
         }
     })

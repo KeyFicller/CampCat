@@ -58,16 +58,18 @@ struct memory_proposal {
     std::vector<memory_op> ops;
     std::string from, to;
 };
+/// JSON Schema for the tool arguments, excluding the host cursor envelope.
+std::string_view memory_proposal_schema();
+
 /// Parse the complete model reply before any operation or cursor is persisted.
 bool parse_memory_proposal(std::string_view _json, memory_proposal *_out,
                            std::string *_error);
 
 /// `<config_home>/memory/<kind>.jsonl`, or
-/// `<config_home>/<bundle>/memory/<kind>.jsonl` when `_bundle` is not empty.
-/// Graph scope is where a bundle's own names live; the library scope holds what
-/// holds across bundles.
+/// `<config_home>/<graph>/memory/<kind>.jsonl` when `_graph` is not empty.
+/// Skills in the same graph share its notes. Library preferences span graphs.
 std::filesystem::path ledger_path(const std::filesystem::path &_config_home,
-                                  memory_kind _kind, std::string_view _bundle);
+                                  memory_kind _kind, std::string_view _graph);
 
 /// Replay the library and graph ledgers into one projection.
 ///
@@ -75,10 +77,10 @@ std::filesystem::path ledger_path(const std::filesystem::path &_config_home,
 /// file exists and cannot be read, which is what stops `apply_ops` from writing
 /// onto something it could not see.
 bool read_ledger(const std::filesystem::path &_config_home, memory_kind _kind,
-                 std::string_view _bundle, std::vector<memory_entry> *_out);
+                 std::string_view _graph, std::vector<memory_entry> *_out);
 
 /// The markdown that goes into the prompt: `## 偏好` sections, pinned first,
-/// then newest. Stops at `_budget` characters; how many entries that left out
+/// then user-edited, then newest within each priority. Stops at `_budget` characters; how many entries that left out
 /// is written to `*_dropped` (which may be null). Pinned entries are never
 /// dropped, so a budget below the pinned size overshoots instead of losing
 /// them.
@@ -99,7 +101,7 @@ std::string render_index(const std::vector<memory_entry> &_entries);
 /// `*_storage_ok`, when supplied, distinguishes an I/O failure from a rejected
 /// proposal; it is true even when every proposal was rejected.
 int apply_ops(const std::filesystem::path &_config_home, memory_kind _kind,
-              std::string_view _bundle, const std::vector<memory_op> &_ops,
+              std::string_view _graph, const std::vector<memory_op> &_ops,
               const std::vector<std::string> &_src, bool _by_user,
               std::vector<std::string> *_notes, bool *_storage_ok = nullptr);
 
@@ -115,29 +117,29 @@ struct memory_commit_result {
 /// fail a pass, but a storage failure never writes its completion receipt.
 memory_commit_result
 commit_pass(const std::filesystem::path &_config_home, memory_kind _kind,
-            std::string_view _bundle, const std::vector<memory_op> &_ops,
+            std::string_view _graph, const std::vector<memory_op> &_ops,
             const std::vector<std::string> &_src, const std::string &_from,
             const std::string &_to, std::vector<std::string> *_notes);
 
 /// Record where a pass folded up to. Written even when the pass proposed
 /// nothing: without it those turns are folded again on the next pass, at cost.
 bool append_pass(const std::filesystem::path &_config_home, memory_kind _kind,
-                 std::string_view _bundle, const std::string &_from,
+                 std::string_view _graph, const std::string &_from,
                  const std::string &_to);
 
 /// The turn mark the last pass reached, or empty when there has been none. The
 /// sidecar uses it to skip history the notes already cover.
 std::string last_pass_to(const std::filesystem::path &_config_home,
-                         memory_kind _kind, std::string_view _bundle);
+                         memory_kind _kind, std::string_view _graph);
 
 /// `read_ledger` + `render_memory` at the default budget. A read failure clears
 /// `*_out` and returns false.
 bool read_memory(const std::filesystem::path &_config_home, memory_kind _kind,
-                 std::string_view _bundle, std::string *_out);
+                 std::string_view _graph, std::string *_out);
 
 /// Delete both ledgers for a kind. Already absent counts as success.
 bool clear_memory(const std::filesystem::path &_config_home, memory_kind _kind,
-                  std::string_view _bundle);
+                  std::string_view _graph);
 
 /// Wire name for a `memorize` request: `operator` or `scripter`. Also the file
 /// stem of that kind's ledger.

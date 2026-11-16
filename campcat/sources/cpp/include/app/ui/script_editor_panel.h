@@ -49,19 +49,16 @@ void script_editor_inspector_draw(const std::filesystem::path &_script_dir,
 void script_editor_open(const std::filesystem::path &_script_dir,
                         std::string_view _name);
 
-/**
- * @brief Draw open editors as floating windows when docking is unavailable.
- *
- * Called centrally once per frame so editors remain visible on every page.
- * Each editor carries its bundle root. Switching layout keeps its buffer.
- */
-void script_editor_draw_windows(bool _docked, bool _save_locked = false);
-
-/// Open editors and pending requests to select one in the workspace sidebar.
+/// Open editors, and a request to select one in the Editor dock window.
 bool script_editor_has_open();
 bool script_editor_focus_requested();
 
-/// Draw the same buffers as tabs in the workspace sidebar.
+/**
+ * @brief Draw open editors as tabs.
+ *
+ * The shell hosts this inside the Editor dock window, so the buffers stay up
+ * on every page. Each script keeps its own buffer across a layout reset.
+ */
 void script_editor_draw_docked(bool _save_locked = false);
 
 /// @brief Release the preview textures and close the editors. Must run before

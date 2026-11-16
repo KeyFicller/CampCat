@@ -83,7 +83,7 @@ def test_a_handoff_tool_is_the_return(monkeypatch, scripted):
     assert "写好了签到" not in text
 
 
-def test_game_ui_observation_reaches_scripter_memory(monkeypatch, scripted):
+def test_game_ui_observation_reaches_scripter_memory(monkeypatch, scripted, memory_schema):
     from agent import memorier, scripter
 
     schema = scripter.HANDOFF_TOOL["function"]["parameters"]
@@ -100,12 +100,16 @@ def test_game_ui_observation_reaches_scripter_memory(monkeypatch, scripted):
     ])
 
     class MemoryModel:
+        def bind_tools(self, tools):
+            return self
+
         def invoke(self, messages, config=None):
             assert style in messages[-1].content
-            return AIMessage(content='{"ops":[]}')
+            return AIMessage(content="", tool_calls=[
+                _call("submit_memory", {"ops": []}, "mem")])
 
     monkeypatch.setattr(models, "build_memory_model", MemoryModel)
-    assert memorier.memorize("", "scripter") is not None
+    assert memorier.memorize("", "scripter", memory_schema) is not None
     assert _tool_messages()[-1].content == "saved\n写好了签到"
 
 

@@ -649,7 +649,7 @@ llm_protocol::usage_stats llm_host::usage() const {
 
 llm_result llm_host::run_turn(const std::filesystem::path &_config_home,
                               const std::string &_provider,
-                              const std::string &_bundle,
+                              const std::string &_graph,
                               const std::string &_prompt, int _max_dispatches,
                               int _max_model_rounds, bool _operator_only,
                               const std::filesystem::path &_repo_root) {
@@ -688,14 +688,14 @@ llm_result llm_host::run_turn(const std::filesystem::path &_config_home,
     // it outside the app then has to show up on the very next request.
     std::string memory;
     if (!llm::read_memory(_config_home, llm::memory_kind::operator_notes,
-                          _bundle, &memory)) {
+                          _graph, &memory)) {
         memory.clear();
         record_note("operator long-term memory ledger is unreadable; continuing "
                     "without it");
     }
     std::string scripter_memory;
     if (!llm::read_memory(_config_home, llm::memory_kind::scripter_notes,
-                          _bundle, &scripter_memory)) {
+                          _graph, &scripter_memory)) {
         scripter_memory.clear();
         record_note("scripter long-term memory ledger is unreadable; continuing "
                     "without it");
@@ -707,7 +707,7 @@ llm_result llm_host::run_turn(const std::filesystem::path &_config_home,
         _max_model_rounds, _operator_only,
         llm::transcript_path(_config_home).string(),
         llm::last_pass_to(_config_home, llm::memory_kind::operator_notes,
-                          _bundle));
+                          _graph));
     request.push_back('\n');
     const llm_result turn = exchange(request, k_request_timeout_ms, id);
     // This turn may have replaced the screenshot; take it back for the next one
@@ -719,12 +719,12 @@ llm_result llm_host::run_turn(const std::filesystem::path &_config_home,
 
 llm_result llm_host::memorize(const std::filesystem::path &_config_home,
                               const std::string &_provider,
-                              const std::string &_bundle,
+                              const std::string &_graph,
                               llm::memory_kind _kind, int _timeout_ms) {
     llm_result r;
 
     std::vector<llm::memory_entry> entries;
-    if (!llm::read_ledger(_config_home, _kind, _bundle, &entries)) {
+    if (!llm::read_ledger(_config_home, _kind, _graph, &entries)) {
         r.error = std::string(llm::memory_agent_name(_kind)) +
                   " memory ledger is unreadable; not writing to it";
         return r;
@@ -738,9 +738,12 @@ llm_result llm_host::memorize(const std::filesystem::path &_config_home,
 
     const long id = next_request_id();
     std::string request = llm_protocol::build_memorize_request(
-        id, llm::render_index(entries), _provider,
+        id, (_graph.empty() ? "未选中图，只能提议全局偏好。\n"
+                            : "当前图：" + _graph + "。图级笔记只记录这张图。\n") +
+                llm::render_index(entries),
+        _provider,
         llm::memory_agent_name(_kind),
-        llm::last_pass_to(_config_home, _kind, _bundle));
+        llm::last_pass_to(_config_home, _kind, _graph));
     request.push_back('\n');
     const llm_result out = exchange(request, _timeout_ms, id);
     if (!out.ok) {
@@ -763,7 +766,7 @@ llm_result llm_host::memorize(const std::filesystem::path &_config_home,
     std::vector<std::string> sources;
     if (!from.empty()) sources.push_back(from);
     if (!to.empty() && to != from) sources.push_back(to);
-    const auto committed = llm::commit_pass(_config_home, _kind, _bundle, proposal.ops,
+    const auto committed = llm::commit_pass(_config_home, _kind, _graph, proposal.ops,
                                             sources, from, to, &notes);
     for (const std::string &n : notes) record_note(n);
     if (!committed.storage_ok) {
@@ -772,7 +775,7 @@ llm_result llm_host::memorize(const std::filesystem::path &_config_home,
     }
 
     std::vector<llm::memory_entry> after;
-    if (llm::read_ledger(_config_home, _kind, _bundle, &after)) {
+    if (llm::read_ledger(_config_home, _kind, _graph, &after)) {
         r.text = llm::render_memory(after, llm::k_memory_budget_chars, nullptr);
     }
     r.ok = true;
