@@ -1,7 +1,7 @@
 #include "app/ui/graph_panel.h"
 #include "app/workspace_selection.h"
 
-#include "app/ui/fonts.h"
+#include "app/ui/buttons.h"
 #include "app/ui/gl_texture.h"
 #include "app/ui/script_editor_panel.h"
 #include "core/app_config.h"
@@ -795,16 +795,16 @@ void graph_panel_draw(const campcat::app_config &_cfg_view,
     if (g_loaded_name != _selection.graph || g_loaded_home != home) {
         load_graph(home, _selection.graph);
     }
-    if (ImGui::Button("Reload")) {
+    if (campcat::app::button("Reload")) {
         load_graph(home, _selection.graph);
     }
     ImGui::SameLine();
-    if (ImGui::Button("Fit graph")) {
+    if (campcat::app::button("Fit graph")) {
         g_need_fit = true;
     }
     ImGui::SameLine();
     ImGui::BeginDisabled(_selection.bundle.empty());
-    if (ImGui::Button("Focus selected")) {
+    if (campcat::app::button("Focus selected")) {
         graph_panel_focus_selection();
     }
     ImGui::EndDisabled();

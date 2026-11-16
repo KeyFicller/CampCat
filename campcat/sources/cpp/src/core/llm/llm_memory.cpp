@@ -250,6 +250,7 @@ void apply_record(const json &_j, const std::filesystem::path &_file,
             return;
         }
         le->e.text = text;
+        le->e.at = _j.value("at", le->e.at);
         le->e.by_user = _j.value("by", std::string()) == "user";
     } else if (kind == "pin") {
         le->e.pinned = true;
@@ -283,17 +284,6 @@ bool replay_file(const std::filesystem::path &_path, replay &_r) {
         apply_record(j, _path, _r);
     }
     return true;
-}
-
-/// Which ledger a fact belongs in, by section: the graph's own vocabulary goes
-/// with the graph, everything else stays at the library scope.
-std::filesystem::path
-target_for_section(const std::filesystem::path &_config_home, memory_kind _kind,
-                   std::string_view _bundle, const std::string &_section) {
-    const bool graph_scoped =
-        !_bundle.empty() &&
-        (_kind == memory_kind::scripter_notes || _section == "叫法");
-    return ledger_path(_config_home, _kind, graph_scoped ? _bundle : "");
 }
 
 bool section_allowed(memory_kind _kind, const std::string &_section) {
@@ -391,6 +381,20 @@ std::string next_id(const std::filesystem::path &_config_home,
     return format_id(highest + 1);
 }
 
+bool load_scope(const std::filesystem::path &_home, memory_kind _kind,
+                std::string_view _graph, replay &_r) {
+    if (!replay_file(ledger_path(_home, _kind, ""), _r)) {
+        return false;
+    }
+    // Older versions wrote graph notes at the root without a graph selected.
+    // Keep their IDs and receipts, but never expose those facts across graphs.
+    std::erase_if(_r.entries, [_kind](const located_entry &_entry) {
+        return _kind != memory_kind::operator_notes || _entry.e.section != "偏好";
+    });
+    return _graph.empty() ||
+           replay_file(ledger_path(_home, _kind, _graph), _r);
+}
+
 bool recover_pass(const std::filesystem::path &_home, memory_kind _kind);
 
 } // namespace
@@ -422,12 +426,12 @@ bool parse_memory_proposal(std::string_view _json, memory_proposal *_out,
 }
 
 std::filesystem::path ledger_path(const std::filesystem::path &_config_home,
-                                  memory_kind _kind, std::string_view _bundle) {
+                                  memory_kind _kind, std::string_view _graph) {
     const std::string stem = memory_agent_name(_kind);
-    if (_bundle.empty()) {
+    if (_graph.empty()) {
         return _config_home / k_ledgers_dir / (stem + ".jsonl");
     }
-    return _config_home / std::string(_bundle) / k_ledgers_dir /
+    return _config_home / std::string(_graph) / k_ledgers_dir /
            (stem + ".jsonl");
 }
 
@@ -436,7 +440,7 @@ const char *memory_agent_name(memory_kind _kind) {
 }
 
 bool read_ledger(const std::filesystem::path &_config_home, memory_kind _kind,
-                 std::string_view _bundle, std::vector<memory_entry> *_out) {
+                 std::string_view _graph, std::vector<memory_entry> *_out) {
     if (_out == nullptr) {
         return false;
     }
@@ -448,11 +452,7 @@ bool read_ledger(const std::filesystem::path &_config_home, memory_kind _kind,
     if (!recover_pass(_config_home, _kind))
         return false;
     replay r;
-    if (!replay_file(ledger_path(_config_home, _kind, ""), r)) {
-        return false;
-    }
-    if (!_bundle.empty() &&
-        !replay_file(ledger_path(_config_home, _kind, _bundle), r)) {
+    if (!load_scope(_config_home, _kind, _graph, r)) {
         return false;
     }
     _out->reserve(r.entries.size());
@@ -467,60 +467,49 @@ std::string render_memory(const std::vector<memory_entry> &_entries,
     if (_dropped != nullptr) {
         *_dropped = 0;
     }
-    std::vector<std::string> order;
-    std::unordered_map<std::string, std::vector<const memory_entry *>> books;
+    std::vector<const memory_entry *> ranked;
     for (const auto &e : _entries) {
-        if (!e.visible) {
+        if (e.visible) {
+            ranked.push_back(&e);
+        }
+    }
+    std::stable_sort(ranked.begin(), ranked.end(),
+                     [](const memory_entry *_a, const memory_entry *_b) {
+                         if (_a->pinned != _b->pinned) {
+                             return _a->pinned;
+                         }
+                         if (_a->by_user != _b->by_user) {
+                             return _a->by_user;
+                         }
+                         return _a->at > _b->at;
+                     });
+
+    std::vector<std::string> order;
+    std::unordered_map<std::string, std::string> books;
+    std::size_t chars = 0;
+    for (const memory_entry *e : ranked) {
+        const auto it = books.find(e->section);
+        const std::string heading = it == books.end() ? "## " + e->section + "\n" : "";
+        const std::string line = "- " + e->text + "\n";
+        const std::size_t added_chars = utf8_chars(heading) + utf8_chars(line);
+        if (!e->pinned && chars + added_chars > _budget) {
+            if (_dropped != nullptr) {
+                ++*_dropped;
+            }
             continue;
         }
-        auto it = books.find(e.section);
         if (it == books.end()) {
-            order.push_back(e.section);
-            it = books.emplace(e.section, std::vector<const memory_entry *>{})
-                     .first;
+            order.push_back(e->section);
+            books.emplace(e->section, heading + line);
+        } else {
+            it->second += line;
         }
-        it->second.push_back(&e);
+        chars += added_chars;
     }
 
     std::string out;
-    std::size_t chars = 0;
-    int rendered = 0;
-    for (const std::string &section : order) {
-        auto &rows = books[section];
-        std::stable_sort(rows.begin(), rows.end(),
-                         [](const memory_entry *_a, const memory_entry *_b) {
-                             if (_a->pinned != _b->pinned) {
-                                 return _a->pinned;
-                             }
-                             return _a->at > _b->at;
-                         });
-        const std::string heading = "## " + section + "\n";
-        bool has_heading = false;
-        for (const memory_entry *e : rows) {
-            const std::string line = "- " + e->text + "\n";
-            const std::size_t added_chars =
-                utf8_chars(line) + (has_heading ? 0 : utf8_chars(heading));
-            // Pinned entries are the user's, so they are never what a budget
-            // cuts; an overshoot is the honest outcome of too many pins.
-            if (!e->pinned && chars + added_chars > _budget) {
-                if (_dropped != nullptr) {
-                    ++*_dropped;
-                }
-                continue;
-            }
-            if (!has_heading) {
-                out += heading;
-                has_heading = true;
-            }
-            out += line;
-            chars += added_chars;
-            ++rendered;
-        }
-    }
-    // Headers with nothing under them are not a notebook: with no fact in
-    // reach the prompt stays byte-identical to the one without this feature.
-    if (rendered == 0) {
-        return std::string();
+    for (const auto &section : order) {
+        out += books.at(section);
     }
     return out;
 }
@@ -551,7 +540,7 @@ struct staged_record {
 };
 
 memory_commit_result prepare_ops(const std::filesystem::path &_config_home,
-                                 memory_kind _kind, std::string_view _bundle,
+                                 memory_kind _kind, std::string_view _graph,
                                  const std::vector<memory_op> &_ops,
                                  const std::vector<std::string> &_src,
                                  bool _by_user, replay &_r,
@@ -584,8 +573,15 @@ memory_commit_result prepare_ops(const std::filesystem::path &_config_home,
                 ++result.rejected;
                 continue;
             }
-            target =
-                target_for_section(_config_home, _kind, _bundle, op.section);
+            const bool graph_scoped = _kind == memory_kind::scripter_notes ||
+                                      op.section == "叫法";
+            if (graph_scoped && _graph.empty()) {
+                note(_notes, "graph notes require an active graph");
+                ++result.rejected;
+                continue;
+            }
+            target = ledger_path(_config_home, _kind,
+                                 graph_scoped ? _graph : std::string_view{});
         } else {
             if (!op.id.empty()) {
                 existing = find_entry(_r, op.id);
@@ -668,13 +664,6 @@ std::filesystem::path pending_path(const std::filesystem::path &_home,
            (std::string(memory_agent_name(_kind)) + ".pending.json");
 }
 
-bool load_scope(const std::filesystem::path &_home, memory_kind _kind,
-                std::string_view _bundle, replay &_r) {
-    return replay_file(ledger_path(_home, _kind, ""), _r) &&
-           (_bundle.empty() ||
-            replay_file(ledger_path(_home, _kind, _bundle), _r));
-}
-
 bool recover_pass(const std::filesystem::path &_home, memory_kind _kind) {
     const auto pending = pending_path(_home, _kind);
     std::string data;
@@ -749,7 +738,7 @@ bool write_pending(const std::filesystem::path &_path, const json &_journal) {
 } // namespace
 
 int apply_ops(const std::filesystem::path &_config_home, memory_kind _kind,
-              std::string_view _bundle, const std::vector<memory_op> &_ops,
+              std::string_view _graph, const std::vector<memory_op> &_ops,
               const std::vector<std::string> &_src, bool _by_user,
               std::vector<std::string> *_notes, bool *_storage_ok) {
     if (_storage_ok != nullptr)
@@ -759,12 +748,12 @@ int apply_ops(const std::filesystem::path &_config_home, memory_kind _kind,
     std::lock_guard lk(file_mutex());
     replay r;
     if (!recover_pass(_config_home, _kind) ||
-        !load_scope(_config_home, _kind, _bundle, r)) {
+        !load_scope(_config_home, _kind, _graph, r)) {
         note(_notes, "memory ledger is unreadable; nothing was written");
         return 0;
     }
     std::vector<staged_record> records;
-    const auto prepared = prepare_ops(_config_home, _kind, _bundle, _ops, _src,
+    const auto prepared = prepare_ops(_config_home, _kind, _graph, _ops, _src,
                                       _by_user, r, _notes, records);
     if (!prepared.storage_ok)
         return 0;
@@ -783,7 +772,7 @@ int apply_ops(const std::filesystem::path &_config_home, memory_kind _kind,
 
 memory_commit_result
 commit_pass(const std::filesystem::path &_config_home, memory_kind _kind,
-            std::string_view _bundle, const std::vector<memory_op> &_ops,
+            std::string_view _graph, const std::vector<memory_op> &_ops,
             const std::vector<std::string> &_src, const std::string &_from,
             const std::string &_to, std::vector<std::string> *_notes) {
     memory_commit_result result;
@@ -797,24 +786,24 @@ commit_pass(const std::filesystem::path &_config_home, memory_kind _kind,
     std::lock_guard lk(file_mutex());
     replay r;
     if (!recover_pass(_config_home, _kind) ||
-        !load_scope(_config_home, _kind, _bundle, r)) {
+        !load_scope(_config_home, _kind, _graph, r)) {
         note(_notes, "could not read or recover the memory ledger");
         return result;
     }
     const std::string commit =
-        json::array({std::string(_bundle), _from, _to}).dump();
+        json::array({std::string(_graph), _from, _to}).dump();
     if (r.committed_passes.count(commit) != 0) {
         result.storage_ok = true;
         return result;
     }
     std::vector<staged_record> records;
-    result = prepare_ops(_config_home, _kind, _bundle, _ops, _src, false, r,
+    result = prepare_ops(_config_home, _kind, _graph, _ops, _src, false, r,
                          _notes, records);
     if (!result.storage_ok) {
         result.written = 0;
         return result;
     }
-    json journal = {{"bundle", std::string(_bundle)},
+    json journal = {{"bundle", std::string(_graph)},
                     {"records", json::array()}};
     for (std::size_t i = 0; i < records.size(); ++i) {
         auto &item = records[i];
@@ -839,15 +828,15 @@ commit_pass(const std::filesystem::path &_config_home, memory_kind _kind,
 }
 
 bool append_pass(const std::filesystem::path &_config_home, memory_kind _kind,
-                 std::string_view _bundle, const std::string &_from,
+                 std::string_view _graph, const std::string &_from,
                  const std::string &_to) {
-    return commit_pass(_config_home, _kind, _bundle, {}, {}, _from, _to,
+    return commit_pass(_config_home, _kind, _graph, {}, {}, _from, _to,
                        nullptr)
         .storage_ok;
 }
 
 std::string last_pass_to(const std::filesystem::path &_config_home,
-                         memory_kind _kind, std::string_view _bundle) {
+                         memory_kind _kind, std::string_view _graph) {
     if (_config_home.empty()) {
         return std::string();
     }
@@ -857,43 +846,29 @@ std::string last_pass_to(const std::filesystem::path &_config_home,
     if (!replay_file(ledger_path(_config_home, _kind, ""), r)) {
         return std::string();
     }
-    if (!_bundle.empty() &&
-        !replay_file(ledger_path(_config_home, _kind, _bundle), r)) {
+    if (!_graph.empty() &&
+        !replay_file(ledger_path(_config_home, _kind, _graph), r)) {
         return std::string();
     }
     return r.last_pass_to;
 }
 
 bool read_memory(const std::filesystem::path &_config_home, memory_kind _kind,
-                 std::string_view _bundle, std::string *_out) {
+                 std::string_view _graph, std::string *_out) {
     if (_out == nullptr) {
         return false;
     }
     _out->clear();
-    if (_config_home.empty()) {
-        return true;
-    }
-    std::lock_guard lk(file_mutex());
-    if (!recover_pass(_config_home, _kind))
-        return false;
-    replay r;
-    if (!replay_file(ledger_path(_config_home, _kind, ""), r) ||
-        (!_bundle.empty() &&
-         !replay_file(ledger_path(_config_home, _kind, _bundle), r))) {
-        return false;
-    }
     std::vector<memory_entry> entries;
-    entries.reserve(r.entries.size());
-    for (auto &le : r.entries) {
-        entries.push_back(std::move(le.e));
+    if (!read_ledger(_config_home, _kind, _graph, &entries)) {
+        return false;
     }
-    int dropped = 0;
-    *_out = render_memory(entries, k_memory_budget_chars, &dropped);
+    *_out = render_memory(entries, k_memory_budget_chars, nullptr);
     return true;
 }
 
 bool clear_memory(const std::filesystem::path &_config_home, memory_kind _kind,
-                  std::string_view _bundle) {
+                  std::string_view _graph) {
     if (_config_home.empty()) {
         return false;
     }
@@ -906,9 +881,9 @@ bool clear_memory(const std::filesystem::path &_config_home, memory_kind _kind,
     if (ec) {
         return false;
     }
-    if (!_bundle.empty()) {
+    if (!_graph.empty()) {
         std::error_code graph_ec;
-        std::filesystem::remove(ledger_path(_config_home, _kind, _bundle),
+        std::filesystem::remove(ledger_path(_config_home, _kind, _graph),
                                 graph_ec);
         if (graph_ec) {
             return false;

@@ -14,7 +14,7 @@
 #include "app/llm_controller.h"
 
 #include "app/ui/activity_status.h"
-#include "app/ui/fonts.h"
+#include "app/ui/buttons.h"
 #include "app/ui/gl_texture.h"
 #include "app/ui/icon_texture.h"
 #include "app/ui/prompt_input.h"
@@ -155,7 +155,7 @@ std::filesystem::path g_config_home;
 /// provider, and only the draw call sees the config.
 std::string g_provider = "deepseek";
 /// And the selected graph, whose ledger holds that graph's own names.
-std::string g_bundle;
+std::string g_memory_graph;
 
 /// The page the memory window is showing.
 campcat::llm::memory_kind g_mem_kind =
@@ -185,7 +185,7 @@ void reload_memory() {
     g_mem_entries.clear();
     g_mem_edit_id.clear();
     g_mem_unreadable =
-        !campcat::llm::read_ledger(g_config_home, g_mem_kind, g_bundle,
+        !campcat::llm::read_ledger(g_config_home, g_mem_kind, g_memory_graph,
                                    &g_mem_entries);
     if (g_mem_unreadable) {
         g_mem_page_chars = 0;
@@ -202,7 +202,7 @@ void reload_memory() {
 /// there is one place where "the user changed this" is decided.
 void edit_memory(const campcat::llm::memory_op &_op) {
     std::vector<std::string> notes;
-    campcat::llm::apply_ops(g_config_home, g_mem_kind, g_bundle, {_op}, {},
+    campcat::llm::apply_ops(g_config_home, g_mem_kind, g_memory_graph, {_op}, {},
                             /*_by_user=*/true, &notes);
     for (const std::string &n : notes) {
         campcat::automation_log::emit("[llm] memory op refused: " + n);
@@ -223,10 +223,14 @@ void draw_memory_page(campcat::llm::memory_kind _kind) {
     const char *ask = scripter ? "Delete the scripter long-term memory ledger?"
                                : "Delete the operator long-term memory ledger?";
 
-    ImGui::TextUnformatted(
-        campcat::llm::ledger_path(g_config_home, _kind, g_bundle)
-            .string()
-            .c_str());
+    const auto library_ledger = campcat::llm::ledger_path(g_config_home, _kind, "");
+    ImGui::Text("Library: %s", library_ledger.string().c_str());
+    if (!g_memory_graph.empty()) {
+        const auto graph_ledger =
+            campcat::llm::ledger_path(g_config_home, _kind, g_memory_graph);
+        ImGui::Text("Graph (%s): %s", g_memory_graph.c_str(),
+                    graph_ledger.string().c_str());
+    }
     ImGui::TextDisabled("Written when the conversation goes idle, and before "
                         "it is cleared. A pass may not touch a fact you edited "
                         "or pinned.");
@@ -243,25 +247,25 @@ void draw_memory_page(campcat::llm::memory_kind _kind) {
                 static_cast<int>(campcat::llm::k_memory_budget_chars));
     ImGui::TextDisabled("%d of %d characters reach the prompt", g_mem_page_chars,
                         static_cast<int>(campcat::llm::k_memory_budget_chars));
-    if (ImGui::Button("Reload")) {
+    if (campcat::app::button("Reload")) {
         reload_memory();
     }
     ImGui::SameLine();
-    if (ImGui::Button("Clear memory")) {
+    if (campcat::app::button("Clear memory")) {
         ImGui::OpenPopup(popup);
     }
     if (ImGui::BeginPopupModal(popup, nullptr,
                                ImGuiWindowFlags_AlwaysAutoResize)) {
         ImGui::TextUnformatted(ask);
-        if (ImGui::Button("Delete", ImVec2(120.0F, 0.0F))) {
-            if (!campcat::llm::clear_memory(g_config_home, _kind, g_bundle)) {
+        if (campcat::app::button("Delete", ImVec2(120.0F, 0.0F))) {
+            if (!campcat::llm::clear_memory(g_config_home, _kind, g_memory_graph)) {
                 campcat::automation_log::emit("[llm] memory ledger not deleted");
             }
             reload_memory();
             ImGui::CloseCurrentPopup();
         }
         ImGui::SameLine();
-        if (ImGui::Button("Cancel", ImVec2(120.0F, 0.0F))) {
+        if (campcat::app::button("Cancel", ImVec2(120.0F, 0.0F))) {
             ImGui::CloseCurrentPopup();
         }
         ImGui::EndPopup();
@@ -303,7 +307,7 @@ void draw_memory_page(campcat::llm::memory_kind _kind) {
                     edit_memory(op);
                 }
                 ImGui::SameLine();
-                if (ImGui::SmallButton("Cancel")) {
+                if (campcat::app::small_button("Cancel")) {
                     g_mem_edit_id.clear();
                 }
                 ImGui::PopID();
@@ -315,12 +319,12 @@ void draw_memory_page(campcat::llm::memory_kind _kind) {
                 ImGui::TextDisabled("%s (retired)", e.text.c_str());
             }
             ImGui::SameLine();
-            if (ImGui::SmallButton("Edit")) {
+            if (campcat::app::small_button("Edit")) {
                 g_mem_edit_id = e.id;
                 g_mem_edit_buf = e.text;
             }
             ImGui::SameLine();
-            if (ImGui::SmallButton(e.visible ? "Retire" : "Restore")) {
+            if (campcat::app::small_button(e.visible ? "Retire" : "Restore")) {
                 campcat::llm::memory_op op;
                 op.k = e.visible ? campcat::llm::memory_op::kind::retire
                                  : campcat::llm::memory_op::kind::restore;
@@ -328,7 +332,7 @@ void draw_memory_page(campcat::llm::memory_kind _kind) {
                 edit_memory(op);
             }
             ImGui::SameLine();
-            if (ImGui::SmallButton("Delete")) {
+            if (campcat::app::small_button("Delete")) {
                 campcat::llm::memory_op op;
                 op.k = campcat::llm::memory_op::kind::remove;
                 op.id = e.id;
@@ -1219,7 +1223,7 @@ void draw_fuse_settings(campcat::app_config &_c) {
 /// while it is on, hence the greying rather than hiding them.
 void draw_approval_settings(campcat::app_config &_c) {
     const float side = ImGui::GetFrameHeight();
-    if (ImGui::Button("##approval_settings", ImVec2(side, side))) {
+    if (campcat::app::button("##approval_settings", ImVec2(side, side))) {
         ImGui::OpenPopup("llm_approval_settings");
     }
     if (ImGui::IsItemHovered()) {
@@ -1624,7 +1628,7 @@ void draw_annotation_window() {
         if (!g_annot_has_region) {
             ImGui::BeginDisabled();
         }
-        if (ImGui::Button("Use this region")) {
+        if (campcat::app::button("Use this region")) {
             g_staged_region = annot_draft();
             g_staged_id = g_annot_id;
             g_annot_open = false;
@@ -1633,7 +1637,7 @@ void draw_annotation_window() {
             ImGui::EndDisabled();
         }
         ImGui::SameLine();
-        if (ImGui::Button("Cancel")) {
+        if (campcat::app::button("Cancel")) {
             g_annot_open = false; // the staged box, if any, is left alone
         }
     }
@@ -1693,7 +1697,7 @@ bool draw_approval_panel(const campcat::llm_approval &_a) {
         ImGui::TableNextColumn();
         if (g_appr_tex != 0) {
             draw_approval_image(_a, 120.0F);
-            if (ImGui::Button("View image")) {
+            if (campcat::app::button("View image")) {
                 ImGui::OpenPopup("approval_screenshot");
             }
             ImGui::SetNextWindowSize(
@@ -1711,30 +1715,29 @@ bool draw_approval_panel(const campcat::llm_approval &_a) {
         ImGui::BeginChild("approval_summary", ImVec2(0.0F, 48.0F));
         ImGui::TextWrapped("%s", _a.summary.c_str());
         ImGui::EndChild();
-        if (ImGui::Button("Allow once")) {
+        if (campcat::app::button("Allow once")) {
             g_host.answer_approval(true);
             clear_staged();
             answered = true;
         }
-        const float reject_w = ImGui::CalcTextSize("Reject").x +
-                               ImGui::GetStyle().FramePadding.x * 2.0F;
+        const float reject_w = campcat::app::button_width("Reject");
         const float right = ImGui::GetCursorScreenPos().x +
                             ImGui::GetContentRegionAvail().x;
         if (ImGui::GetItemRectMax().x + ImGui::GetStyle().ItemSpacing.x +
                 reject_w <= right) {
             ImGui::SameLine();
         }
-        if (ImGui::Button("Reject")) {
+        if (campcat::app::button("Reject")) {
             g_host.answer_approval(false, {}, g_staged_region);
             clear_staged();
             answered = true;
         }
-        if (_a.editable && g_appr_tex != 0 && ImGui::Button("Edit region")) {
+        if (_a.editable && g_appr_tex != 0 && campcat::app::button("Edit region")) {
             open_annotation(_a);
         }
         if (g_staged_region) {
             ImGui::TextWrapped("Corrected region ready. Submit below to send it.");
-            if (ImGui::SmallButton("Discard correction")) {
+            if (campcat::app::small_button("Discard correction")) {
                 clear_staged();
             }
         }
@@ -1814,7 +1817,7 @@ void llm_panel_shutdown_gl() {
     campcat::app_config shutdown_cfg;
     shutdown_cfg.config_home = g_config_home.string();
     shutdown_cfg.llm.provider = g_provider;
-    shutdown_cfg.script_bundle = g_bundle;
+    shutdown_cfg.memory_graph = g_memory_graph;
     g_controller.begin_shutdown(shutdown_cfg);
 
     campcat::app::delete_tex(&g_appr_tex, &g_appr_w, &g_appr_h);
@@ -1893,13 +1896,13 @@ bool llm_panel_draw_sidebar_task(bool _on_llm_page) {
     WITH_FONT(bold, {
         if (g_controller.running()) {
             ImGui::BeginDisabled(g_controller.stopping() || g_controller.resetting());
-            if (ImGui::Button("Stop agent", ImVec2(-1.0F, 0.0F))) {
+            if (campcat::app::button("Stop agent", ImVec2(-1.0F, 0.0F))) {
                 request_task_stop();
             }
             ImGui::EndDisabled();
         }
         if (!_on_llm_page) {
-            view_task = ImGui::Button("Open task in LLM", ImVec2(-1.0F, 0.0F));
+            view_task = campcat::app::button("Open task in LLM", ImVec2(-1.0F, 0.0F));
         }
     });
     if (g_controller.stopping() && g_controller.running()) {
@@ -1916,9 +1919,15 @@ bool llm_panel_draw_sidebar_task(bool _on_llm_page) {
 void llm_panel_draw_panel(campcat::shell_state &_st, campcat::app_config &_cfg) {
     // Kept for the shutdown pass and the memory window, neither of which is
     // handed the config: this panel is the only place that sees it.
+    const bool scope_changed = g_config_home != _cfg.config_home ||
+                               g_memory_graph != _st.workspace.graph;
+    _cfg.memory_graph = _st.workspace.graph;
     g_config_home = _cfg.config_home;
     g_provider = _cfg.llm.provider;
-    g_bundle = _cfg.script_bundle;
+    g_memory_graph = _cfg.memory_graph;
+    if (scope_changed && g_mem_open) {
+        reload_memory();
+    }
 
     // Saved skills in a fixed column on the left, conversation on the right,
     // the prompt box below both. Side by side because the list is an index, not
@@ -1973,8 +1982,7 @@ void llm_panel_draw_panel(campcat::shell_state &_st, campcat::app_config &_cfg) 
     const bool memorizing = g_controller.memorizing();
     const float gap = ImGui::GetStyle().ItemSpacing.x;
     const char *send_label = awaiting ? "Submit correction" : "Send";
-    const float send_w = ImGui::CalcTextSize(send_label).x +
-                         ImGui::GetStyle().FramePadding.x * 2.0F;
+    const float send_w = campcat::app::button_width(send_label);
     const float gear_w = ImGui::GetFrameHeight() + gap;
     ImGui::SetNextItemWidth(-(send_w + gear_w + gap * 2.0F + 2.0F));
     const bool submitted =
@@ -2015,7 +2023,7 @@ void llm_panel_draw_panel(campcat::shell_state &_st, campcat::app_config &_cfg) 
     ImGui::PushStyleColor(ImGuiCol_Button, k_primary);
     ImGui::PushStyleColor(ImGuiCol_ButtonHovered, k_primary_hi);
     ImGui::PushStyleColor(ImGuiCol_ButtonActive, k_primary_lo);
-    const bool clicked = ImGui::Button(send_label, ImVec2(send_w, 0.0F));
+    const bool clicked = campcat::app::button(send_label, ImVec2(send_w, 0.0F));
     ImGui::PopStyleColor(3);
     if (!can_send) {
         ImGui::EndDisabled();

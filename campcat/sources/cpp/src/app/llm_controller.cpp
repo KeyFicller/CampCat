@@ -156,6 +156,20 @@ llm_controller::turn_job llm_controller::make_turn_job(shell_state &_st,
     return [this, st = &_st, cfg = std::move(_cfg)](
                const std::string &_prompt,
                const device_task_lease::owner &_owner) {
+        if (m_memory_scope &&
+            (m_memory_scope->config_home != cfg.config_home ||
+             m_memory_scope->memory_graph != cfg.memory_graph)) {
+            llm_result kept;
+            if (!memorize_both(cfg, k_memorize_timeout_ms, &kept)) {
+                llm_result result;
+                result.error = "Could not save the previous graph's memory";
+                if (!kept.error.empty()) {
+                    result.error += ": " + kept.error;
+                }
+                return result;
+            }
+        }
+        m_memory_scope = cfg;
         const std::string addr =
             mumu_adb_address(cfg.mumu.tool_path, cfg.mumu.device_index);
         adb_client adb(cfg.adb.path, addr.empty() ? cfg.adb.serial : addr);
@@ -179,7 +193,7 @@ llm_controller::turn_job llm_controller::make_turn_job(shell_state &_st,
             ~context_cleanup() { host.set_tool_context({}); }
         } cleanup{m_host};
         return m_host.run_turn(cfg.config_home, cfg.llm.provider,
-                               cfg.script_bundle, _prompt,
+                               cfg.memory_graph, _prompt,
                                cfg.llm.max_dispatches, cfg.llm.max_model_rounds,
                                cfg.region_score.record);
     };
@@ -196,20 +210,22 @@ bool llm_controller::start_turn(shell_state &_st, const app_config &_cfg,
     return start(_st.device_tasks, std::move(next));
 }
 
-void llm_controller::memorize_both(const app_config &_cfg, int _timeout_ms,
+bool llm_controller::memorize_both(const app_config &_cfg, int _timeout_ms,
                                    llm_result *_operator_out) {
+    const auto &cfg = m_memory_scope ? *m_memory_scope : _cfg;
     *_operator_out = m_host.memorize(
-        _cfg.config_home, _cfg.llm.provider, _cfg.script_bundle,
+        cfg.config_home, cfg.llm.provider, cfg.memory_graph,
         llm::memory_kind::operator_notes, _timeout_ms);
     if (m_host.interrupt_pending()) {
-        return;
+        return false;
     }
     const auto scripter = m_host.memorize(
-        _cfg.config_home, _cfg.llm.provider, _cfg.script_bundle,
+        cfg.config_home, cfg.llm.provider, cfg.memory_graph,
         llm::memory_kind::scripter_notes, _timeout_ms);
     if (!scripter.ok) {
         automation_log::emit("[llm] scripter memory not saved: " + scripter.error);
     }
+    return _operator_out->ok && scripter.ok && !m_host.interrupt_pending();
 }
 
 bool llm_controller::start_memorize(shell_state &_st, const app_config &_cfg) {
@@ -234,7 +250,11 @@ bool llm_controller::start_reset(shell_state &_st, const app_config &_cfg) {
             automation_log::emit("[llm] memory not saved: " + kept.error);
         }
         const std::filesystem::path home(cfg.config_home);
-        return m_host.reset(home.parent_path(), home);
+        auto result = m_host.reset(home.parent_path(), home);
+        if (result.ok) {
+            m_memory_scope.reset();
+        }
+        return result;
     };
     return start(_st.device_tasks, std::move(next));
 }

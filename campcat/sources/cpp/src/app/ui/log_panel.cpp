@@ -1,7 +1,7 @@
 #include "app/ui/log_panel.h"
 
 #include "app/shell_state.h"
-#include "app/ui/fonts.h"
+#include "app/ui/buttons.h"
 #include "app/ui/icon_texture.h"
 
 #include <imgui.h>
@@ -70,7 +70,7 @@ void log_panel_draw(campcat::shell_state &_st) {
                           (open ? 0 : ImGuiChildFlags_AutoResizeY));
 
     const float side = ImGui::GetFrameHeight();
-    if (ImGui::Button("##log_toggle", ImVec2(side, side))) {
+    if (campcat::app::button("##log_toggle", ImVec2(side, side))) {
         g_open = !g_open;
     }
     if (ImGui::IsItemHovered()) {

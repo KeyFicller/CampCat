@@ -68,11 +68,13 @@ private:
     turn_job make_turn_job(shell_state &_st, app_config _cfg);
     void run(request _request, device_task_lease::owner _owner);
     void interrupt_work();
-    void memorize_both(const app_config &_cfg, int _timeout_ms,
+    bool memorize_both(const app_config &_cfg, int _timeout_ms,
                        llm_result *_operator_out);
     void post(completion_kind _kind, llm_result _result);
 
     llm_host &m_host;
+    // Only touched by the serialized worker and the final shutdown pass.
+    std::optional<app_config> m_memory_scope;
     llm_prompt_queue m_prompts;
     std::atomic<bool> m_running{false};
     std::atomic<bool> m_resetting{false};

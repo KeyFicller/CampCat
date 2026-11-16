@@ -21,7 +21,7 @@
 #include "app/shell_state.h"
 #include "app/ui/activity_status.h"
 #include "app/ui/console_panel.h"
-#include "app/ui/fonts.h"
+#include "app/ui/buttons.h"
 #include "app/ui/graph_panel.h"
 #include "app/ui/llm_panel.h"
 #include "app/ui/log_panel.h"
@@ -162,11 +162,11 @@ workspace_destination draw_workspace_toolbar(campcat::shell_state &_st,
                                 std::min(200.0F, width * 0.4F));
         ImGui::TableSetupColumn("selection", ImGuiTableColumnFlags_WidthStretch, 1.0F);
         ImGui::TableSetupColumn("actions", ImGuiTableColumnFlags_WidthFixed,
-                                ImGui::CalcTextSize("More").x +
-                                    ImGui::GetStyle().FramePadding.x * 2.0F);
+                                campcat::app::button_width("More"));
         ImGui::TableNextRow();
         ImGui::TableSetColumnIndex(0);
         ImGui::SetNextItemWidth(-FLT_MIN);
+        ImGui::BeginDisabled(_locked);
         if (ImGui::BeginCombo("##graph", selection.graph.empty()
                                           ? "(no graph)" : selection.graph.c_str())) {
             for (const std::string &name : graphs) {
@@ -179,6 +179,7 @@ workspace_destination draw_workspace_toolbar(campcat::shell_state &_st,
         if (ImGui::IsItemHovered()) {
             ImGui::SetTooltip("Choose graph");
         }
+        ImGui::EndDisabled();
         ImGui::TableSetColumnIndex(1);
         const ImVec2 label_at = ImGui::GetCursorScreenPos();
         const ImVec2 label_size(std::max(1.0F, ImGui::GetContentRegionAvail().x),
@@ -197,7 +198,7 @@ workspace_destination draw_workspace_toolbar(campcat::shell_state &_st,
             ImGui::SetTooltip("%s", selection.bundle.c_str());
         }
         ImGui::TableSetColumnIndex(2);
-        if (ImGui::Button("More")) {
+        if (campcat::app::button("More")) {
             ImGui::OpenPopup("skill_actions");
         }
         if (ImGui::BeginPopup("skill_actions")) {
@@ -548,11 +549,9 @@ int main(int argc, char **argv) {
                 ImGui::PushStyleColor(ImGuiCol_ButtonHovered, k_accent_hi);
                 ImGui::PushStyleColor(ImGuiCol_ButtonActive, k_accent_lo);
             }
-            WITH_FONT(bold, {
-                if (ImGui::Button(label, ImVec2(-1.0F, 0.0F))) {
-                    page = target;
-                }
-            });
+            if (campcat::app::button(label, ImVec2(-1.0F, 0.0F))) {
+                page = target;
+            }
             if (selected) {
                 ImGui::PopStyleColor(3);
             }
