@@ -54,7 +54,9 @@ std::string build_turn_request(long _id, std::string_view _text,
                                std::string_view _memory,
                                std::string_view _scripter_memory,
                                std::string_view _provider,
-                               int _max_model_rounds, bool _operator_only) {
+                               int _max_model_rounds, bool _operator_only,
+                               std::string_view _transcript,
+                               std::string_view _memory_upto) {
     nlohmann::json j;
     j["type"] = "turn";
     j["id"] = _id;
@@ -73,18 +75,30 @@ std::string build_turn_request(long _id, std::string_view _text,
     if (_operator_only) {
         j["operator_only"] = true;
     }
+    // Same rule: a sidecar that predates the field simply never persists, which
+    // is what it already did.
+    if (!_transcript.empty()) {
+        j["transcript"] = std::string(_transcript);
+    }
+    // Absent means "fold everything you hold", which is what a sidecar with no
+    // field would do anyway -- the safe side, since the cost is a repeat fold.
+    if (!_memory_upto.empty()) {
+        j["memory_upto"] = std::string(_memory_upto);
+    }
     return j.dump();
 }
 
 std::string build_tool_result(std::string_view _call_id, bool _ok,
                               std::string_view _text, std::string_view _error,
-                              std::string_view _image_b64, int _shot) {
+                              std::string_view _image_b64, int _shot,
+                              std::string_view _error_code) {
     nlohmann::json j;
     j["type"] = "tool_result";
     j["call_id"] = std::string(_call_id);
     j["ok"] = _ok;
     j["text"] = std::string(_text);
     j["error"] = std::string(_error);
+    j["error_code"] = std::string(_error_code);
     if (!_image_b64.empty()) {
         j["image_b64"] = std::string(_image_b64);
     }
@@ -113,13 +127,14 @@ std::string build_interrupt_request(long _id) {
 
 std::string build_memorize_request(long _id, std::string_view _memory,
                                    std::string_view _provider,
-                                   std::string_view _agent) {
+                                   std::string_view _agent, std::string_view _memory_upto) {
     nlohmann::json j;
     j["type"] = "memorize";
     j["id"] = _id;
     j["memory"] = std::string(_memory);
     j["provider"] = std::string(_provider);
     j["agent"] = std::string(_agent);
+    j["memory_upto"] = std::string(_memory_upto);
     return j.dump();
 }
 
@@ -233,6 +248,17 @@ bool parse_line(std::string_view _line, message *_out) {
         // here.
         _out->tool_args_json =
             j.contains("args") ? j["args"].dump() : std::string("{}");
+        if (const auto scope = j.find("write_scope"); scope != j.end() && !scope->is_null()) {
+            _out->write_scope = std::vector<std::string>{};
+            if (scope->is_array()) {
+                bool valid = true;
+                for (const auto &name : *scope) {
+                    if (!name.is_string()) { valid = false; break; }
+                    _out->write_scope->push_back(name.get<std::string>());
+                }
+                if (!valid) _out->write_scope->clear();
+            }
+        }
         read_usage(j, _out);
         return true;
     }

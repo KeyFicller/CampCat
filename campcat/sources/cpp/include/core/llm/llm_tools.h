@@ -1,4 +1,5 @@
 #pragma once
+#include "core/llm/frame_store.h"
 
 #include <filesystem>
 #include <functional>
@@ -93,11 +94,7 @@ struct approval_decision {
 /// The screenshot the model is working from. Raw PNG bytes (not base64): the
 /// wire encoding happens once, on the way out. Both fields live and die
 /// together, and outlive the turn they were taken in (see `current_screen`).
-struct screen_state {
-    int w = 0;
-    int h = 0;
-    std::string png;
-};
+
 
 /**
  * @brief Runtime state the tools read but the model must never see.
@@ -169,6 +166,7 @@ struct tool_reply {
     bool ok = false;
     std::string text;
     std::string error;
+    std::string error_code;
     std::string image_png;
     /// Line the UI's tool note shows instead of `text`; non-empty also marks
     /// the text as a document for the model, too long to print (see
@@ -207,7 +205,8 @@ std::string tools_json();
 
 /// Runs one tool by name against the model's raw `arguments` JSON text.
 /// Never throws: every failure comes back as `ok == false`.
-tool_reply dispatch(std::string_view _name, std::string_view _args_json);
+tool_reply dispatch(std::string_view _name, std::string_view _args_json,
+    const std::optional<std::vector<std::string>> &_write_scope = std::nullopt);
 
 /// True while a script started by `run_script` is executing. The UI polls it to
 /// decide whether its stop control is worth showing.

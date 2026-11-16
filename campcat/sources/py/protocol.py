@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 
-PROTOCOL_VERSION = 11
+PROTOCOL_VERSION = 12
 
 
 def encode(obj: dict) -> str:
@@ -79,14 +79,17 @@ def build_error_result(rid: object, error: str, **usage) -> dict:
 
 def build_tool_call(rid: object, call_id: str, name: str, args: dict,
                     llm_calls: int | None = None, tool_calls: int | None = None,
-                    context: int | None = None) -> dict:
+                    context: int | None = None,
+                    write_scope: list[str] | None = None) -> dict:
     """Ask the host to run one tool. The host answers with `tool_result`.
 
     A `shot` number inside `args` names a screenshot the host keeps itself, so
     nothing is attached here: the host looks the frame up.
+    `write_scope` is None for the operator, [] for new bundles only, or the
+    existing bundle names this handoff may repair. The host enforces it.
     """
     msg = {"type": "tool_call", "id": rid, "call_id": call_id, "name": name,
-           "args": args}
+           "args": args, "write_scope": write_scope}
     if llm_calls is not None:
         msg["llm_calls"] = llm_calls
     if tool_calls is not None:

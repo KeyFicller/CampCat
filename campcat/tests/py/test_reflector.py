@@ -42,10 +42,11 @@ def test_failures_and_reads_and_writes_are_separate():
         _call("view_shot", failed=True),
         _call("save_anchor"),
         _call("update_bundle"),
+        _call("reuse_template"),
         _call("list_scripts"),
     ], operator_rounds=5)
 
-    assert (m["failed"], m["writes"], m["reads"]) == (1, 2, 2)
+    assert (m["failed"], m["writes"], m["reads"]) == (1, 3, 2)
     assert m["operator_rounds"] == 5
 
 
@@ -116,6 +117,34 @@ def test_a_handoff_that_called_nothing_gets_no_note(monkeypatch):
     assert _real_reflect([], 0, "done") == ("", "")
 
 
+def test_a_clean_handoff_keeps_counts_without_calling_a_model(monkeypatch):
+    def unexpected(**_):
+        raise AssertionError("clean handoffs must not request reflection")
+    monkeypatch.setattr(models, "build_chat_model", unexpected)
+
+    head, body = _real_reflect([_call("save_script")], 3, "saved")
+
+    assert "1 次调用" in head
+    assert "失败 0" in head
+    assert body == ""
+    assert head in reflector.directive(head, body)
+
+
+def test_distinct_long_requests_do_not_trigger_reflection():
+    m = reflector.metrics([
+        _call("save_script", {"source": "x" * 250 + "a"}),
+        _call("save_script", {"source": "x" * 250 + "b"}),
+    ], 0)
+    assert m["repeat"] == []
+
+
+def test_a_failed_handoff_can_reflect_even_when_its_tools_succeeded(monkeypatch, scripted):
+    monkeypatch.setattr(models, "build_chat_model", lambda **_: scripted([
+        AIMessage(content='{"notes":["交接没有收尾，下次缩小范围。"]}')]))
+    _, body = _real_reflect([_call("view_shot")], 0, "round limit", handoff_failed=True)
+    assert "交接没有收尾" in body
+
+
 def test_the_head_is_the_numbers_and_the_body_is_the_lesson(
         monkeypatch, scripted):
     monkeypatch.setattr(models, "build_chat_model", lambda **_: scripted(
@@ -153,7 +182,7 @@ def test_a_lessons_call_becomes_the_body(monkeypatch, scripted):
         }])
     ]))
 
-    head, body = _real_reflect([_call("view_shot")], 0, "done")
+    head, body = _real_reflect([_call("view_shot", failed=True)], 0, "done")
 
     assert body == "先看清再裁。"
     assert "这次交接" in head
@@ -163,7 +192,7 @@ def test_the_body_is_capped(monkeypatch, scripted):
     monkeypatch.setattr(models, "build_chat_model", lambda **_: scripted(
         [AIMessage(content="很长" * 5000)]))
 
-    _, body = _real_reflect([_call("view_shot")], 0, "done")
+    _, body = _real_reflect([_call("view_shot", failed=True)], 0, "done")
 
     assert len(body) == reflector.MAX_CHARS
 
@@ -173,7 +202,9 @@ def test_a_model_that_raises_leaves_no_note(monkeypatch):
         raise RuntimeError("no endpoint")
     monkeypatch.setattr(models, "build_chat_model", broken)
 
-    assert _real_reflect([_call("view_shot")], 0, "done") == ("", "")
+    head, body = _real_reflect([_call("view_shot", failed=True)], 0, "done")
+    assert "失败 1" in head
+    assert body == ""
 
 
 def test_an_empty_ledger_leaves_the_prompt_byte_for_byte_alone():
@@ -243,7 +274,7 @@ def test_a_directive_says_it_is_not_a_request():
     assert "先看清再裁。" in text
 
 
-def test_no_body_leaves_the_operator_result_alone():
-    assert reflector.directive("这次交接：2 次调用。", "") == ""
+def test_counts_survive_without_a_model_lesson():
+    assert "这次交接：2 次调用。" in reflector.directive("这次交接：2 次调用。", "")
     assert reflector.directive("", "  \n") == ""
 

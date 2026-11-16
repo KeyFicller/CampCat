@@ -11,7 +11,7 @@
 #include "core/mumu_launcher.h"
 
 #include "app/shell_state.h"
-#include "app/llm_prompt_queue.h"
+#include "app/llm_controller.h"
 
 #include "app/ui/activity_status.h"
 #include "app/ui/fonts.h"
@@ -21,7 +21,7 @@
 #include "app/ui/script_editor_panel.h"
 
 #include <imgui.h>
-#include <imgui_internal.h> // BringWindowToDisplayFront: no public always-on-top window
+#include <imgui_internal.h> // ImTextCountCharsFromUtf8
 #include <imgui_markdown.h>
 #include <misc/cpp/imgui_stdlib.h>
 
@@ -37,16 +37,12 @@
 #endif
 
 #include <algorithm>
-#include <atomic>
 #include <cctype>
 #include <cmath>
-#include <deque>
 #include <filesystem>
-#include <mutex>
 #include <optional>
 #include <string>
 #include <string_view>
-#include <thread>
 #include <utility>
 #include <vector>
 
@@ -99,17 +95,6 @@ struct llm_turn {
     std::string error;
 };
 
-/// Result of a finished background job, handed to the UI thread.
-struct handoff {
-    bool has = false;
-    bool is_reset = false;
-    bool is_memory = false;
-    campcat::llm_result res;
-    /// Timeline at the moment the turn finished. The live stream is cleared
-    /// for the next turn before the UI may read it.
-    campcat::llm_host::timeline timeline;
-};
-
 // UI-thread state: never touched by the worker.
 std::vector<llm_turn> g_turns;
 std::string g_input;
@@ -118,10 +103,6 @@ bool g_pin_bottom = true;
 /// after this is read, so a smaller value now means the user moved up.
 float g_last_scroll = 0.0F;
 bool g_thinking = false; ///< sidecar reports the model is reasoning
-
-/// True while an automation cycle or the scheduler owns adb. Tools must refuse
-/// then rather than contend for the device.
-std::atomic<bool> g_adb_busy{false};
 
 /// Wraps the library default, fixing two of its choices that read badly in a
 /// chat bubble.
@@ -159,32 +140,8 @@ ImGui::MarkdownConfig &md_config() {
     return cfg;
 }
 
-// Worker state.
-std::atomic<bool> g_running{false};
-/// True while Clear conversation is in flight. Send stays disabled: a message
-/// queued under a reset would be wiped when the log is dropped.
-std::atomic<bool> g_resetting{false};
-/// The worker sets this after it clears the stream for a queued message. The
-/// UI then marks that message as the turn in flight.
-std::atomic<bool> g_promote{false};
-/// Latest message the user sent while a turn was running. Empty when none.
-campcat::llm_prompt_queue g_prompts;
-/// True while the worker is consolidating memory rather than answering a turn.
-/// Only changes the Send button's tooltip. A message sent during the pass
-/// discards the notes.
-/// Set and cleared inside the worker that does the consolidating, so there is
-/// no path that can leave it stuck on.
-std::atomic<bool> g_memorizing{false};
-std::thread g_thread;
-/// The last consolidation, run at shutdown. A thread of its own because it is
-/// deliberately not joined where `g_thread` is: the window has to close first.
-std::thread g_shutdown_thread;
 campcat::llm_host &g_host = campcat::consult_host();
-std::mutex g_done_mu;
-/// More than one job can finish before the UI draws: a turn that ended on its
-/// own, then the message that was queued behind it. A single slot would drop
-/// the first result into the second bubble.
-std::deque<handoff> g_done;
+campcat::llm_controller g_controller(g_host);
 
 /// UI-thread only. Time of the last LLM request, which is what "idle" is
 /// measured from: an agent nobody is talking to is an agent that can tidy up.
@@ -197,14 +154,24 @@ std::filesystem::path g_config_home;
 /// Same reason as `g_config_home`: the shutdown pass needs the selected
 /// provider, and only the draw call sees the config.
 std::string g_provider = "deepseek";
+/// And the selected graph, whose ledger holds that graph's own names.
+std::string g_bundle;
 
 /// The page the memory window is showing.
 campcat::llm::memory_kind g_mem_kind =
     campcat::llm::memory_kind::operator_notes;
-/// The Long-term memory window, and the copy it displays.
+/// The Long-term memory window, and the notebook it shows.
 bool g_mem_open = false;
-std::string g_mem_buf;
-/// Characters in the page being shown. The status line keeps its own count.
+std::vector<campcat::llm::memory_entry> g_mem_entries;
+/// Ledger read failure, shown instead of a misleading empty list.
+bool g_mem_unreadable = false;
+/// Entries the budget keeps out of the prompt, from the last render.
+int g_mem_dropped = 0;
+/// The entry being edited in place, and the text under the cursor. Empty id
+/// means no row is open for editing.
+std::string g_mem_edit_id;
+std::string g_mem_edit_buf;
+/// Characters in the page being shown, for the window's own budget line.
 int g_mem_page_chars = 0;
 
 /// The sidecar's own count of the turns it still holds verbatim, taken from
@@ -212,44 +179,39 @@ int g_mem_page_chars = 0;
 /// bubbles and stops at `k_turn_cap`, while the sidecar compacts once the
 /// conversation reaches its token trigger line.
 int g_sidecar_turns = 0;
-/// Characters in the memory file, for the status line. The window that shows
-/// the notes is opened on demand, so this is kept even while it is closed.
-int g_memory_chars = 0;
-/// When `g_memory_chars` was last read, so the file is not re-read per frame.
-double g_memory_read_at = 0.0;
 
-/// (Re)read the memory file into the window's buffer.
+/// (Re)read the shown notebook's ledger into the window's list.
 void reload_memory() {
-    std::string text;
-    if (!campcat::llm::read_memory(g_config_home, g_mem_kind, &text)) {
-        text = "(the memory file could not be read)";
+    g_mem_entries.clear();
+    g_mem_edit_id.clear();
+    g_mem_unreadable =
+        !campcat::llm::read_ledger(g_config_home, g_mem_kind, g_bundle,
+                                   &g_mem_entries);
+    if (g_mem_unreadable) {
         g_mem_page_chars = 0;
-    } else {
-        g_mem_page_chars = static_cast<int>(text.size());
-        if (text.empty()) {
-            text = "(no memory yet)";
-        }
-    }
-    g_mem_buf = std::move(text);
-}
-
-/// Refresh the memory size, at most once a second: it changes on an idle pass,
-/// not on a frame. A read that fails keeps the last known number rather than
-/// claiming an empty memory.
-void refresh_memory_chars() {
-    const double now = ImGui::GetTime();
-    if (now - g_memory_read_at < 1.0) {
+        g_mem_dropped = 0;
         return;
     }
-    g_memory_read_at = now;
-    std::string text;
-    if (campcat::llm::read_memory(
-            g_config_home, campcat::llm::memory_kind::operator_notes, &text)) {
-        g_memory_chars = static_cast<int>(text.size());
-    }
+    const std::string rendered = campcat::llm::render_memory(
+        g_mem_entries, campcat::llm::k_memory_budget_chars, &g_mem_dropped);
+    g_mem_page_chars = ImTextCountCharsFromUtf8(
+        rendered.c_str(), rendered.c_str() + rendered.size());
 }
 
-/// Read-only view of one notebook. Switching pages reloads that file.
+/// Apply one user edit and reload. The same entry point every row uses, so
+/// there is one place where "the user changed this" is decided.
+void edit_memory(const campcat::llm::memory_op &_op) {
+    std::vector<std::string> notes;
+    campcat::llm::apply_ops(g_config_home, g_mem_kind, g_bundle, {_op}, {},
+                            /*_by_user=*/true, &notes);
+    for (const std::string &n : notes) {
+        campcat::automation_log::emit("[llm] memory op refused: " + n);
+    }
+    reload_memory();
+}
+
+/// One notebook as a list of facts. Each row carries the three verbs the user
+/// has: edit the text, retire it from the prompt, delete it for good.
 void draw_memory_page(campcat::llm::memory_kind _kind) {
     if (g_mem_kind != _kind) {
         g_mem_kind = _kind;
@@ -258,16 +220,29 @@ void draw_memory_page(campcat::llm::memory_kind _kind) {
     const bool scripter = _kind == campcat::llm::memory_kind::scripter_notes;
     const char *popup =
         scripter ? "clear_scripter_memory" : "clear_operator_memory";
-    const char *ask = scripter ? "Delete the scripter long-term memory file?"
-                               : "Delete the operator long-term memory file?";
+    const char *ask = scripter ? "Delete the scripter long-term memory ledger?"
+                               : "Delete the operator long-term memory ledger?";
 
     ImGui::TextUnformatted(
-        campcat::llm::memory_path(g_config_home, _kind).string().c_str());
-    ImGui::TextDisabled("Kept in this file. Written when the conversation goes "
-                        "idle, and before "
-                        "it is cleared.");
-    ImGui::Text("%d/%d", g_mem_page_chars,
-                static_cast<int>(campcat::llm::k_memory_max_chars));
+        campcat::llm::ledger_path(g_config_home, _kind, g_bundle)
+            .string()
+            .c_str());
+    ImGui::TextDisabled("Written when the conversation goes idle, and before "
+                        "it is cleared. A pass may not touch a fact you edited "
+                        "or pinned.");
+    if (g_mem_unreadable) {
+        ImGui::TextColored(ImVec4(0.95F, 0.45F, 0.35F, 1.0F),
+                           "The ledger could not be read.");
+    }
+    int live = 0;
+    for (const auto &e : g_mem_entries) {
+        live += e.visible ? 1 : 0;
+    }
+    ImGui::Text("%d active / %d over the %d-character prompt budget", live,
+                g_mem_dropped,
+                static_cast<int>(campcat::llm::k_memory_budget_chars));
+    ImGui::TextDisabled("%d of %d characters reach the prompt", g_mem_page_chars,
+                        static_cast<int>(campcat::llm::k_memory_budget_chars));
     if (ImGui::Button("Reload")) {
         reload_memory();
     }
@@ -279,8 +254,8 @@ void draw_memory_page(campcat::llm::memory_kind _kind) {
                                ImGuiWindowFlags_AlwaysAutoResize)) {
         ImGui::TextUnformatted(ask);
         if (ImGui::Button("Delete", ImVec2(120.0F, 0.0F))) {
-            if (!campcat::llm::clear_memory(g_config_home, _kind)) {
-                campcat::automation_log::emit("[llm] memory file not deleted");
+            if (!campcat::llm::clear_memory(g_config_home, _kind, g_bundle)) {
+                campcat::automation_log::emit("[llm] memory ledger not deleted");
             }
             reload_memory();
             ImGui::CloseCurrentPopup();
@@ -293,9 +268,85 @@ void draw_memory_page(campcat::llm::memory_kind _kind) {
     }
 
     ImGui::Separator();
-    ImGui::InputTextMultiline("##memory", &g_mem_buf,
-                              ImGui::GetContentRegionAvail(),
-                              ImGuiInputTextFlags_ReadOnly);
+    if (ImGui::BeginChild("##memory_rows", ImVec2(0.0F, 0.0F))) {
+        for (const auto &e : g_mem_entries) {
+            ImGui::PushID(e.id.c_str());
+            bool pinned = e.pinned;
+            if (ImGui::Checkbox("##pin", &pinned)) {
+                campcat::llm::memory_op op;
+                op.k = pinned ? campcat::llm::memory_op::kind::pin
+                              : campcat::llm::memory_op::kind::unpin;
+                op.id = e.id;
+                edit_memory(op);
+            }
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("Pinned: kept when the prompt budget trims, "
+                                  "and a pass may not change it.");
+            }
+            ImGui::SameLine();
+            ImGui::TextDisabled("%s", e.section.c_str());
+            ImGui::SameLine();
+            if (g_mem_edit_id == e.id) {
+                ImGui::SetNextItemWidth(-120.0F);
+                char buf[260] = {};
+                std::snprintf(buf, sizeof buf, "%s", g_mem_edit_buf.c_str());
+                const bool done = ImGui::InputText(
+                    "##edit", buf, sizeof buf,
+                    ImGuiInputTextFlags_EnterReturnsTrue);
+                g_mem_edit_buf = buf;
+                if (done) {
+                    campcat::llm::memory_op op;
+                    op.k = campcat::llm::memory_op::kind::edit;
+                    op.id = e.id;
+                    op.text = g_mem_edit_buf;
+                    g_mem_edit_id.clear();
+                    edit_memory(op);
+                }
+                ImGui::SameLine();
+                if (ImGui::SmallButton("Cancel")) {
+                    g_mem_edit_id.clear();
+                }
+                ImGui::PopID();
+                continue;
+            }
+            if (e.visible) {
+                ImGui::TextUnformatted(e.text.c_str());
+            } else {
+                ImGui::TextDisabled("%s (retired)", e.text.c_str());
+            }
+            ImGui::SameLine();
+            if (ImGui::SmallButton("Edit")) {
+                g_mem_edit_id = e.id;
+                g_mem_edit_buf = e.text;
+            }
+            ImGui::SameLine();
+            if (ImGui::SmallButton(e.visible ? "Retire" : "Restore")) {
+                campcat::llm::memory_op op;
+                op.k = e.visible ? campcat::llm::memory_op::kind::retire
+                                 : campcat::llm::memory_op::kind::restore;
+                op.id = e.id;
+                edit_memory(op);
+            }
+            ImGui::SameLine();
+            if (ImGui::SmallButton("Delete")) {
+                campcat::llm::memory_op op;
+                op.k = campcat::llm::memory_op::kind::remove;
+                op.id = e.id;
+                edit_memory(op);
+            }
+            if (!e.src.empty()) {
+                ImGui::SameLine();
+                ImGui::TextDisabled("%s", e.src.front().c_str());
+            }
+            ImGui::PopID();
+        }
+        if (g_mem_entries.empty() && !g_mem_unreadable) {
+            ImGui::TextDisabled("(no memory yet)");
+        }
+    }
+    // Unconditional: BeginChild returns false when the list is clipped, and
+    // EndChild is still required.
+    ImGui::EndChild();
 }
 
 /// Read-only view of the notes, with the one destructive action behind a
@@ -331,7 +382,7 @@ const ImVec4 k_bot_bg{0.16F, 0.18F, 0.20F, 1.0F};
 const ImVec4 k_err_col{0.95F, 0.45F, 0.35F, 1.0F};
 const ImVec4 k_err_bg{0.30F, 0.16F, 0.16F, 1.0F}; ///< failed-reply bubble
 
-/// Name for the subagent window's heading. Unknown names are shown as sent.
+/// Name for the subagent card's heading. Unknown names are shown as sent.
 const char *agent_label(const std::string &_agent) {
     if (_agent == "scripter") {
         return "Scripter";
@@ -345,21 +396,19 @@ const char *agent_label(const std::string &_agent) {
     return _agent.c_str();
 }
 
-/// Defined with the bubble's rendering below: the window shows the same four
+/// Defined with the bubble's rendering below: the card shows the same four
 /// kinds of step the conversation does.
-void draw_item(llm_item &_it, bool _growing);
+void draw_item(llm_item &_it, bool _growing, bool _subagent = false);
 bool grows_in_place(campcat::llm_event::kind _kind);
 
-/// How many of the window's pictures keep a texture. It is a side view, not the
-/// conversation, so this stays well under the bubble's cap.
+/// How many pictures in the subagent card keep a texture.
 constexpr size_t k_sub_tex_cap = 4;
 
-/// The subagent window's steps, mirrored from the host, and the textures it
-/// owns. Its own queue rather than the bubble's: those items are not in a turn,
-/// so the bubble's eviction could not find them.
+/// The card owns its own textures; these items are not in a chat turn.
 std::vector<llm_item> g_sub_items;
 std::deque<long> g_sub_tex;
 unsigned long g_sub_run = 0;
+std::optional<unsigned long> g_sub_cleared_run;
 
 void release_sub_items() {
     for (llm_item &it : g_sub_items) {
@@ -397,8 +446,7 @@ void sync_sub_items(const campcat::llm_host::subagent_state &_st) {
         }
         g_sub_items.push_back(std::move(it));
     }
-    // The window is small, so it keeps fewer pictures alive than the bubble;
-    // an older one says so rather than staying blank.
+    // An older image keeps its row and reports that the screenshot was dropped.
     for (llm_item &it : g_sub_items) {
         if (it.image_id != 0 && it.tex != 0 &&
             std::find(g_sub_tex.begin(), g_sub_tex.end(), it.image_id) ==
@@ -424,8 +472,7 @@ void sync_sub_items(const campcat::llm_host::subagent_state &_st) {
 /// markdown, an image or a folded step, so the last item is only ever its final
 /// widget and cannot say where the block began.
 void copy_menu(const char *_id, std::string_view _text, ImVec2 _top) {
-    // The window check keeps a covered bubble quiet: the rect below is in
-    // screen space, and the subagent window may float over the conversation.
+    // The window check keeps a covered bubble quiet: the rect is in screen space.
     if (!_text.empty() && ImGui::IsWindowHovered() &&
         ImGui::IsMouseHoveringRect(
             _top, ImVec2(ImGui::GetWindowPos().x + ImGui::GetWindowSize().x,
@@ -464,72 +511,52 @@ std::string reply_text(const llm_turn &_t) {
     return out;
 }
 
-/// What the innermost subagent is doing while the operator waits for it.
-///
-/// One window, opened once per run: `runs` rises on every `start`, and a window
-/// the user closed stays closed for the rest of that run. Its title never
-/// changes, so the innermost agent swapping in and out moves nothing on screen.
-void draw_subagent_window() {
-    static bool open = false;
+/// The latest subagent run at the end of the chat, with the same scroll as replies.
+void draw_subagent_card() {
     const campcat::llm_host::subagent_state st = g_host.subagent();
-    if (!st.seen) {
+    if (!st.seen || g_sub_cleared_run == st.runs) {
         return;
     }
-    if (!open && st.runs != g_sub_run) {
-        open = true;
+    const bool new_run = st.runs != g_sub_run;
+    sync_sub_items(st);
+    ImGui::Spacing();
+    if (new_run) {
+        ImGui::SetNextItemOpen(true);
+    }
+    const bool failed = !st.active && !st.ok;
+    const std::string heading = std::string("Sub-agent: ") + agent_label(st.agent) +
+        (st.active ? " / Working" : failed ? " / Failed" : " / Done") +
+        "###subagent_card";
+    if (failed) {
+        ImGui::PushStyleColor(ImGuiCol_Text, k_err_col);
+    }
+    const bool open = ImGui::CollapsingHeader(heading.c_str(),
+                                             ImGuiTreeNodeFlags_DefaultOpen);
+    if (failed) {
+        ImGui::PopStyleColor();
     }
     if (!open) {
         return;
     }
-    sync_sub_items(st);
-    const ImGuiViewport *vp = ImGui::GetMainViewport();
-    ImGui::SetNextWindowPos(
-        ImVec2(vp->WorkPos.x + vp->WorkSize.x - 24.0F,
-               vp->WorkPos.y + vp->WorkSize.y - 24.0F),
-        ImGuiCond_FirstUseEver, ImVec2(1.0F, 1.0F));
-    ImGui::SetNextWindowSize(ImVec2(520.0F, 420.0F), ImGuiCond_FirstUseEver);
-    if (!ImGui::Begin("Sub-agent", &open)) {
-        ImGui::End();
-        return;
-    }
-    // Clicking the conversation raises that window over this one, and this one is
-    // meant to be read while the operator works. A popup stays above it: a menu
-    // opened here, or the approval form, must not be covered by its own window.
-    if (!ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopupId |
-                                    ImGuiPopupFlags_AnyPopupLevel)) {
-        ImGui::BringWindowToDisplayFront(ImGui::GetCurrentWindow());
-    }
-    WITH_FONT(bold, { ImGui::TextUnformatted(agent_label(st.agent)); });
-    ImGui::SameLine();
-    if (st.active) {
-        ImGui::TextDisabled("working...");
-    } else if (st.ok) {
-        ImGui::TextDisabled("done");
-    } else {
-        ImGui::TextColored(k_err_col, "failed");
-    }
+    ImGui::PushID("subagent_steps");
+    ImGui::Indent();
     if (!st.goal.empty()) {
-        ImGui::TextDisabled("%s", st.goal.c_str());
+        ImGui::PushStyleColor(ImGuiCol_Text,
+                              ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
+        ImGui::TextWrapped("%s", st.goal.c_str());
+        ImGui::PopStyleColor();
     }
-    ImGui::Separator();
-    ImGui::BeginChild("sub_lines", ImVec2(0.0F, 0.0F),
-                      ImGuiChildFlags_Borders);
-    // Follow the newest step unless the user scrolled up to read one.
-    const bool at_bottom = ImGui::GetScrollY() >= ImGui::GetScrollMaxY() - 1.0F;
     for (size_t i = 0; i < g_sub_items.size(); ++i) {
         const bool growing = st.active && i + 1 == g_sub_items.size() &&
                              grows_in_place(g_sub_items[i].type);
         const ImVec2 top = ImGui::GetCursorScreenPos();
         ImGui::PushID(static_cast<int>(i));
-        draw_item(g_sub_items[i], growing);
+        draw_item(g_sub_items[i], growing, true);
         copy_menu("copy", g_sub_items[i].text, top);
         ImGui::PopID();
     }
-    if (at_bottom) {
-        ImGui::SetScrollHereY(1.0F);
-    }
-    ImGui::EndChild();
-    ImGui::End();
+    ImGui::Unindent();
+    ImGui::PopID();
 }
 /// Send is the one primary action here; plain buttons are surfaces (main.cpp).
 const ImVec4 k_primary{0.243F, 0.400F, 0.529F, 1.0F};
@@ -589,7 +616,7 @@ void evict_over_cap() {
 
 /// Upload an item's image once and release its bytes. UI thread, and the caller
 /// must hold the GL context.
-void ensure_texture(llm_item &_it) {
+void ensure_texture(llm_item &_it, bool _subagent) {
     if (_it.tex_tried || _it.png.empty()) {
         return;
     }
@@ -618,8 +645,10 @@ void ensure_texture(llm_item &_it) {
         _it.tex_dropped = true;
         return;
     }
-    g_tex_order.push_back(_it.image_id);
-    evict_over_cap();
+    if (!_subagent) {
+        g_tex_order.push_back(_it.image_id);
+        evict_over_cap();
+    }
 }
 
 /// Release every texture `_t`'s steps own, and the queue's claim on them.
@@ -710,11 +739,10 @@ void draw_thinking(llm_item &_it, bool _streaming) {
 }
 
 /// One step of a timeline: an image, what the agent did, its reasoning, or its
-/// words. Shared by the conversation and the subagent window -- both show the
-/// same four kinds, and a second copy would drift.
-void draw_item(llm_item &_it, bool _growing) {
+/// words. Shared by replies and the subagent card.
+void draw_item(llm_item &_it, bool _growing, bool _subagent) {
     if (_it.type == campcat::llm_event::kind::image) {
-        ensure_texture(_it);
+        ensure_texture(_it, _subagent);
         if (_it.tex != 0 && _it.tex_w > 0) {
             const ImVec2 img = fit_image(_it.tex_w, _it.tex_h,
                                          ImGui::GetContentRegionAvail().x);
@@ -773,9 +801,9 @@ void append_user_turn(std::string _prompt, bool _queued = false) {
 /// The turn the worker is answering. A queued message is on screen already
 /// but is not this turn until the worker takes it.
 llm_turn *in_flight_turn() {
-    for (auto it = g_turns.rbegin(); it != g_turns.rend(); ++it) {
-        if (it->pending && !it->queued) {
-            return &*it;
+    for (auto &turn : g_turns) {
+        if (turn.pending && !turn.queued) {
+            return &turn;
         }
     }
     return nullptr;
@@ -867,202 +895,22 @@ void pump_stream() {
     g_thinking = g_host.is_thinking();
 }
 
-/// Hand a finished turn to the UI, timeline included, before the stream is
-/// cleared for whatever runs next.
-void post_turn(campcat::llm_result _res) {
-    handoff done;
-    done.has = true;
-    done.res = std::move(_res);
-    done.timeline = g_host.copy_timeline();
-    std::lock_guard<std::mutex> lk(g_done_mu);
-    g_done.push_back(std::move(done));
-}
-
-/// The message the user sent while a turn was running, if there is one.
-/// Clears the interrupt flag: the message is about to become a turn of its own.
-std::optional<std::string> take_queued() {
-    // Clear before taking: Stop must not lose its interrupt between taking a
-    // queued message and starting that message's request.
-    g_host.clear_interrupt();
-    return g_prompts.take();
-}
-
-/// Run `_prompt`, then any message the user sends while it runs. One thread:
-/// the next message does not start another. `adb` lives for the whole loop.
-/// `_promote` is false for the turn the UI just started itself.
-void run_prompt_loop(campcat::shell_state *_st, const campcat::app_config &_cfg,
-                     std::string _prompt, bool _promote) {
-    const std::string addr =
-        campcat::mumu_adb_address(_cfg.mumu.tool_path, _cfg.mumu.device_index);
-    campcat::adb_client adb(_cfg.adb.path,
-                            addr.empty() ? _cfg.adb.serial : addr);
-    adb.connect_remote(addr);
-    campcat::llm::tool_context ctx;
-    ctx.adb = &adb;
-    ctx.adb_busy = [] { return g_adb_busy.load(); };
-    // Both read live rather than folded here: the settings popup can change
-    // them mid-turn, and a gate that keeps asking after it was switched off
-    // is the bug this avoids. `snapshot_cfg` is the thread-safe read, and
-    // `_st` outlives the thread (it is a `main` local). `_cfg` stays this
-    // thread's snapshot: it is what the adb client was built from.
-    ctx.needs_approval = [_st](std::string_view _tool) {
-        return campcat::llm::approval_gate_required(
-            _st->snapshot_cfg().approval, _tool);
-    };
-    ctx.box_snap = [_st] { return _st->snapshot_cfg().box_snap; };
-    ctx.cfg = &_cfg;
-    ctx.script_dir = std::filesystem::path(_cfg.config_home);
-    ctx.start_emulator = [_st](const std::function<bool()> &_should_stop) {
-        return _st->start_mumu_blocking(_should_stop);
-    };
-    g_host.set_tool_context(ctx);
-    while (true) {
-        if (_promote) {
-            g_host.clear_stream();
-            g_promote.store(true);
-        }
-        _promote = true;
-        campcat::llm_result res = g_host.run_turn(
-            _cfg.config_home, _cfg.llm.provider, _prompt,
-            _cfg.llm.max_dispatches, _cfg.llm.max_model_rounds,
-            // Sampling is on: the human is correcting this agent's regions, so
-            // only it runs, and only with the two tools a sample needs.
-            _cfg.region_score.record);
-        post_turn(std::move(res));
-        std::optional<std::string> next = take_queued();
-        if (!next.has_value()) {
-            break;
-        }
-        _prompt = std::move(*next);
-    }
-    g_host.set_tool_context({}); // `adb` dies with this function
-    g_running.store(false);
-}
-
-/// Run one turn on the worker.
-void start_turn(campcat::shell_state &_st, const campcat::app_config &_cfg,
-                std::string _prompt) {
-    if (g_thread.joinable()) {
-        g_thread.join();
-    }
-    g_prompts.restart();
-    g_host.clear_interrupt();
-    g_running.store(true);
-    // The whole snapshot, by value: the script tools need the interpreter's
-    // config (`tool_context::cfg`), and `_cfg` is a per-frame copy in the
-    // caller's frame, so a pointer to it would dangle the moment the frame
-    // ends. `_st` outlives the thread (it is a `main` local, and this thread
-    // is joined by `llm_panel_shutdown_gl`).
-    g_thread = std::thread(
-        [st = &_st, cfg_snapshot = _cfg, prompt = std::move(_prompt)]() {
-            run_prompt_loop(st, cfg_snapshot, prompt, false);
-        });
-}
-
-/// Operator first, then scripter. A failed operator pass still writes scripter.
-/// A message queued during the first pass skips the second. `*_operator_out`
-/// is the operator pass, which is what the status line counts.
-void memorize_both(const std::filesystem::path &_home,
-                   const std::string &_provider, int _timeout_ms,
-                   campcat::llm_result *_operator_out) {
-    *_operator_out =
-        g_host.memorize(_home, _provider,
-                        campcat::llm::memory_kind::operator_notes, _timeout_ms);
-    // operator 失败也要写 scripter。只有用户已经发来新消息才停。
-    if (g_host.interrupt_pending()) {
-        return;
-    }
-    campcat::llm_result scripter =
-        g_host.memorize(_home, _provider,
-                        campcat::llm::memory_kind::scripter_notes, _timeout_ms);
-    if (!scripter.ok) {
-        campcat::automation_log::emit("[llm] scripter memory not saved: " +
-                                      scripter.error);
-    }
-}
-
-/// Consolidate the session into the long-term notes, on the worker.
-/// A message sent while this runs discards the notes and becomes the next turn.
-void start_memorize(campcat::shell_state &_st,
-                    const campcat::app_config &_cfg) {
-    if (g_thread.joinable()) {
-        g_thread.join();
-    }
-    g_prompts.restart();
-    g_host.clear_interrupt();
-    g_running.store(true);
-    g_memorizing.store(true);
-    g_thread = std::thread([st = &_st, cfg_snapshot = _cfg]() {
-        campcat::llm_result res;
-        memorize_both(cfg_snapshot.config_home, cfg_snapshot.llm.provider,
-                      campcat::k_memorize_timeout_ms, &res);
-        g_memorizing.store(false);
-        // Checked before the queue is taken: taking it clears the flag.
-        const bool dropped = g_host.interrupt_pending();
-        if (!dropped) {
-            handoff done;
-            done.has = true;
-            done.is_memory = true;
-            done.res = std::move(res);
-            std::lock_guard<std::mutex> lk(g_done_mu);
-            g_done.push_back(std::move(done));
-        }
-        std::optional<std::string> next = take_queued();
-        if (!next.has_value()) {
-            g_running.store(false);
-            return;
-        }
-        run_prompt_loop(st, cfg_snapshot, std::move(*next), true);
-    });
-}
-
-void start_reset(std::filesystem::path _config_home, std::string _provider) {
-    if (g_thread.joinable()) {
-        g_thread.join();
-    }
-    g_prompts.restart();
-    g_host.clear_interrupt();
-    g_running.store(true);
-    g_resetting.store(true);
-    g_thread = std::thread([config_home = std::move(_config_home),
-                            provider = std::move(_provider)]() {
-        // Keep the session before forgetting it: `reset` is what drops the
-        // history the consolidation reads, so the order here is the whole
-        // point. A failed consolidation is not a reason to refuse the clear the
-        // user asked for.
-        g_memorizing.store(true);
-        campcat::llm_result kept;
-        memorize_both(config_home, provider, campcat::k_memorize_timeout_ms,
-                      &kept);
-        g_memorizing.store(false);
-        if (!kept.ok) {
-            campcat::automation_log::emit("[llm] memory not saved: " +
-                                          kept.error);
-        }
-        campcat::llm_result res = g_host.reset(config_home.parent_path());
-        {
-            handoff done;
-            done.has = true;
-            done.is_reset = true;
-            done.res = std::move(res);
-            std::lock_guard<std::mutex> lk(g_done_mu);
-            g_done.push_back(std::move(done));
-        }
-        g_resetting.store(false);
-        g_running.store(false);
-    });
-}
-
 /// Take the finished job, if any, and fold it into the conversation.
-void consume_handoff() {
-    handoff h;
-    {
-        std::lock_guard<std::mutex> lk(g_done_mu);
-        if (g_done.empty()) {
-            return;
+bool consume_handoff() {
+    auto done = g_controller.take_completion();
+    if (!done) {
+        return false;
+    }
+    auto &h = *done;
+
+    if (h.kind == campcat::llm_controller::completion_kind::promotion) {
+        for (auto &turn : g_turns) {
+            if (turn.queued) {
+                turn.queued = false;
+                break;
+            }
         }
-        h = std::move(g_done.front());
-        g_done.pop_front();
+        return true;
     }
 
     // Every finished request restarts the idle clock, consolidation included:
@@ -1070,37 +918,36 @@ void consume_handoff() {
     // condition again and it would loop.
     g_last_llm = ImGui::GetTime();
 
-    if (h.is_memory) {
-        if (h.res.ok) {
-            // Exactly the notes `memorize` wrote back, so no re-read.
-            g_memory_chars = static_cast<int>(h.res.text.size());
-        }
+    if (h.kind == campcat::llm_controller::completion_kind::memory) {
         campcat::automation_log::emit(
-            h.res.ok ? "[llm] operator long-term memory updated"
-                     : "[llm] memory not saved: " + h.res.error);
-        return;
+            h.result.ok ? "[llm] operator long-term memory updated"
+                     : "[llm] memory not saved: " + h.result.error);
+        return true;
     }
 
-    if (!h.is_reset) {
-        fill_reply(h.res, h.timeline);
-        if (h.res.ok) {
+    if (h.kind == campcat::llm_controller::completion_kind::turn) {
+        fill_reply(h.result, h.timeline);
+        if (h.result.ok) {
             // Reported by the sidecar on a successful turn only: a result
             // without the field parses as 0, so a failure must not zero this.
-            g_sidecar_turns = h.res.turns;
+            g_sidecar_turns = h.result.turns;
             campcat::automation_log::emit("[llm] ok");
         } else {
-            campcat::automation_log::emit("[llm] failed: " + h.res.error);
+            campcat::automation_log::emit("[llm] failed: " + h.result.error);
         }
-        return;
+        return true;
     }
-    if (!h.res.ok) {
-        campcat::automation_log::emit("[llm] reset failed: " + h.res.error);
-        return;
+    if (!h.result.ok) {
+        campcat::automation_log::emit("[llm] reset failed: " + h.result.error);
+        return true;
     }
     drop_all_turns();
+    g_sub_cleared_run = g_host.subagent().runs;
+    release_sub_items();
     g_sidecar_turns = 0;
     g_pin_bottom = true;
     campcat::automation_log::emit("[llm] conversation cleared");
+    return true;
 }
 
 /// Send whatever is staged: clear the input and hand the prompt to the worker.
@@ -1110,39 +957,36 @@ void send_current(campcat::shell_state &_st, campcat::app_config &_cfg) {
         return;
     }
 
+    if (!g_controller.start_turn(_st, _cfg, prompt)) {
+        campcat::automation_log::emit("[llm] another device task is running");
+        return;
+    }
     g_input.clear();
-
     append_user_turn(prompt);
-    // Cleared from the UI thread, not just on the worker: the worker clears it
-    // inside next_request_id, which runs after ensure_running may have spent a
-    // minute starting the interpreter, and until then the new bubble would show
-    // the previous request's leftovers.
-    g_host.clear_stream();
-    start_turn(_st, _cfg, prompt);
 }
 
 /// Show `_prompt` now and stop the turn in flight at its next tool. A second
 /// send before that tool replaces the message; the earlier one is not sent.
-void queue_prompt(std::string _prompt) {
-    if (!g_prompts.replace(_prompt)) {
-        return;
+bool queue_prompt(std::string _prompt) {
+    bool replaced = false;
+    if (!g_controller.queue_prompt(_prompt, &replaced)) {
+        return false;
     }
     if (llm_turn *live = in_flight_turn()) {
         live->frozen = true;
     }
-    if (llm_turn *queued = queued_turn()) {
-        queued->user_text = _prompt;
-    } else {
-        append_user_turn(std::move(_prompt), true);
+    if (replaced) {
+        if (llm_turn *queued = queued_turn()) {
+            queued->user_text = _prompt;
+            return true;
+        }
     }
-    g_host.request_interrupt();
-    campcat::llm::request_script_stop();
-    campcat::llm::request_emulator_stop();
-    g_host.release_approval();
+    append_user_turn(std::move(_prompt), true);
+    return true;
 }
 
 void request_task_stop() {
-    if (g_prompts.stop()) {
+    if (g_controller.request_stop()) {
         if (llm_turn *queued = queued_turn()) {
             queued->queued = false;
             queued->pending = false;
@@ -1150,10 +994,6 @@ void request_task_stop() {
             queued->ok = true;
         }
     }
-    g_host.request_interrupt();
-    campcat::llm::request_script_stop();
-    campcat::llm::request_emulator_stop();
-    g_host.release_approval();
 }
 
 /// "Thinking" (when the sidecar says so) plus 1..3 dots on the frame clock, so
@@ -1922,7 +1762,7 @@ bool draw_log(const ImVec2 &_size) {
         // Greyed out while a turn is in flight, because clearing would have to
         // wait for it anyway.
         if (ImGui::MenuItem("Clear conversation", nullptr, false,
-                            !g_running.load() && !g_turns.empty())) {
+                            !g_controller.running() && !g_turns.empty())) {
             clear_requested = true;
         }
         ImGui::Separator();
@@ -1951,6 +1791,7 @@ bool draw_log(const ImVec2 &_size) {
         }
         draw_turn(g_turns[i], static_cast<int>(i));
     }
+    draw_subagent_card();
 
     ImGui::PopFont();
 
@@ -1970,34 +1811,11 @@ bool draw_log(const ImVec2 &_size) {
 } // namespace
 
 void llm_panel_shutdown_gl() {
-    // Unblock a question nobody can answer any more: without this the worker
-    // stays inside service_approval and the join below never returns.
-    g_host.cancel_approval();
-    // A long script keeps the worker inside run_script, where cancel_approval
-    // means nothing; without this the join below waits for the script to finish
-    // on its own.
-    campcat::llm::request_script_stop();
-    // Same for a boot in flight: the wait polls this, so the join does not sit
-    // through the rest of a VM coming up.
-    campcat::llm::request_emulator_stop();
-    if (g_thread.joinable()) {
-        g_thread.join();
-    }
-
-    // The last consolidation is started, not awaited: this runs with the window
-    // still on screen, so blocking here would look like a freeze. It finishes
-    // in `llm_panel_shutdown_finish`, once there is nothing left to freeze.
-    if (!g_config_home.empty()) {
-        g_shutdown_thread = std::thread([]() {
-            campcat::llm_result res;
-            memorize_both(g_config_home, g_provider,
-                          campcat::k_shutdown_memorize_timeout_ms, &res);
-            if (!res.ok) {
-                campcat::automation_log::emit("[llm] memory not saved: " +
-                                              res.error);
-            }
-        });
-    }
+    campcat::app_config shutdown_cfg;
+    shutdown_cfg.config_home = g_config_home.string();
+    shutdown_cfg.llm.provider = g_provider;
+    shutdown_cfg.script_bundle = g_bundle;
+    g_controller.begin_shutdown(shutdown_cfg);
 
     campcat::app::delete_tex(&g_appr_tex, &g_appr_w, &g_appr_h);
     // The gear, Send and the log's chevrons go with them. Nothing here owns
@@ -2006,31 +1824,26 @@ void llm_panel_shutdown_gl() {
     campcat::app::release_icons();
     g_appr_id = -1;
     drop_all_turns();
+    release_sub_items();
     g_thinking = false;
 }
 
 void llm_panel_shutdown_finish() {
-    // Nothing visible is left to stall: the window is gone, so this wait is
-    // only the process outliving it. Bounded by the timeout handed to
-    // `memorize`.
-    if (g_shutdown_thread.joinable()) {
-        g_shutdown_thread.join();
-    }
-    g_host.stop();
+    g_controller.finish_shutdown();
 }
 
 campcat::activity_status llm_panel_activity() {
-    if (g_prompts.stopping()) {
-        return {g_running.load() ? campcat::activity_level::waiting
+    if (g_controller.stopping()) {
+        return {g_controller.running() ? campcat::activity_level::waiting
                                  : campcat::activity_level::idle,
-                g_running.load() ? "Stopping" : "Stopped"};
+                g_controller.running() ? "Stopping" : "Stopped"};
     }
-    if (g_resetting.load()) {
+    if (g_controller.resetting()) {
         return {campcat::activity_level::busy, "Clearing"};
     }
     // Most specific first: a boot and a script both run inside a turn, so
-    // reading `g_running` first would report "Thinking" through all of them.
-    // The memory pass sets `g_running` too, so it has to be read before it.
+    // Reading the general running flag first would hide nested tool activity.
+    // The memory pass also runs on the worker, so it is checked before that.
     if (g_host.pending_approval().pending) {
         return {campcat::activity_level::waiting, "Awaiting"};
     }
@@ -2040,10 +1853,10 @@ campcat::activity_status llm_panel_activity() {
     if (campcat::llm::script_running()) {
         return {campcat::activity_level::busy, "Script"};
     }
-    if (g_memorizing.load()) {
+    if (g_controller.memorizing()) {
         return {campcat::activity_level::busy, "Memory"};
     }
-    if (g_running.load()) {
+    if (g_controller.running()) {
         return {campcat::activity_level::busy, "Thinking"};
     }
     // The newest turn is "pending" from the moment the prompt is sent, so a new
@@ -2055,15 +1868,10 @@ campcat::activity_status llm_panel_activity() {
     return {campcat::activity_level::idle, "Idle"};
 }
 
-void llm_panel_tick(bool _adb_busy) {
-    consume_handoff();
-    if (g_promote.exchange(false)) {
-        if (llm_turn *queued = queued_turn()) {
-            queued->queued = false;
-        }
+void llm_panel_tick() {
+    while (consume_handoff()) {
     }
-    g_adb_busy.store(_adb_busy);
-    if (g_prompts.stopping() && g_running.load()) {
+    if (g_controller.stopping() && g_controller.running()) {
         // A tool can publish its approval or reset its stop flag after the
         // first click. Keep cancelling until the worker acknowledges Stop.
         request_task_stop();
@@ -2071,41 +1879,36 @@ void llm_panel_tick(bool _adb_busy) {
     pump_stream();
 }
 
-bool llm_panel_draw_task_bar(bool _on_llm_page) {
+bool llm_panel_draw_sidebar_task(bool _on_llm_page) {
     const campcat::activity_status status = llm_panel_activity();
-    if (!_on_llm_page && !g_running.load() && !g_prompts.stopping() &&
+    if (!_on_llm_page && !g_controller.running() && !g_controller.stopping() &&
         status.level != campcat::activity_level::failed) {
         return false;
     }
     bool view_task = false;
-    ImGui::PushID("agent_task_bar");
-    ImGui::AlignTextToFramePadding();
-    WITH_FONT(bold, { ImGui::TextUnformatted("Agent task"); });
-    ImGui::SameLine();
+    ImGui::PushID("sidebar_agent_task");
+    ImGui::Spacing();
+    WITH_FONT(bold, { ImGui::SeparatorText("Agent task"); });
     ImGui::TextColored(campcat::activity_color(status.level), "%s", status.label);
-    if (g_running.load()) {
-        ImGui::BeginDisabled(g_prompts.stopping() || g_resetting.load());
-        if (ImGui::Button("Stop agent")) {
-            request_task_stop();
+    WITH_FONT(bold, {
+        if (g_controller.running()) {
+            ImGui::BeginDisabled(g_controller.stopping() || g_controller.resetting());
+            if (ImGui::Button("Stop agent", ImVec2(-1.0F, 0.0F))) {
+                request_task_stop();
+            }
+            ImGui::EndDisabled();
         }
-        ImGui::EndDisabled();
-    }
-    if (!_on_llm_page) {
-        if (g_running.load()) {
-            ImGui::SameLine();
+        if (!_on_llm_page) {
+            view_task = ImGui::Button("Open task in LLM", ImVec2(-1.0F, 0.0F));
         }
-        view_task = ImGui::Button("Open task in LLM");
-    }
-    if (g_prompts.stopping() && g_running.load()) {
+    });
+    if (g_controller.stopping() && g_controller.running()) {
         ImGui::TextWrapped("Stop requested. Waiting for the current operation to finish.");
     } else if (status.level == campcat::activity_level::waiting &&
                g_host.pending_approval().pending) {
-        ImGui::TextWrapped(_on_llm_page
-                              ? "Review the operation below."
-                              : "An operation needs your decision. Open LLM to review it.");
+        ImGui::TextWrapped(_on_llm_page ? "Review the pending approval in chat."
+                                        : "Open LLM to review the pending approval.");
     }
-    ImGui::Separator();
-    ImGui::Spacing();
     ImGui::PopID();
     return view_task;
 }
@@ -2115,12 +1918,14 @@ void llm_panel_draw_panel(campcat::shell_state &_st, campcat::app_config &_cfg) 
     // handed the config: this panel is the only place that sees it.
     g_config_home = _cfg.config_home;
     g_provider = _cfg.llm.provider;
+    g_bundle = _cfg.script_bundle;
 
     // Saved skills in a fixed column on the left, conversation on the right,
     // the prompt box below both. Side by side because the list is an index, not
     // a second conversation: stacked, it took height off every reply.
-    script_editor_panel_draw(std::filesystem::path(_cfg.config_home),
-                             k_script_list_w, -g_footer_h, _st.workspace);
+    script_editor_panel_draw(_cfg.library_root(),
+                             k_script_list_w, -g_footer_h, _st.workspace,
+                             _st.device_tasks.busy() || _st.sched.running());
     ImGui::SameLine();
     // Measured, not another negative width: a negative size is resolved against
     // the window's content region, not against what is left past the cursor, so
@@ -2128,11 +1933,10 @@ void llm_panel_draw_panel(campcat::shell_state &_st, campcat::app_config &_cfg) 
     const bool clear_requested =
         draw_log(ImVec2(ImGui::GetContentRegionAvail().x, -g_footer_h));
     if (clear_requested) {
-        start_reset(_cfg.config_home, _cfg.llm.provider);
+        g_controller.start_reset(_st, _cfg);
     }
 
     draw_memory_window();
-    draw_subagent_window();
 
     // Top of whatever comes below the log: the reference for the footer height.
     const float footer_top = ImGui::GetCursorScreenPos().y;
@@ -2148,7 +1952,7 @@ void llm_panel_draw_panel(campcat::shell_state &_st, campcat::app_config &_cfg) 
         clear_staged();
     }
     const bool have_approval = sync_approval_texture(approval);
-    ImGui::BeginDisabled(g_prompts.stopping());
+    ImGui::BeginDisabled(g_controller.stopping());
     const bool answered = have_approval && draw_approval_panel(approval);
     ImGui::EndDisabled();
     ImGui::TextUnformatted(awaiting ? "Correction for this operation"
@@ -2159,14 +1963,14 @@ void llm_panel_draw_panel(campcat::shell_state &_st, campcat::app_config &_cfg) 
     // that can tidy up, and a turn in flight or a half-typed prompt means
     // somebody is still here. Runs on the same worker as a turn, so the two
     // never interleave on the sidecar's stdin.
-    if (!g_running.load() && !awaiting && !g_turns.empty() &&
+    if (!g_controller.running() && !awaiting && !g_turns.empty() &&
         is_blank(g_input) && !g_config_home.empty() &&
         ImGui::GetTime() - g_last_llm > k_idle_seconds) {
-        start_memorize(_st, _cfg);
+        g_controller.start_memorize(_st, _cfg);
     }
 
     // The action label makes an approval correction distinct from a new message.
-    const bool memorizing = g_memorizing.load();
+    const bool memorizing = g_controller.memorizing();
     const float gap = ImGui::GetStyle().ItemSpacing.x;
     const char *send_label = awaiting ? "Submit correction" : "Send";
     const float send_w = ImGui::CalcTextSize(send_label).x +
@@ -2202,8 +2006,8 @@ void llm_panel_draw_panel(campcat::shell_state &_st, campcat::app_config &_cfg) 
     // A turn in flight still accepts a message: that message is how the user
     // stops it. Clear conversation does not, because the reset drops the log.
     const bool can_send = !answered &&
-                          !(g_prompts.stopping() && g_running.load()) &&
-                          !g_resetting.load() &&
+                          !(g_controller.stopping() && g_controller.running()) &&
+                          !g_controller.resetting() &&
                           (!is_blank(g_input) || (awaiting && g_staged_region));
     if (!can_send) {
         ImGui::BeginDisabled();
@@ -2224,7 +2028,6 @@ void llm_panel_draw_panel(campcat::shell_state &_st, campcat::app_config &_cfg) 
 
     // Four counts. Dispatches is the only one with a fuse, and that fuse is
     // per turn while the number is the conversation total.
-    refresh_memory_chars();
     const campcat::llm_protocol::usage_stats usage = g_host.usage();
     ImGui::Indent(k_stat_indent);
     WITH_FONT(small, {
@@ -2278,10 +2081,12 @@ void llm_panel_draw_panel(campcat::shell_state &_st, campcat::app_config &_cfg) 
                                    g_staged_region);
             clear_staged();
             g_input.clear(); // consumed as the answer, not as a prompt
-        } else if (g_running.load()) {
-            const std::string prompt = g_input;
-            g_input.clear();
-            queue_prompt(prompt);
+        } else if (g_controller.running()) {
+            if (queue_prompt(g_input)) {
+                g_input.clear();
+            } else {
+                send_current(_st, _cfg);
+            }
         } else {
             send_current(_st, _cfg);
         }

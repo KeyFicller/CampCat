@@ -566,6 +566,16 @@ def test_a_checked_template_keeps_its_cut(monkeypatch):
     assert "沿用的是 box 1,2 3x4" in note
 
 
+def test_a_template_label_does_not_reuse_coordinates_on_another_frame(monkeypatch):
+    seen = _scripted_review(monkeypatch)
+    for shot, box in [(41, dict(BOX)), (42, {"x": 8, "y": 9, "w": 3, "h": 4})]:
+        out, _, rejected = region_review.review("save_template", {
+            "shot": shot, "region": box, "expect": "navigation button"})
+        assert rejected == ""
+        assert out["region"] == box
+    assert seen == ["navigation button", "navigation button"]
+
+
 def test_templates_in_one_call_are_checked_together(monkeypatch):
     # Serial, three templates in one `save_anchor` were three model round trips
     # back to back -- about 15 s each, a quarter of a 20-minute run. They share

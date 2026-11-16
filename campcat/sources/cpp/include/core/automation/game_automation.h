@@ -21,6 +21,10 @@ struct ccat_script_profile;
 struct automation_cycle_result {
     bool ok = false;
     std::string message;
+    std::string error_code;
+    /// Empty when recording is disabled or no evidence directory could be
+    /// opened.
+    std::string audit_path;
 };
 
 /**

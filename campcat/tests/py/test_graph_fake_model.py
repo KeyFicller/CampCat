@@ -6,6 +6,7 @@ faked out.
 """
 
 import graph
+import runner
 import models
 import session
 import tools
@@ -81,60 +82,133 @@ def test_stock_fake_model_cannot_be_bound(monkeypatch):
     out = {}
     list(graph.stream_turn({"text": "hi", "tools": [TAP_TOOL], "memory": ""}, out))
 
-    # The key, not its value: the fake raises `NotImplementedError()` with no
-    # message, so `invoke` reports the empty string and the turn still fails.
+    # Empty exception text must still produce a failed host response.
     assert "error" in out
+    assert out["error"] == "NotImplementedError"
+    import main
+    response = list(main.handle_request({"type": "turn", "id": "empty-error",
+                                         "text": "hi", "tools": [TAP_TOOL]}))[-1]
+    assert response["ok"] is False
+    assert response["error"] == "NotImplementedError"
 
 
 def test_the_third_identical_failure_is_refused():
-    graph.reset_fail_counts()
+    runner.reset_fail_counts()
     ran = []
 
     def run_one(call):
         ran.append(call["id"])
-        return "error: adb busy", []
+        return runner.ToolResult("error: adb busy", error_code="device_busy")
 
     call = {"name": "go_home", "args": {}, "id": "a"}
     for n in ("1", "2", "3"):
-        results, _, interrupted = graph._run_calls(
+        results, _, interrupted = runner.run_calls(
             [dict(call, id=n)], run_one)
         assert not interrupted
     assert ran == ["1", "2"]
-    assert results[0].content == graph._FUSE_TEXT
+    assert results[0].content == runner.FUSE_TEXT
     # A different argument is a different call.
-    graph._run_calls(
+    runner.run_calls(
         [{"name": "go_home", "args": {"why": "other"}, "id": "4"}], run_one)
     assert ran == ["1", "2", "4"]
 
 
 def test_a_success_resets_the_failure_streak():
-    graph.reset_fail_counts()
+    runner.reset_fail_counts()
     replies = iter(["error: adb busy", "ok", "error: adb busy", "error: adb busy"])
     ran = []
 
     def run_one(call):
         ran.append(call["id"])
-        return next(replies), []
+        text = next(replies)
+        code = "device_busy" if text == "error: adb busy" else ("invalid_args" if text.startswith("error:") else "")
+        return runner.ToolResult(text, error_code=code)
 
     call = {"name": "go_home", "args": {}, "id": "a"}
     for n in ("1", "2", "3", "4", "5"):
-        graph._run_calls([dict(call, id=n)], run_one)
+        runner.run_calls([dict(call, id=n)], run_one)
     assert ran == ["1", "2", "3", "4"]
 
 
 def test_a_different_error_does_not_trip_the_fuse():
-    graph.reset_fail_counts()
+    runner.reset_fail_counts()
     replies = iter(["error: adb busy", "error: box out of range", "error: box out of range"])
     ran = []
 
     def run_one(call):
         ran.append(1)
-        return next(replies), []
+        text = next(replies)
+        code = "device_busy" if text == "error: adb busy" else ("invalid_args" if text.startswith("error:") else "")
+        return runner.ToolResult(text, error_code=code)
 
     call = {"name": "tap", "args": {"x": 1}, "id": "a"}
     for n in ("1", "2", "3"):
-        graph._run_calls([dict(call, id=n)], run_one)
+        runner.run_calls([dict(call, id=n)], run_one)
     assert ran == [1, 1, 1]
+
+
+def test_failure_category_survives_wording_changes_and_trips_the_fuse(monkeypatch):
+    runner.reset_fail_counts()
+    replies = iter([
+        {"ok": False, "error": "first explanation", "error_code": "device_busy"},
+        {"ok": False, "error": "a completely different explanation", "error_code": "device_busy"},
+    ])
+    ran = []
+
+    def call_cpp(name, args):
+        ran.append(name)
+        return next(replies)
+
+    monkeypatch.setattr(tools, "call_cpp", call_cpp)
+    call = {"name": "go_home", "args": {}, "id": "a"}
+    for n in range(3):
+        results, _, _ = runner.run_calls(
+            [dict(call, id=str(n))],
+            lambda item: runner.host_result(item["name"], item["args"]))
+        assert results[0].status == "error"
+        assert results[0].artifact["error_code"] == (
+            "retry_exhausted" if n == 2 else "device_busy")
+    assert ran == ["go_home", "go_home"]
+
+
+def test_distinct_failure_categories_with_identical_text_do_not_share_a_streak(monkeypatch):
+    runner.reset_fail_counts()
+    replies = iter([
+        {"ok": False, "error": "same visible explanation", "error_code": "device_busy"},
+        {"ok": False, "error": "same visible explanation", "error_code": "invalid_args"},
+        {"ok": False, "error": "same visible explanation", "error_code": "invalid_args"},
+    ])
+    ran = []
+
+    def call_cpp(name, args):
+        ran.append(name)
+        return next(replies)
+
+    monkeypatch.setattr(tools, "call_cpp", call_cpp)
+    call = {"name": "go_home", "args": {}, "id": "a"}
+    for n in range(3):
+        runner.run_calls([dict(call, id=str(n))],
+                         lambda item: runner.host_result(item["name"], item["args"]))
+    assert ran == ["go_home", "go_home", "go_home"]
+
+
+def test_successful_tool_text_starting_with_error_is_still_success(monkeypatch):
+    runner.reset_fail_counts()
+    ran = []
+
+    def call_cpp(name, args):
+        ran.append(name)
+        return {"ok": True, "text": "error: is a literal in this script"}
+
+    monkeypatch.setattr(tools, "call_cpp", call_cpp)
+    call = {"name": "read_script", "args": {"name": "bundle"}, "id": "a"}
+    for n in range(3):
+        results, _, _ = runner.run_calls(
+            [dict(call, id=str(n))],
+            lambda item: runner.host_result(item["name"], item["args"]))
+        assert results[0].status == "success"
+        assert results[0].content == "error: is a literal in this script"
+    assert len(ran) == 3
 
 
 def test_a_subgraph_does_not_inherit_the_parent_callback(monkeypatch, scripted):

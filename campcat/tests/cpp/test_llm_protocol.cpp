@@ -14,6 +14,24 @@
 #include <filesystem>
 #include <fstream>
 
+TEST(ReviewProtocol, CarriesCommittedCursorAndStructuredFailure) {
+    const auto mem = nlohmann::json::parse(campcat::llm_protocol::build_memorize_request(
+        1, "notes", "qwen", "scripter", "scripter-turn:8:opaque"));
+    EXPECT_EQ(mem["memory_upto"], "scripter-turn:8:opaque");
+    const auto result = nlohmann::json::parse(campcat::llm_protocol::build_tool_result(
+        "call", false, "", "wording may change", "", 0, "device_error"));
+    EXPECT_EQ(result["error_code"], "device_error");
+    campcat::llm_protocol::message call;
+    ASSERT_TRUE(campcat::llm_protocol::parse_line(
+        R"({"type":"tool_call","write_scope":["g.city"],"name":"update_script"})", &call));
+    ASSERT_TRUE(call.write_scope.has_value());
+    EXPECT_EQ(*call.write_scope, std::vector<std::string>{"g.city"});
+    ASSERT_TRUE(campcat::llm_protocol::parse_line(
+        R"({"type":"tool_call","write_scope":"unrestricted"})", &call));
+    ASSERT_TRUE(call.write_scope.has_value());
+    EXPECT_TRUE(call.write_scope->empty());
+}
+
 namespace {
 
 using campcat::llm_protocol::build_interrupt_request;
@@ -341,6 +359,36 @@ TEST(LlmProtocol, OperatorOnlyWithholdsTheHandoff) {
     EXPECT_EQ(j["operator_only"], true);
 }
 
+TEST(LlmProtocol, TurnCarriesTheTranscriptPath) {
+    // The sidecar cannot know config_home, so the path has to ride along with
+    // the turn or there is nothing to append to.
+    const nlohmann::json j = nlohmann::json::parse(build_turn_request(
+        1, "hi", "", "notes", "", "qwen", 20, false, "/x/turns.jsonl"));
+    EXPECT_EQ(j["transcript"], "/x/turns.jsonl");
+}
+
+TEST(LlmProtocol, TurnOmitsTheTranscriptWhenUnset) {
+    // `--once` and the unit tests pass nothing, and an older sidecar ignores
+    // the field. Both mean "do not persist", which was the behaviour before.
+    const nlohmann::json j = turn_with("qwen");
+    EXPECT_FALSE(j.contains("transcript"));
+}
+
+TEST(LlmProtocol, TurnCarriesTheMemoryMark) {
+    // The sidecar cannot read the host's ledger, so the turn a pass reached has
+    // to ride along; without it a restored conversation is folded twice.
+    const nlohmann::json j = nlohmann::json::parse(build_turn_request(
+        1, "hi", "", "notes", "", "qwen", 20, false, "", "turn:12"));
+    EXPECT_EQ(j["memory_upto"], "turn:12");
+}
+
+TEST(LlmProtocol, TurnOmitsTheMemoryMarkWhenUnset) {
+    // Absent means "fold everything you hold", the side that costs one repeated
+    // pass rather than silently dropping turns.
+    const nlohmann::json j = turn_with("qwen");
+    EXPECT_FALSE(j.contains("memory_upto"));
+}
+
 TEST(LlmProtocol, MemorizeNamesTheAgent) {
     const nlohmann::json j = nlohmann::json::parse(
         build_memorize_request(2, "notes", "qwen", "scripter"));
@@ -383,80 +431,6 @@ TEST(LlmProtocol, ConsultResultCarriesTheFailureAndAnEmptyAnswer) {
     EXPECT_FALSE(msg.ok);
     EXPECT_EQ(msg.answer, "");
     EXPECT_EQ(msg.error, "no model");
-}
-
-TEST(LlmMemory, TheTwoFilesStayApart) {
-    const std::filesystem::path dir =
-        std::filesystem::temp_directory_path() / "campcat_memory_apart";
-    std::filesystem::remove_all(dir);
-    std::filesystem::create_directories(dir);
-    std::string missing;
-    ASSERT_TRUE(campcat::llm::read_memory(
-        dir, campcat::llm::memory_kind::scripter_notes, &missing));
-    EXPECT_TRUE(missing.empty());
-    EXPECT_TRUE(campcat::llm::write_memory(
-        dir, campcat::llm::memory_kind::operator_notes, "keep"));
-    EXPECT_TRUE(campcat::llm::write_memory(
-        dir, campcat::llm::memory_kind::scripter_notes, "pit"));
-    EXPECT_FALSE(campcat::llm::write_memory(
-        dir, campcat::llm::memory_kind::scripter_notes, ""));
-    EXPECT_FALSE(campcat::llm::write_memory(
-        dir, campcat::llm::memory_kind::scripter_notes,
-        std::string(4001, 'x')));
-    std::string op;
-    ASSERT_TRUE(campcat::llm::read_memory(
-        dir, campcat::llm::memory_kind::operator_notes, &op));
-    EXPECT_EQ(op, "keep");
-    EXPECT_TRUE(campcat::llm::clear_memory(
-        dir, campcat::llm::memory_kind::scripter_notes));
-    ASSERT_TRUE(campcat::llm::read_memory(
-        dir, campcat::llm::memory_kind::operator_notes, &op));
-    EXPECT_EQ(op, "keep");
-    std::filesystem::remove_all(dir);
-}
-
-TEST(LlmMemory, LegacyMemoryFileIsRenamedOnce) {
-    const std::filesystem::path dir =
-        std::filesystem::temp_directory_path() / "campcat_memory_rename";
-    std::filesystem::remove_all(dir);
-    std::filesystem::create_directories(dir);
-    {
-        std::ofstream out(dir / "memory.md");
-        out << "keep";
-    }
-    std::string op;
-    ASSERT_TRUE(campcat::llm::read_memory(
-        dir, campcat::llm::memory_kind::operator_notes, &op));
-    EXPECT_EQ(op, "keep");
-    EXPECT_TRUE(std::filesystem::exists(dir / "operator.md"));
-    EXPECT_FALSE(std::filesystem::exists(dir / "memory.md"));
-    {
-        std::ofstream out(dir / "memory.md");
-        out << "stale";
-    }
-    ASSERT_TRUE(campcat::llm::read_memory(
-        dir, campcat::llm::memory_kind::operator_notes, &op));
-    EXPECT_EQ(op, "keep");
-    EXPECT_TRUE(std::filesystem::exists(dir / "memory.md"));
-    std::filesystem::remove_all(dir);
-}
-
-TEST(LlmMemory, AnUnreadableFileIsNotReplaced) {
-    const std::filesystem::path dir =
-        std::filesystem::temp_directory_path() / "campcat_memory_unread";
-    std::filesystem::remove_all(dir);
-    std::filesystem::create_directories(dir);
-    EXPECT_TRUE(campcat::llm::write_memory(
-        dir, campcat::llm::memory_kind::operator_notes, "keep"));
-    std::filesystem::create_directory(campcat::llm::memory_path(
-        dir, campcat::llm::memory_kind::scripter_notes));
-    EXPECT_FALSE(campcat::llm::write_memory(
-        dir, campcat::llm::memory_kind::scripter_notes, "new"));
-    std::string op;
-    ASSERT_TRUE(campcat::llm::read_memory(
-        dir, campcat::llm::memory_kind::operator_notes, &op));
-    EXPECT_EQ(op, "keep");
-    std::filesystem::remove_all(dir);
 }
 
 TEST(AppConfig, MissingFuseFieldsKeepTheDefaults) {

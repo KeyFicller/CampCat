@@ -56,9 +56,11 @@ EXPECT_DOC = (
 _PRESSURE = (
     "你看的是别人提议的区域，还没被使用。只做两件事：指出最可能错的那一条边"
     "——左、右、上、下，或者形状本身——然后决定。给了上一轮的坐标，就在那组"
-    "数字上改，不要重新测量图片：同一个裁切量两遍会得到两个答案。只有明显错"
-    "（切掉了控件、框在别的东西上）才继续 adjust；只是几像素的边距，回答 ok，"
-    "边距交给几何修正。你签字放过的裁切，在这次检查消失很久之后还在被用，所以"
+    "数字上改，不要重新测量图片：同一个裁切量两遍会得到两个答案。这边距"
+    "有固定阈值：边与控件之间露出的背景不超过 8 像素时，回答 ok，边距交给"
+    "几何修正；超过 8 像素、切掉了控件，或框在别的东西上，才 adjust。这两条"
+    "不是互相冲突的两套规则，8 像素就是它们的分界。你签字放过的裁切，在这次"
+    "检查消失很久之后还在被用，所以"
     "看见了却放过才是贵的那个。置信度不是投票：低的只是多买一次复查，不扣任何"
     "分。"
 )
@@ -171,9 +173,9 @@ def _where(region: dict) -> str:
         return (f"diamond rx={region['rx']} ry={region['ry']} "
                 f"at {region['cx']},{region['cy']}")
     return f"circle r={region['r']} at {region['cx']},{region['cy']}"
-_accepted: dict[str, dict] = {}
-_reject_count: dict[str, int] = {}
-_reject_reason: dict[str, str] = {}
+_accepted: dict[tuple, dict] = {}
+_reject_count: dict[tuple, int] = {}
+_reject_reason: dict[tuple, str] = {}
 # A tap this operator stretch already accepted, keyed by (frame, box). The
 # scripter of this same handoff reuses it; the next stretch must not.
 _tap_boxes: dict[tuple, dict] = {}
@@ -708,7 +710,10 @@ def _one(kind: str, shape: str, region: dict, shot, expect: str,
         reused = _recall_tap(shot, region)
         if reused is not None:
             return reused, _kept(reused), ""
-    key = (label or "").strip()
+    # A name is not a pixel location: batching may visit several frames that
+    # all contain a "navigation" template in different places.
+    key = (kind, shot if shot is not None else session.latest_shot(),
+           (label or "").strip(), expect)
     if key and key in _accepted:
         # Name the box: an operator that measured (174,1836) and was told "the
         # previous region is reused" had no way to tell whether the cache was
@@ -743,7 +748,7 @@ def _one(kind: str, shape: str, region: dict, shot, expect: str,
         _accepted[key] = dict(final)
     if kind == "tap":
         # shot is omitted on a tap; the check ran against the newest frame.
-        _remember_tap(session._LATEST_NUM, region, final)
+        _remember_tap(session.latest_shot(), region, final)
     body = _moved(shape, region, final)
     if not body and len(out.get("candidates") or []) > 1:
         body = (f"{len(out['candidates'])} 个候选中保留第一个："

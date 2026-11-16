@@ -59,7 +59,42 @@ jobs:
           python-version: '3.14'
 
       - name: Install
-        run: pip install -r requirements.txt
+        run: pip install -r requirements.lock
 
       - name: Python tests
         run: python -m pytest campcat/tests/py -q
+
+  macos:
+    runs-on: macos-15
+    # A cold cache builds clang and its reflective libc++; failure is a failed
+    # check, never a skipped test or an unavailable self-hosted runner.
+    timeout-minutes: 360
+    env:
+      HOMEBREW_NO_AUTO_UPDATE: '1'
+      CPPREF_LLVM_ROOT: ${{ github.workspace }}/.ci/clang-p2996
+      CAMPCAT_TOOLCHAIN_WORK: ${{ runner.temp }}/clang-p2996-build
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build dependencies
+        run: brew install cmake ninja opencv
+
+      - uses: actions/cache@v4
+        with:
+          path: .ci/clang-p2996
+          key: clang-p2996-9ffb96e3ce36-macos15-${{ runner.arch }}-${{ hashFiles('misc/scripts/bootstrap_macos_toolchain.sh') }}
+
+      - name: Pinned reflective compiler and libc++
+        run: sh misc/scripts/bootstrap_macos_toolchain.sh
+
+      - name: Configure
+        run: >
+          cmake -S . -B build -G Ninja
+          -DCPPREF_LLVM_ROOT="$CPPREF_LLVM_ROOT"
+          -DOpenCV_DIR="$(brew --prefix opencv)/lib/cmake/opencv4"
+
+      - name: Build app and core tests
+        run: cmake --build build --parallel 3
+
+      - name: C++ tests
+        run: ctest --test-dir build --output-on-failure --no-tests=error

@@ -2,6 +2,48 @@
 #include <gtest/gtest.h>
 #include <string>
 #include <vector>
+#include <core/file_io.h>
+#include <future>
+#include <chrono>
+
+#ifndef _WIN32
+TEST(LlmHost, InterruptBeforeApprovalPublicationDoesNotWaitForHuman) {
+    using namespace std::chrono_literals;
+    const auto root = std::filesystem::temp_directory_path() / "campcat_late_approval";
+    std::filesystem::remove_all(root);
+    const auto library = root / "ccat_library";
+    campcat::write_file_atomic(library / "old/main.ccat", "log(\"old\")\n");
+    campcat::write_file_atomic(root / "campcat/sources/py/main.py", R"PY(
+import json,sys
+print(json.dumps({'type':'ready','protocol':12}),flush=True)
+for raw in sys.stdin:
+    msg=json.loads(raw)
+    if msg['type']=='turn':
+        rid=msg['id']
+        print(json.dumps({'type':'tool_call','id':rid,'call_id':'late','name':'delete_script','args':{'name':'old'}}),flush=True)
+    elif msg['type'] in ('interrupt','tool_result'):
+        print(json.dumps({'type':'result','id':rid,'ok':True,'interrupted':True,'text':'stopped'}),flush=True)
+)PY");
+    campcat::llm_host host;
+    campcat::llm::tool_context ctx;
+    ctx.script_dir = library;
+    ctx.needs_approval = [&](std::string_view) { host.request_interrupt(); return true; };
+    host.set_tool_context(ctx);
+    auto result = std::async(std::launch::async, [&] {
+        return host.run_turn(library, "", "", "delete", 10, 10, false, root);
+    });
+    const bool finished = result.wait_for(2s) == std::future_status::ready;
+    // Release a broken implementation so the test reports failure instead of hanging.
+    host.release_approval();
+    if (result.wait_for(2s) != std::future_status::ready) host.stop();
+    EXPECT_TRUE(finished);
+    EXPECT_TRUE(result.get().ok);
+    EXPECT_TRUE(std::filesystem::exists(library / "old/main.ccat"));
+    host.stop();
+    campcat::llm::set_context({});
+    std::filesystem::remove_all(root);
+}
+#endif
 
 namespace {
 

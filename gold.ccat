@@ -61,7 +61,7 @@ if (has(claim)) {
   log("reward collected")
 } elif (has(taken)) {
   log("already claimed today")
-  return false                       // done, not failed -- the caller can tell the two apart
+  return true                        // target already achieved; graph actions treat false as failure
 } else {
   log("neither the claim button nor its claimed state is on screen")
   return false                       // not the screen we expected; do not guess

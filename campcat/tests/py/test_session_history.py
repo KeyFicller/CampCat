@@ -4,6 +4,8 @@
 first.
 """
 
+import json
+
 import agent.memorier as memorier
 import agent.scripter as scripter
 import graph
@@ -89,11 +91,12 @@ def test_memorize_ignores_scripter_history(monkeypatch):
     class _Model:
         def invoke(self, messages, config=None):
             seen["text"] = messages[-1].content
-            return AIMessage(content="## Preferences\nkept")
+            return AIMessage(
+                content='{"ops":[{"op":"add","section":"偏好","text":"kept"}]}')
 
     monkeypatch.setattr(models, "build_memory_model", lambda: _Model())
-    notes = memorier.memorize("", "operator")
-    assert notes == "## Preferences\nkept"
+    notes = json.loads(memorier.memorize("", "operator"))
+    assert notes["ops"] == [{"op": "add", "section": "偏好", "text": "kept"}]
     assert "operator said hello" in seen["text"]
     assert "scripter secret handoff" not in seen["text"]
 
@@ -170,3 +173,15 @@ def test_append_scripter_turn_drops_image_bytes():
     assert not any(isinstance(part, dict) and part.get("type") == "image_url"
                    for part in kept.content)
     assert "Screenshot #3" in session.content_text(kept.content)
+
+
+def test_committed_turn_keeps_the_mark_used_by_the_live_request():
+    session.reset()
+    built = graph.build_messages({"text": "operator turn"})
+    graph.commit({"text": "operator turn", **built})
+    assert session.history()[0].id == built["turn_mark"]
+
+    built = scripter._scripter_build({"text": "scripter brief"})
+    scripter._scripter_commit({"text": "scripter brief", **built})
+    assert session.scripter_history()[0].id == built["turn_mark"]
+    assert built["turn_mark"].startswith("scripter-turn:")

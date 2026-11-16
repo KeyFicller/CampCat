@@ -3,6 +3,7 @@
 #include "core/adb_client.h"
 #include "core/app_config.h"
 #include "core/automation_log.h"
+#include "core/file_io.h"
 #include "core/template_matcher.h"
 
 #include "core/script/ccat_bundle.h"
@@ -104,12 +105,26 @@ bool CcatInterpreter::capture_screen(
     }
     if (m_frame != nullptr) {
         *_out = m_frame->clone();
+        if (m_step) {
+            if (m_step->before.empty())
+                m_step->before = _out->clone();
+            else
+                m_step->after = _out->clone();
+        }
         return true;
     }
-    if (!m_adb->screencap_bgr(_out)) {
+    if (!m_adb->screencap_bgr(_out) || _out->empty()) {
         return false;
     }
-    return !_should_stop();
+    if (_should_stop())
+        return false;
+    if (m_step) {
+        if (m_step->before.empty())
+            m_step->before = _out->clone();
+        else
+            m_step->after = _out->clone();
+    }
+    return true;
 }
 
 bool CcatInterpreter::image_matches(const std::string &_rel_path,
@@ -133,6 +148,7 @@ bool CcatInterpreter::image_matches(const std::string &_rel_path,
         *_found = false;
         return true;
     }
+    audit_match(abs_path, *opt);
     if (_dump_debug) {
         dump_match_debug("if", abs_path, screen, *opt);
     }
@@ -151,6 +167,21 @@ ask_result CcatInterpreter::ask(std::string_view _question) const {
         return ask_result{std::nullopt, "ask: nobody can answer here"};
     }
     return m_ask(_question);
+}
+
+void CcatInterpreter::audit_match(const std::filesystem::path &_path,
+                                  const match_result &_r) {
+    if (!m_step)
+        return;
+    replay_match match{_path.string(), _r.confidence, _r.threshold, _r.found,
+                       !m_step->after.empty(), file_fingerprint(_path)};
+    const auto it =
+        std::find_if(m_step->matches.begin(), m_step->matches.end(),
+                     [&](const auto &m) { return m.path == match.path; });
+    if (it == m_step->matches.end())
+        m_step->matches.push_back(std::move(match));
+    else
+        *it = std::move(match);
 }
 
 void CcatInterpreter::dump_match_debug(const char *_op,
@@ -200,7 +231,7 @@ CcatInterpreter::tap_image(const std::string &_rel_path,
     if (!std::filesystem::is_regular_file(abs_path, ec)) {
         std::ostringstream oss;
         oss << "tap: template file missing " << abs_path.string();
-        return oss.str();
+        return action_failure{oss.str(), false, "template_missing"};
     }
     cv::Mat screen;
     if (!capture_screen(&screen, _should_stop)) {
@@ -214,16 +245,19 @@ CcatInterpreter::tap_image(const std::string &_rel_path,
     if (!opt.has_value()) {
         std::ostringstream oss;
         oss << "tap: unreadable template " << abs_path.string();
-        return oss.str();
+        return action_failure{oss.str(), false, "template_error"};
     }
+    audit_match(abs_path, *opt);
     dump_match_debug("tap", abs_path, screen, *opt);
     if (!opt->found) {
         std::ostringstream oss;
         oss << "tap: image not found " << abs_path.string()
             << match_verdict_text(*opt);
-        return oss.str();
+        return action_failure{oss.str(), false, "not_found"};
     }
 
+    if (m_step)
+        m_step->input_pixels = {opt->center.x, opt->center.y};
     if (!m_adb->tap(opt->center.x, opt->center.y)) {
         return action_failure{"tap: adb tap failed", true};
     }
@@ -243,12 +277,12 @@ std::optional<action_failure> CcatInterpreter::swipe_templates_impl(
     if (!std::filesystem::is_regular_file(abs_from, ec)) {
         std::ostringstream oss;
         oss << "swipe: from template missing " << abs_from.string();
-        return oss.str();
+        return action_failure{oss.str(), false, "template_missing"};
     }
     if (!std::filesystem::is_regular_file(abs_to, ec)) {
         std::ostringstream oss;
         oss << "swipe: to template missing " << abs_to.string();
-        return oss.str();
+        return action_failure{oss.str(), false, "template_missing"};
     }
     cv::Mat screen;
     if (!capture_screen(&screen, _should_stop)) {
@@ -262,8 +296,11 @@ std::optional<action_failure> CcatInterpreter::swipe_templates_impl(
     const auto m_to = m_matcher.match_file(screen, abs_to.string(),
                                            m_cfg->match.box_threshold);
     if (!m_from.has_value() || !m_to.has_value()) {
-        return std::string("swipe: template unreadable");
+        return action_failure{"swipe: template unreadable", false,
+                              "template_error"};
     }
+    audit_match(abs_from, *m_from);
+    audit_match(abs_to, *m_to);
     if (!m_from->found || !m_to->found) {
         // Which one failed, and how close each came: the old sentence named
         // neither, and a swipe has two templates to tell apart.
@@ -275,8 +312,11 @@ std::optional<action_failure> CcatInterpreter::swipe_templates_impl(
         if (!m_to->found) {
             oss << ' ' << _to_rel << match_verdict_text(*m_to);
         }
-        return oss.str();
+        return action_failure{oss.str(), false, "not_found"};
     }
+    if (m_step)
+        m_step->input_pixels = {m_from->center.x, m_from->center.y,
+                                m_to->center.x, m_to->center.y};
     if (!m_adb->swipe(m_from->center.x, m_from->center.y, m_to->center.x,
                       m_to->center.y, m_cfg->input.swipe_duration_ms)) {
         return action_failure{"swipe: adb swipe failed", true};
@@ -292,7 +332,8 @@ std::optional<action_failure>
 CcatInterpreter::tap_at_impl(double _nx, double _ny,
                              const std::function<bool()> &_should_stop) {
     if (!coord_normalized_ok(_nx) || !coord_normalized_ok(_ny)) {
-        return std::string("tap_at: coordinates must be normalized [0,1]");
+        return action_failure{"tap_at: coordinates must be normalized [0,1]",
+                              false, "out_of_bounds"};
     }
     cv::Mat screen;
     if (!capture_screen(&screen, _should_stop)) {
@@ -303,6 +344,8 @@ CcatInterpreter::tap_at_impl(double _nx, double _ny,
     }
     const int px = norm_axis_to_pixel(_nx, screen.cols);
     const int py = norm_axis_to_pixel(_ny, screen.rows);
+    if (m_step)
+        m_step->input_pixels = {px, py};
     if (!m_adb->tap(px, py)) {
         return action_failure{"tap_at: adb tap failed", true};
     }
@@ -322,7 +365,7 @@ CcatInterpreter::tap_offset_impl(const std::string &_rel_path, double _dx,
     if (!std::filesystem::is_regular_file(abs_path, ec)) {
         std::ostringstream oss;
         oss << "tap_offset: template file missing " << abs_path.string();
-        return oss.str();
+        return action_failure{oss.str(), false, "template_missing"};
     }
     cv::Mat screen;
     if (!capture_screen(&screen, _should_stop)) {
@@ -336,14 +379,15 @@ CcatInterpreter::tap_offset_impl(const std::string &_rel_path, double _dx,
     if (!opt.has_value()) {
         std::ostringstream oss;
         oss << "tap_offset: unreadable template " << abs_path.string();
-        return oss.str();
+        return action_failure{oss.str(), false, "template_error"};
     }
+    audit_match(abs_path, *opt);
     dump_match_debug("tap_offset", abs_path, screen, *opt);
     if (!opt->found) {
         std::ostringstream oss;
         oss << "tap_offset: image not found " << abs_path.string()
             << match_verdict_text(*opt);
-        return oss.str();
+        return action_failure{oss.str(), false, "not_found"};
     }
 
     const int px =
@@ -356,8 +400,10 @@ CcatInterpreter::tap_offset_impl(const std::string &_rel_path, double _dx,
         std::ostringstream oss;
         oss << "tap_offset: point (" << px << "," << py << ") out of screen "
             << screen.cols << "x" << screen.rows;
-        return oss.str();
+        return action_failure{oss.str(), false, "out_of_bounds"};
     }
+    if (m_step)
+        m_step->input_pixels = {px, py};
     if (!m_adb->tap(px, py)) {
         return action_failure{"tap_offset: adb tap failed", true};
     }
@@ -373,7 +419,8 @@ CcatInterpreter::swipe_at_impl(double _x1, double _y1, double _x2, double _y2,
                                const std::function<bool()> &_should_stop) {
     if (!coord_normalized_ok(_x1) || !coord_normalized_ok(_y1) ||
         !coord_normalized_ok(_x2) || !coord_normalized_ok(_y2)) {
-        return std::string("swipe_at: coordinates must be normalized [0,1]");
+        return action_failure{"swipe_at: coordinates must be normalized [0,1]",
+                              false, "out_of_bounds"};
     }
     cv::Mat screen;
     if (!capture_screen(&screen, _should_stop)) {
@@ -386,6 +433,8 @@ CcatInterpreter::swipe_at_impl(double _x1, double _y1, double _x2, double _y2,
     const int ay = norm_axis_to_pixel(_y1, screen.rows);
     const int bx = norm_axis_to_pixel(_x2, screen.cols);
     const int by = norm_axis_to_pixel(_y2, screen.rows);
+    if (m_step)
+        m_step->input_pixels = {ax, ay, bx, by};
     if (!m_adb->swipe(ax, ay, bx, by, m_cfg->input.swipe_duration_ms)) {
         return action_failure{"swipe_at: adb swipe failed", true};
     }
@@ -403,8 +452,9 @@ CcatInterpreter::home_impl(const std::function<bool()> &_should_stop) {
     }
     const int gap_ms = std::max(0, m_cfg->input.tap_delay_ms);
     if (!m_adb->home_and_kill_all(gap_ms)) {
-        return std::string(
-            "home: KEYCODE_HOME / dumpsys recents / am force-stop failed");
+        return action_failure{
+            "home: KEYCODE_HOME / dumpsys recents / am force-stop failed",
+            true};
     }
     if (_should_stop()) {
         return std::string("stopped");
@@ -415,6 +465,21 @@ CcatInterpreter::home_impl(const std::function<bool()> &_should_stop) {
 stmt_exec_outcome
 CcatInterpreter::exec_program_stmts(const Program &_program,
                                     const std::function<bool()> &_should_stop) {
+    struct source_guard {
+        unsigned long long &id;
+        unsigned long long saved;
+        ~source_guard() { id = saved; }
+    } restore{m_source_id, m_source_id};
+    if (m_audit) {
+        try {
+            m_source_id = m_audit->source(
+                m_script_path.empty() ? "<inline>" : m_script_path.string(),
+                _program.source);
+        } catch (const std::exception &ex) {
+            return stmt_exec_outcome::make_error(ex.what(), false, true,
+                                                 "storage_error");
+        }
+    }
     for (const auto &st : _program.stmts) {
         stmt_exec_outcome o = exec_stmt(st.get(), _should_stop);
         if (o.kind == stmt_exec_outcome::tag::returned) {
@@ -450,7 +515,8 @@ CcatInterpreter::run_script_impl(const std::string &_rel,
     }
 
     if (!std::filesystem::is_regular_file(abs)) {
-        return std::string("run: cannot read ") + abs.string();
+        return action_failure{"run: cannot read " + abs.string(), false,
+                              "script_missing"};
     }
     const std::string source = read_text_file(abs);
 
@@ -461,7 +527,7 @@ CcatInterpreter::run_script_impl(const std::string &_rel,
         std::ostringstream oss;
         oss << "run: parse error in " << abs.string() << ": " << ex.what()
             << " (line " << ex.line << ", col " << ex.col << ")";
-        return oss.str();
+        return action_failure{oss.str(), false, "parse_error"};
     }
 
     struct frame_guard {
@@ -493,7 +559,9 @@ CcatInterpreter::run_script_impl(const std::string &_rel,
     if (o.kind == stmt_exec_outcome::tag::stopped) {
         return std::string("stopped");
     }
-    return o.message.empty() ? std::string("run: error") : std::move(o.message);
+    return action_failure{o.message.empty() ? std::string("run: error")
+                                            : std::move(o.message),
+                          o.device, std::move(o.error_code), o.fatal};
 }
 
 std::optional<action_failure>
@@ -504,7 +572,7 @@ CcatInterpreter::wait_until_impl(const std::string &_rel_path, int _timeout_ms,
     if (!std::filesystem::is_regular_file(abs_path, ec)) {
         std::ostringstream oss;
         oss << "wait_until: template missing " << abs_path.string();
-        return oss.str();
+        return action_failure{oss.str(), false, "template_missing"};
     }
     const auto deadline = std::chrono::steady_clock::now() +
                           std::chrono::milliseconds(std::max(_timeout_ms, 1));
@@ -531,7 +599,7 @@ CcatInterpreter::wait_until_impl(const std::string &_rel_path, int _timeout_ms,
             std::ostringstream oss;
             oss << "wait_until: timeout after " << _timeout_ms << " ms for "
                 << _rel_path << match_verdict_text(mr);
-            return oss.str();
+            return action_failure{oss.str(), false, "deadline"};
         }
         if (auto sl = cooperative_sleep_ms(50, _should_stop)) {
             return sl;
@@ -548,7 +616,104 @@ CcatInterpreter::exec_stmt(const Stmt *_stmt,
     if (_should_stop()) {
         return stmt_exec_outcome::make_stopped();
     }
-    return _stmt->exec(*this, _should_stop);
+    if (!m_audit || dynamic_cast<const BlockStmt *>(_stmt) ||
+        dynamic_cast<const IfStmt *>(_stmt) ||
+        dynamic_cast<const LoopStmt *>(_stmt) ||
+        dynamic_cast<const DoWhileStmt *>(_stmt))
+        return _stmt->exec(*this, _should_stop);
+
+    replay_step step;
+    step.id = ++m_step_id;
+    step.source_id = m_source_id;
+    step.script = m_script_path.empty() ? "<inline>" : m_script_path.string();
+    step.line = _stmt->line;
+    step.column = _stmt->column;
+    step.action = _stmt->operation;
+    if (const auto *s = dynamic_cast<const TapStmt *>(_stmt))
+        step.operands = {s->image_path};
+    if (const auto *s = dynamic_cast<const HasStmt *>(_stmt))
+        step.operands = {s->image_path};
+    if (const auto *s = dynamic_cast<const RunStmt *>(_stmt))
+        step.operands = {s->script_rel};
+    if (const auto *s = dynamic_cast<const GotoStmt *>(_stmt))
+        step.operands = {s->target};
+    if (const auto *s = dynamic_cast<const AtStmt *>(_stmt))
+        step.operands = {s->target};
+    if (const auto *s = dynamic_cast<const LogStmt *>(_stmt))
+        step.operands = {s->message};
+    if (const auto *s = dynamic_cast<const AskStmt *>(_stmt))
+        step.operands = {s->message};
+    if (const auto *s = dynamic_cast<const TapAtStmt *>(_stmt))
+        step.coordinates = {s->nx, s->ny};
+    if (const auto *s = dynamic_cast<const TapOffsetStmt *>(_stmt)) {
+        step.operands = {s->image_path};
+        step.coordinates = {s->dx, s->dy};
+    }
+    if (const auto *s = dynamic_cast<const SwipeTemplatesStmt *>(_stmt))
+        step.operands = {s->from_image_path, s->to_image_path};
+    if (const auto *s = dynamic_cast<const SwipeAtStmt *>(_stmt))
+        step.coordinates = {s->x1, s->y1, s->x2, s->y2};
+    if (const auto *s = dynamic_cast<const WaitStmt *>(_stmt))
+        step.duration_ms = s->milliseconds;
+    if (const auto *s = dynamic_cast<const WaitUntilStmt *>(_stmt)) {
+        step.operands = {s->image_path};
+        step.duration_ms = s->timeout_ms;
+    }
+    step.compare = dynamic_cast<const TapStmt *>(_stmt) ||
+                   dynamic_cast<const TapAtStmt *>(_stmt) ||
+                   dynamic_cast<const TapOffsetStmt *>(_stmt) ||
+                   dynamic_cast<const SwipeTemplatesStmt *>(_stmt) ||
+                   dynamic_cast<const SwipeAtStmt *>(_stmt);
+    try {
+        m_audit->start(step);
+    } catch (const std::exception &ex) {
+        return stmt_exec_outcome::make_error(ex.what(), false, true,
+                                             "storage_error");
+    }
+    const auto started = std::chrono::steady_clock::now();
+    struct restore_step {
+        replay_step *&slot;
+        replay_step *previous;
+        ~restore_step() { slot = previous; }
+    } restore{m_step, m_step};
+    m_step = &step;
+    stmt_exec_outcome outcome = _stmt->exec(*this, _should_stop);
+    if (outcome.is_ok() && step.compare) {
+        if (_should_stop())
+            outcome = stmt_exec_outcome::make_stopped();
+        else {
+            cv::Mat after;
+            if (!capture_screen(&after, _should_stop))
+                outcome = _should_stop()
+                              ? stmt_exec_outcome::make_stopped()
+                              : stmt_exec_outcome::make_error(
+                                    "post-action screencap failed", true);
+        }
+    }
+    step.ok = outcome.is_ok() ||
+              outcome.kind == stmt_exec_outcome::tag::returned ||
+              outcome.kind == stmt_exec_outcome::tag::break_loop;
+    step.value = outcome.value;
+    if (outcome.kind == stmt_exec_outcome::tag::stopped)
+        outcome.error_code = "cancelled";
+    else if (!step.ok && outcome.error_code.empty())
+        outcome.error_code = outcome.device  ? "device_error"
+                             : outcome.fatal ? "script_fatal"
+                                             : "script_failed";
+    step.error_code = outcome.error_code;
+    step.message = outcome.message;
+    step.elapsed_ms = std::chrono::duration<double, std::milli>(
+                          std::chrono::steady_clock::now() - started)
+                          .count();
+    try {
+        m_audit->record(step);
+    } catch (const std::exception &ex) {
+        automation_log::emit("[ccat] replay audit failed: " +
+                             std::string(ex.what()));
+        return stmt_exec_outcome::make_error(ex.what(), false, true,
+                                             "storage_error");
+    }
+    return outcome;
 }
 
 stmt_exec_outcome
@@ -621,7 +786,8 @@ RunStmt::exec(CcatInterpreter &_interp,
                 return stmt_exec_outcome::make_stopped();
             }
             if (!got.ok) {
-                return stmt_exec_outcome::make_error(got.message, got.device);
+                return stmt_exec_outcome::make_error(got.message, got.device,
+                                                     got.fatal, got.error_code);
             }
             return stmt_exec_outcome::make_ok();
         }
@@ -643,7 +809,8 @@ RunStmt::exec(CcatInterpreter &_interp,
                 return stmt_exec_outcome::make_stopped();
             }
             if (!got.ok) {
-                return stmt_exec_outcome::make_error(got.message, got.device);
+                return stmt_exec_outcome::make_error(got.message, got.device,
+                                                     got.fatal, got.error_code);
             }
             return stmt_exec_outcome::make_ok();
         }
@@ -853,6 +1020,34 @@ automation_cycle_result
 CcatInterpreter::run(const Program &_program,
                      const std::function<bool()> &_should_stop) {
     automation_cycle_result r{};
+    m_step_id = 0;
+    m_audit.reset();
+    if (m_cfg->replay.enabled && !m_cfg->library_root().empty()) {
+        try {
+            m_audit = std::make_unique<replay_audit>(
+                m_cfg->project_root() / "logs/replay", m_cfg->replay.keep_runs,
+                static_cast<unsigned long long>(m_cfg->replay.max_run_mb) *
+                    1024 * 1024);
+            r.audit_path = m_audit->path().string();
+            automation_log::emit("[ccat] replay audit " + r.audit_path);
+        } catch (const std::exception &ex) {
+            r.error_code = "storage_error";
+            r.message = ex.what();
+            return r;
+        }
+    }
+    const auto complete = [&] {
+        if (m_audit) {
+            try {
+                m_audit->finish(r.ok, r.error_code, r.message);
+            } catch (const std::exception &ex) {
+                r.ok = false;
+                r.error_code = "storage_error";
+                r.message = ex.what();
+            }
+        }
+        return r;
+    };
     const bool pushed_entry = !m_script_path.empty();
     std::error_code ec;
     const std::filesystem::path entry =
@@ -871,19 +1066,31 @@ CcatInterpreter::run(const Program &_program,
         }
     } guard{m_run_stack, pushed_entry};
 
-    stmt_exec_outcome o = exec_program_stmts(_program, _should_stop);
+    stmt_exec_outcome o;
+    try {
+        o = exec_program_stmts(_program, _should_stop);
+    } catch (const std::exception &ex) {
+        o = stmt_exec_outcome::make_error(ex.what(), false, true,
+                                          "script_fatal");
+    }
 
     if (o.kind == stmt_exec_outcome::tag::returned || o.is_ok()) {
         // The answer lands on `ok`, so `automation_cycle_result` keeps its two
         // fields and every existing consumer -- `run_script`, the scheduled
         // task, `[console] ok=...` -- reports a false answer without a new one.
         r.ok = o.value;
+        if (!o.value) r.error_code = "script_false";
         r.message = o.value ? "ok" : std::string("the script returned false");
-        return r;
+        return complete();
     }
     r.ok = false;
+    r.error_code = o.kind == stmt_exec_outcome::tag::stopped ? "cancelled"
+                   : !o.error_code.empty()                   ? o.error_code
+                   : o.device                                ? "device_error"
+                   : o.fatal                                 ? "script_fatal"
+                                                             : "script_failed";
     r.message = o.message.empty() ? std::string("error") : std::move(o.message);
-    return r;
+    return complete();
 }
 
 bundle_run
@@ -915,6 +1122,9 @@ CcatInterpreter::run_graph_bundle(const std::string &_bundle,
         } else {
             ran.failed = true;
             ran.message = err->message;
+            ran.device = err->device;
+            ran.fatal = err->fatal;
+            ran.error_code = err->error_code;
         }
         return ran;
     }
@@ -948,7 +1158,7 @@ CcatInterpreter::check_anchor(const std::string &_bundle, const cv::Mat &_frame,
     const std::optional<action_failure> err =
         run_script_impl(main.string(), _should_stop, &value);
     if (err) {
-        return {false, err->message};
+        return {false, err->message, err->device, err->fatal, err->error_code};
     }
     return {value, {}};
 }
@@ -1017,7 +1227,8 @@ GotoStmt::exec(CcatInterpreter &_interp,
         return stmt_exec_outcome::make_stopped();
     }
     if (!got.ok) {
-        return stmt_exec_outcome::make_error(got.message, got.device);
+        return stmt_exec_outcome::make_error(got.message, got.device, got.fatal,
+                                             got.error_code);
     }
     return stmt_exec_outcome::make_ok();
 }
@@ -1051,7 +1262,9 @@ AtStmt::exec(CcatInterpreter &_interp,
         locate(loaded.graph,
                _interp.graph_io(graph_name, _should_stop).check, frame);
     if (hit.kind == locate_kind::error || hit.kind == locate_kind::ambiguous) {
-        return stmt_exec_outcome::make_error("at " + target + " " + hit.detail);
+        return stmt_exec_outcome::make_error("at " + target + " " + hit.detail,
+                                             hit.device, hit.fatal,
+                                             hit.error_code);
     }
     const bool here = hit.id == anchor && (hit.kind == locate_kind::page ||
                                            hit.kind == locate_kind::transient ||

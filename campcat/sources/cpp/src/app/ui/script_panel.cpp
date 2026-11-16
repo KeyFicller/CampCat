@@ -161,7 +161,8 @@ void script_panel_draw(campcat::shell_state &_st,
             ImGui::SameLine();
             // The one button live while the other two grey out. An idle Stop
             // only writes a "[ui] stop cycle" that stopped nothing.
-            if (!_lock_manual_single) {
+            const bool can_stop_cycle = _st.cycle_running.load() || _st.sched.running();
+            if (!can_stop_cycle) {
                 ImGui::BeginDisabled();
             }
             if (ImGui::Button("Stop")) {
@@ -169,7 +170,7 @@ void script_panel_draw(campcat::shell_state &_st,
                 _st.sched.stop();
                 _st.append_log("[ui] stop cycle");
             }
-            if (!_lock_manual_single) {
+            if (!can_stop_cycle) {
                 ImGui::EndDisabled();
             }
 
@@ -265,6 +266,7 @@ void script_panel_draw(campcat::shell_state &_st,
             ImGuiTreeNodeFlags_DefaultOpen);
     });
     if (cap_open) {
-        template_capture_panel_draw(_cfg_view, &_ccat_ui, _lock_manual_single);
+        template_capture_panel_draw(_cfg_view, &_ccat_ui, _lock_manual_single,
+                                    _st.device_tasks.busy() || _st.sched.running());
     }
 }

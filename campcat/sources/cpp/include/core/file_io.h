@@ -1,13 +1,39 @@
 #pragma once
 
 #include <filesystem>
+#include <cstdint>
 #include <fstream>
+#include <mutex>
 #include <stdexcept>
 #include <string>
 #include <string_view>
 #include <system_error>
 
 namespace campcat {
+
+/// Stable content identity for replay regression, not a cryptographic checksum.
+inline std::string file_fingerprint(const std::filesystem::path &_path) {
+    std::ifstream in(_path, std::ios::binary);
+    if (!in) throw std::runtime_error("cannot fingerprint " + _path.string());
+    std::uint64_t hash = 14695981039346656037ull;
+    char bytes[8192];
+    while (in.read(bytes, sizeof(bytes)) || in.gcount()) {
+        for (std::streamsize i = 0; i < in.gcount(); ++i) {
+            hash ^= static_cast<unsigned char>(bytes[i]);
+            hash *= 1099511628211ull;
+        }
+    }
+    if (!in.eof()) throw std::runtime_error("cannot fingerprint " + _path.string());
+    return "fnv1a64:" + std::to_string(hash);
+}
+
+/// Serializes short library file transactions, including graph-scoped notes.
+/// Device execution never holds this lock.
+inline std::recursive_mutex &library_io_mutex() {
+    static std::recursive_mutex mutex;
+    return mutex;
+}
+
 
 /// Writes `_text` to a temp sibling and renames it over `_path`, so a crash or
 /// a full disk leaves the old file rather than a half-written one. The temp

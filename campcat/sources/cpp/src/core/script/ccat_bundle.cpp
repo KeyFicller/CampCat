@@ -1,4 +1,6 @@
 #include "core/script/ccat_bundle.h"
+#include "core/script/bundle_store.h"
+#include "core/file_io.h"
 
 #include "core/script/ccat_graph.h"
 #include "core/script/ccat_lexer.h" // Lexer: a run() target is edited as source text
@@ -33,6 +35,7 @@ std::filesystem::path bundle_main(const std::filesystem::path &_script_dir,
 
 std::vector<std::string>
 bundle_names(const std::filesystem::path &_script_dir) {
+    recover_bundles(_script_dir);
     std::vector<std::string> names;
     std::error_code ec;
     for (const auto &entry :
@@ -685,12 +688,10 @@ save_status save_bundle_main(const std::filesystem::path &_script_dir,
         }
     }
 
-    std::ofstream out(path, std::ios::binary | std::ios::trunc);
-    out.write(_text.data(), static_cast<std::streamsize>(_text.size()));
-    out.close();
-    if (!out) {
-        return fail(save_status::write_failed,
-                    "could not write " + path.string());
+    try {
+        write_file_atomic(path, _text);
+    } catch (const std::exception &e) {
+        return fail(save_status::write_failed, e.what());
     }
     return save_status::ok;
 }

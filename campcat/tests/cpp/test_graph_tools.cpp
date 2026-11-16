@@ -18,6 +18,40 @@
 #include <string>
 #include <vector>
 
+TEST(WriteScope, RefusesUnrelatedExistingBundleBeforeMutation) {
+    const auto root = std::filesystem::temp_directory_path() / "campcat_write_scope";
+    std::filesystem::remove_all(root);
+    std::filesystem::create_directories(root / "other.entry");
+    { std::ofstream f(root / "other.entry/main.ccat"); f << "log(\"old\")\n"; }
+    campcat::llm::tool_context ctx;
+    ctx.script_dir = root;
+    campcat::llm::set_context(ctx);
+    const auto result = campcat::llm::dispatch("delete_script", R"({"name":"other.entry"})",
+                                              std::vector<std::string>{"g.city"});
+    EXPECT_FALSE(result.ok);
+    EXPECT_EQ(result.error_code, "write_scope_denied");
+    EXPECT_TRUE(std::filesystem::exists(root / "other.entry/main.ccat"));
+    campcat::llm::set_context({});
+    std::filesystem::remove_all(root);
+}
+
+TEST(WriteScope, RenameCannotRewriteUnrelatedReferrers) {
+    const auto root = std::filesystem::temp_directory_path() / "campcat_rename_scope";
+    std::filesystem::remove_all(root);
+    for (auto name : {"old", "ref"}) std::filesystem::create_directories(root / name);
+    { std::ofstream f(root / "old/main.ccat"); f << "log(\"old\")\n"; }
+    { std::ofstream f(root / "ref/main.ccat"); f << "run(\"../old/main.ccat\")\n"; }
+    campcat::llm::tool_context ctx; ctx.script_dir = root;
+    campcat::llm::set_context(ctx);
+    const auto result = campcat::llm::dispatch("rename_script",
+        R"({"name":"old","new_name":"renamed"})", std::vector<std::string>{"old"});
+    EXPECT_FALSE(result.ok);
+    EXPECT_EQ(result.error_code, "write_scope_denied");
+    EXPECT_TRUE(std::filesystem::exists(root / "old/main.ccat"));
+    EXPECT_FALSE(std::filesystem::exists(root / "renamed/main.ccat"));
+    campcat::llm::set_context({}); std::filesystem::remove_all(root);
+}
+
 namespace {
 
 constexpr int kScreenW = 100;
@@ -196,6 +230,26 @@ TEST_F(GraphTools, SaveAnchorRefusesDuplicate) {
     EXPECT_FALSE(std::filesystem::exists(m_dir / "g.c"));
 }
 
+TEST_F(GraphTools, SavePopupOverARecognizedBackground) {
+    // The popup mark and the page mark coexist, just as runtime locate allows.
+    cv::Mat frame = only(tex(7), kSquare);
+    tex(9).copyTo(frame(kCorner));
+    show(frame);
+    write_file(m_dir / "g.close_popup/main.ccat", "tap_at(0.5, 0.5)\n");
+    const auto reply = call("save_anchor", anchor_args(
+        "popup", kCorner, "---\\nkind: popup\\nclose: g.close_popup\\n---\\npopup"));
+    ASSERT_TRUE(reply.ok) << reply.error;
+    EXPECT_TRUE(exists("g.popup/golden.md"));
+    const auto located = call("locate", R"({"graph":"g"})");
+    ASSERT_TRUE(located.ok) << located.error;
+    EXPECT_NE(located.text.find("popup"), std::string::npos) << located.text;
+
+    const auto duplicate = call("save_anchor", anchor_args(
+        "other_popup", kCorner, "---\\nkind: popup\\nclose: g.close_popup\\n---\\nduplicate"));
+    EXPECT_FALSE(duplicate.ok);
+    EXPECT_FALSE(exists("g.other_popup/golden.md"));
+}
+
 TEST_F(GraphTools, SaveAnchorRefusesBadInput) {
     show(only(tex(9), kCorner));
     const auto golden =
@@ -359,6 +413,59 @@ TEST_F(GraphTools, AFlatTemplateIsRefused) {
                                 "region": {"x": 38, "y": 28, "w": 24, "h": 24}})");
     EXPECT_TRUE(drawn.ok) << drawn.error;
     EXPECT_TRUE(exists("g.task/mark.png"));
+}
+
+TEST_F(GraphTools, ReuseTemplateChecksCurrentFrameAndCopiesIndependentPng) {
+    // The alpha mask must survive as well as the original pixels.
+    cv::Mat bgr = tex(7), rgba;
+    cv::cvtColor(bgr, rgba, cv::COLOR_BGR2BGRA);
+    rgba.at<cv::Vec4b>(0, 0)[3] = 0;
+    save_png(m_dir / "g.a/nav.png", rgba);
+    const auto reply = call("reuse_template", R"({"bundle":"g.task", "name":"nav",
+        "from_bundle":"g.a", "from_name":"nav"})");
+    ASSERT_TRUE(reply.ok) << reply.error;
+    EXPECT_EQ(read_file(m_dir / "g.task/nav.png"), read_file(m_dir / "g.a/nav.png"));
+    std::filesystem::remove(m_dir / "g.a/nav.png");
+    EXPECT_TRUE(exists("g.task/nav.png"));
+}
+
+TEST_F(GraphTools, ReuseTemplateRejectsMismatchAndLeavesDestinationAlone) {
+    const std::string before = "keep destination";
+    write_file(m_dir / "g.task/nav.png", before);
+    show(only(tex(9), kCorner));
+    const auto reply = call("reuse_template", R"({"bundle":"g.task", "name":"nav",
+        "from_bundle":"g.a", "from_name":"a"})");
+    EXPECT_FALSE(reply.ok);
+    EXPECT_EQ(read_file(m_dir / "g.task/nav.png"), before);
+}
+
+TEST_F(GraphTools, ReuseTemplateHonorsWriteScopeAndPathValidation) {
+    const auto scoped = campcat::llm::dispatch("reuse_template",
+        R"({"bundle":"g.task", "name":"nav", "from_bundle":"g.a", "from_name":"a"})",
+        std::vector<std::string>{"g.a"});
+    EXPECT_FALSE(scoped.ok);
+    EXPECT_EQ(scoped.error_code, "write_scope_denied");
+    EXPECT_FALSE(exists("g.task/nav.png"));
+    for (const auto &args : {
+        R"({"bundle":"../escape", "name":"nav", "from_bundle":"g.a", "from_name":"a"})",
+        R"({"bundle":"g.task", "name":"../escape", "from_bundle":"g.a", "from_name":"a"})",
+        R"({"bundle":"g.task", "name":"nav", "from_bundle":"../escape", "from_name":"a"})",
+        R"({"bundle":"g.task", "name":"nav", "from_bundle":"g.a", "from_name":"../escape"})"}) {
+        EXPECT_FALSE(call("reuse_template", args).ok);
+    }
+}
+
+TEST_F(GraphTools, ReuseTemplateDoesNotWriteAfterApprovalRejection) {
+    campcat::llm::tool_context ctx;
+    campcat::llm::current_screen(&ctx.screen);
+    ctx.script_dir = m_dir;
+    ctx.cfg = &m_cfg;
+    ctx.needs_approval = [](std::string_view) { return true; };
+    ctx.request_approval = [](const auto &) { return campcat::llm::approval_decision{}; };
+    campcat::llm::set_context(ctx);
+    EXPECT_FALSE(call("reuse_template", R"({"bundle":"g.task", "name":"nav",
+        "from_bundle":"g.a", "from_name":"a"})").ok);
+    EXPECT_FALSE(exists("g.task/nav.png"));
 }
 
 TEST_F(GraphTools, UpdateScriptRefusesAFlatCut) {

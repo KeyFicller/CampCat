@@ -20,12 +20,16 @@ class CcatInterpreter;
 struct action_failure {
     std::string message;
     bool device = false;
+    std::string error_code;
+    bool fatal = false;
 
     /// One argument (a screen-state failure) converts implicitly, which is the
     /// common case, so the existing `return oss.str();` sites stay as they are.
     /// The `device` tag is for the screenshot that never happened.
-    action_failure(std::string _message, bool _device = false)
-        : message(std::move(_message)), device(_device) {}
+    action_failure(std::string _message, bool _device = false,
+                   std::string _code = {}, bool _fatal = false)
+        : message(std::move(_message)), device(_device),
+          error_code(std::move(_code)), fatal(_fatal) {}
 };
 
 /**
@@ -50,6 +54,7 @@ struct stmt_exec_outcome {
     /// so a condition must not read it as false either. `device` and this are
     /// two reasons for the same rule.
     bool fatal = false;
+    std::string error_code;
 
     bool is_ok() const { return kind == tag::ok; }
 
@@ -84,14 +89,15 @@ struct stmt_exec_outcome {
 
     /// `_device` marks a failure of the device rather than of the screen, and
     /// `_fatal` one that is not an answer at all; only a condition reads either.
-    static stmt_exec_outcome make_error(std::string _msg,
-                                        bool _device = false,
-                                        bool _fatal = false) {
+    static stmt_exec_outcome make_error(std::string _msg, bool _device = false,
+                                        bool _fatal = false,
+                                        std::string _code = {}) {
         stmt_exec_outcome o;
         o.kind = tag::error;
         o.message = std::move(_msg);
         o.device = _device;
         o.fatal = _fatal;
+        o.error_code = std::move(_code);
         return o;
     }
 };
@@ -105,13 +111,16 @@ outcome_from_opt(std::optional<action_failure> &&_maybe_err) {
         return stmt_exec_outcome::make_stopped();
     }
     return stmt_exec_outcome::make_error(std::move(_maybe_err->message),
-                                         _maybe_err->device);
+                                         _maybe_err->device, _maybe_err->fatal,
+                                         std::move(_maybe_err->error_code));
 }
 
 /**
  * @brief Base node for one executable statement in a .ccat program.
  */
 struct Stmt {
+    int line = 0, column = 0;
+    std::string operation;
     virtual ~Stmt() = default;
 
     virtual stmt_exec_outcome
@@ -427,6 +436,9 @@ struct LoopStmt final : Stmt {
  */
 struct Program {
     std::vector<std::unique_ptr<Stmt>> stmts;
+    /// Kept with the AST so evidence describes the executed version, not a
+    /// later edit.
+    std::string source;
 };
 
 } // namespace campcat::ccat_lang

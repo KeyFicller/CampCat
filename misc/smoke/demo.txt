@@ -1,18 +1,5 @@
-# 烟测清单：一行一条指令，# 开头与空行跳过。
-#
-# 跑法：
+# 一行一轮。空行和 # 开头的行跳过。
 #   ./build/campcat --smoke misc/smoke/demo.txt config.json
-#
-# 每次运行都新建 smoke/<时间戳>/ 当图目录，碰不到 ccat_library。
-# 计时含开模拟器、连 adb、sidecar 冷启动，以及下面每一条。
-# 清单跑到最后一条就是「图建完了」——框架不猜完整，你写全它。
-#
-# 第一条自己打开 App：「桌面 → Demo 首页」也算图上的一步，不走捷径。
-# 目标应用：com.campcat.demoidle.debug（CampCat Idle Demo），桌面图标标签是
-# “CampCat Idle Demo”。烟测不认包名，只认你第一句写的那个标签。
-#
-# 示例（按 demo 的实际界面改，前面的 # 去掉才生效）：
-# 回到桌面，点开 CampCat Idle Demo，看看首页有哪些东西
-# 在首页点一下“采集”，看到数字变了就停下
+# 验收由 demo.expect.json 定义。保留验收依赖的名称，运行说明见 README.md。
 
-打开CampCat Idle Demo，自由探索，把整张图建完整：每块屏幕一个锚点，屏幕之间来回的路连成边，屏幕上能做的事各算一个动作。设置页的「困难档」保持关闭，别去打开它，也不要把它算成一个动作。
+打开 CampCat Idle Demo，自由探索并建立可回放的 campcat 图。覆盖 entry、tasks、rewards、settings 四页之间的双向导航，以及活动弹窗 popup。保存采集、签到、领奖、模拟弹窗、模拟加载，分别命名为 entry.harvest、tasks.checkin、rewards.claim、rewards.sim_popup、rewards.sim_load。采集、签到、领奖各验证可操作、已完成、控件缺失三种状态，前两种模板分别用 harvest_text.png / harvest_done.png、checkin_text.png / checkin_done.png、claim_text.png / claim_done.png。用 loading.png 识别加载画面。困难档保持关闭。

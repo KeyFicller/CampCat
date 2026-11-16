@@ -8,8 +8,32 @@ woke up, and a turn that ended only on the host's timeout.
 
 import threading
 import time
+import queue
+
+import pytest
 
 import tools
+
+
+def test_interrupt_arriving_during_emit_is_not_lost(monkeypatch):
+    import io
+    import queue
+    import protocol
+    import transport
+    import pytest
+
+    monkeypatch.setattr(transport, "_QUEUE", queue.Queue())
+    monkeypatch.setattr(transport, "_PENDING", [])
+    monkeypatch.setattr(transport, "_STOP_IDS", set())
+    monkeypatch.setattr(transport, "_TOOL_WAIT", 0)
+    monkeypatch.setattr(transport, "_CLOSED", False)
+    monkeypatch.setattr(transport, "_CURRENT_RID", "turn-fast-stop")
+    monkeypatch.setattr(tools.subagent, "event", lambda *a, **k: None)
+    monkeypatch.setattr(transport, "emit", lambda msg: transport._pump(io.StringIO(
+        protocol.encode({"type": "interrupt", "id": "turn-fast-stop"}) + "\n")))
+    with pytest.raises(tools.TurnInterrupted):
+        tools.call_cpp("tap", {})
+    assert transport._TOOL_WAIT == 0
 import transport
 from collections import deque
 
@@ -69,3 +93,43 @@ def test_two_host_calls_in_flight_at_once_both_come_back(monkeypatch):
 
     assert len(done) == 2
     assert all(result.get("ok") for result in done)
+
+
+@pytest.mark.parametrize("ending", ["result", "interrupt", "closed"])
+def test_wait_defers_unrelated_messages_once_and_restores_arrival_order(monkeypatch, ending):
+    """A later request must not hide the tool result or its interrupt forever."""
+    incoming = queue.Queue()
+    deferred = [{"type": "turn", "id": "next"},
+                {"type": "tool_result", "call_id": "other"}]
+    for message in deferred:
+        incoming.put(message)
+    incoming.put({"type": "consult", "id": "question"})
+    final = {"type": "tool_result", "call_id": "ours", "ok": True}
+    incoming.put(final if ending == "result" else (
+        {"type": "interrupt", "id": "r"} if ending == "interrupt" else None))
+    monkeypatch.setattr(transport, "_QUEUE", incoming)
+    monkeypatch.setattr(transport, "_PENDING", [])
+    monkeypatch.setattr(transport, "_CLOSED", False)
+    monkeypatch.setattr(transport, "_TOOL_WAIT", 1)
+    monkeypatch.setattr(transport, "_CURRENT_RID", "r")
+    emitted = []
+    monkeypatch.setattr(transport, "emit", emitted.append)
+    monkeypatch.setattr(tools.consult, "answer", lambda message: {
+        "type": "consult_result", "id": message["id"], "ok": True})
+    read = transport.read_message
+    reads = 0
+
+    def bounded_read():
+        nonlocal reads
+        reads += 1
+        assert reads <= 8, "wait reread its own deferred message"
+        return read()
+
+    monkeypatch.setattr(transport, "read_message", bounded_read)
+    if ending == "result":
+        assert tools._wait_for_result("ours") == final
+    else:
+        with pytest.raises(tools.TurnInterrupted if ending == "interrupt" else RuntimeError):
+            tools._wait_for_result("ours")
+    assert emitted == [{"type": "consult_result", "id": "question", "ok": True}]
+    assert [read(), read()] == deferred

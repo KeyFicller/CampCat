@@ -406,6 +406,15 @@ bundle_run close_popup(const screen_graph &_graph, const std::string &_id,
     return ran;
 }
 
+nav_result bundle_failure(const bundle_run &_ran, const std::string &_prefix) {
+    nav_result out;
+    out.device = _ran.device;
+    out.fatal = _ran.fatal;
+    out.message = _prefix + _ran.message;
+    out.error_code = _ran.error_code;
+    return out;
+}
+
 enum class arrival { arrived, elsewhere, timeout, stopped, device, broken,
                      popup_failed };
 
@@ -413,6 +422,7 @@ struct arrival_out {
     arrival how = arrival::timeout;
     std::string why;
     std::string last = "unknown";
+    std::optional<bundle_run> failure;
 };
 
 /// After `_edge` ran: poll until its `to` shows, closing popups on the way.
@@ -438,6 +448,13 @@ arrival_out wait_arrival(const screen_graph &_graph, const graph_edge &_edge,
             w.hit.kind == locate_kind::ambiguous) {
             out.how = arrival::broken;
             out.why = w.hit.detail;
+            bundle_run failure;
+            failure.failed = true;
+            failure.message = w.hit.detail;
+            failure.device = w.hit.device;
+            failure.fatal = w.hit.fatal;
+            failure.error_code = w.hit.error_code;
+            out.failure = std::move(failure);
             return out;
         }
         if (w.hit.kind == locate_kind::interrupt) {
@@ -454,6 +471,7 @@ arrival_out wait_arrival(const screen_graph &_graph, const graph_edge &_edge,
             }
             if (closed.failed) {
                 out.how = arrival::popup_failed;
+                out.failure = closed;
                 out.why = closed.message;
                 return out;
             }
@@ -936,6 +954,9 @@ locate_hit locate(const screen_graph &_graph, const anchor_check_fn &_check,
         if (!r.error.empty()) {
             hit.kind = locate_kind::error;
             hit.detail = _a.id + " anchor failed: " + r.error;
+            hit.device = r.device;
+            hit.fatal = r.fatal;
+            hit.error_code = r.error_code;
             return false;
         }
         *_here = r.here;
@@ -1004,13 +1025,16 @@ nav_result navigate(const screen_graph &_graph, const std::string &_target,
     int failures = 0;
     int interrupts = 0;
     std::vector<std::string> trace;
+    std::string last_error_code;
     const auto failed = [&]() {
         nav_result r;
         r.message = where + " failed: " + join_semi(trace);
+        r.error_code = last_error_code;
         return r;
     };
     /// @return true once `max_failures` is reached.
-    const auto give_up = [&](std::string _why) {
+    const auto give_up = [&](std::string _why, std::string _code = {}) {
+        last_error_code = std::move(_code);
         trace.push_back(std::move(_why));
         return ++failures >= _limits.max_failures;
     };
@@ -1025,9 +1049,12 @@ nav_result navigate(const screen_graph &_graph, const std::string &_target,
         r.message = where + " screencap failed";
         return r;
     };
-    const auto broken = [&](const std::string &_detail) {
+    const auto broken = [&](const locate_hit &_hit) {
         nav_result r;
-        r.message = where + " " + _detail;
+        r.message = where + " " + _hit.detail;
+        r.device = _hit.device;
+        r.fatal = _hit.fatal;
+        r.error_code = _hit.error_code;
         return r;
     };
 
@@ -1041,7 +1068,7 @@ nav_result navigate(const screen_graph &_graph, const std::string &_target,
         }
         if (s.hit.kind == locate_kind::error ||
             s.hit.kind == locate_kind::ambiguous) {
-            return broken(s.hit.detail);
+            return broken(s.hit);
         }
 
         if (s.hit.kind == locate_kind::interrupt) {
@@ -1056,7 +1083,9 @@ nav_result navigate(const screen_graph &_graph, const std::string &_target,
             if (ran.stopped) {
                 return stopped();
             }
-            if (ran.failed && give_up(ran.message)) {
+            if (ran.failed && (ran.device || ran.fatal))
+                return bundle_failure(ran, where + " ");
+            if (ran.failed && give_up(ran.message, ran.error_code)) {
                 return failed();
             }
             continue;
@@ -1073,7 +1102,7 @@ nav_result navigate(const screen_graph &_graph, const std::string &_target,
             }
             if (s.hit.kind == locate_kind::error ||
                 s.hit.kind == locate_kind::ambiguous) {
-                return broken(s.hit.detail);
+                return broken(s.hit);
             }
             if (s.hit.kind == locate_kind::interrupt) {
                 continue; // the next loop handles it, keeping the cap
@@ -1109,8 +1138,10 @@ nav_result navigate(const screen_graph &_graph, const std::string &_target,
             return stopped();
         }
         if (ran.failed) {
-            if (give_up(hop->from + " -[" + hop->script + "]-> " +
-                        ran.message)) {
+            if (ran.device || ran.fatal)
+                return bundle_failure(ran, where + " ");
+            if (give_up(hop->from + " -[" + hop->script + "]-> " + ran.message,
+                        ran.error_code)) {
                 return failed();
             }
             continue;
@@ -1118,6 +1149,8 @@ nav_result navigate(const screen_graph &_graph, const std::string &_target,
 
         const arrival_out w =
             wait_arrival(_graph, *hop, _io, _limits, &interrupts, "goto");
+        if (w.failure && (w.failure->device || w.failure->fatal))
+            return bundle_failure(*w.failure, where + " ");
         switch (w.how) {
         case arrival::arrived:
             if (hop->to == _target) {
@@ -1132,14 +1165,18 @@ nav_result navigate(const screen_graph &_graph, const std::string &_target,
         case arrival::device:
             return device();
         case arrival::broken:
-            return broken(w.why);
+            if (w.failure)
+                return bundle_failure(*w.failure, where + " ");
+            return broken(locate_hit{locate_kind::error, {}, w.why});
         case arrival::timeout:
-            if (give_up(hop->from + " -[" + hop->script + "]-> " + w.why)) {
+            if (give_up(hop->from + " -[" + hop->script + "]-> " + w.why,
+                        "deadline")) {
                 return failed();
             }
             break;
         case arrival::popup_failed:
-            if (give_up(w.why)) {
+            if (give_up(w.why,
+                        w.failure ? w.failure->error_code : std::string{})) {
                 return failed();
             }
             break;
@@ -1190,6 +1227,9 @@ nav_result run_edge(const screen_graph &_graph, const graph_edge &_edge,
         }
         if (s.hit.kind == locate_kind::error ||
             s.hit.kind == locate_kind::ambiguous) {
+            r.device = s.hit.device;
+            r.fatal = s.hit.fatal;
+            r.error_code = s.hit.error_code;
             return fail(s.hit.detail);
         }
         if (s.hit.kind != locate_kind::interrupt) {
@@ -1203,9 +1243,8 @@ nav_result run_edge(const screen_graph &_graph, const graph_edge &_edge,
         if (closed.stopped) {
             return stopped();
         }
-        if (closed.failed) {
-            return fail(closed.message);
-        }
+        if (closed.failed)
+            return bundle_failure(closed, where);
     }
     if (s.hit.kind != locate_kind::page || s.hit.id != _edge.from) {
         return fail("not at " + _edge.from + " (at " +
@@ -1217,12 +1256,13 @@ nav_result run_edge(const screen_graph &_graph, const graph_edge &_edge,
     if (ran.stopped) {
         return stopped();
     }
-    if (ran.failed) {
-        return fail(ran.message);
-    }
+    if (ran.failed)
+        return bundle_failure(ran, where);
 
     const arrival_out w =
         wait_arrival(_graph, _edge, _io, _limits, &interrupts, "run");
+    if (w.failure)
+        return bundle_failure(*w.failure, where);
     switch (w.how) {
     case arrival::arrived:
         r.ok = true;
@@ -1234,7 +1274,10 @@ nav_result run_edge(const screen_graph &_graph, const graph_edge &_edge,
     case arrival::elsewhere:
         return fail("landed on " + w.last);
     case arrival::broken:
+        break;
     case arrival::timeout:
+        r.error_code = "deadline";
+        break;
     case arrival::popup_failed:
         break;
     }

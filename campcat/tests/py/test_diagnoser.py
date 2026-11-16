@@ -100,7 +100,7 @@ def _run(monkeypatch, error, template="btn", bundle="b", screen=None,
     monkeypatch.setattr(models, "build_chat_model", lambda **_: model)
     text = diagnoser.run_diagnoser({
         "bundle": bundle, "template": template, "error": error, "expect": "the button",
-    })
+    }).content
     return calls, model, text
 
 
@@ -235,3 +235,23 @@ def test_interrupt_in_gather_stops_the_outer_turn(monkeypatch):
              if isinstance(m, ToolMessage)]
     assert texts == [tools.INTERRUPTED_TEXT]
     assert not out.get("error")
+
+
+def test_diagnoser_preserves_nested_host_failure_category(monkeypatch):
+    import agent.scripter as scripter
+    import runner
+    runner.reset_fail_counts()
+    monkeypatch.setattr(tools, "call_cpp", lambda name, args: {
+        "ok": False, "error": "device busy", "error_code": "device_busy"})
+    out = scripter._apply_scripter_tools({"messages": [AIMessage(content="", tool_calls=[{
+        "name": "diagnose_template", "id": "d", "args": {
+            "bundle": "b", "template": "btn",
+            "error": "btn.png (best=0.6 box=1,1,2,2 threshold=0.8)",
+        },
+    }])]})
+    result = next(message for message in out["messages"] if isinstance(message, ToolMessage))
+    assert result.content.startswith("verdict: inconclusive")
+    assert "device busy" in result.content
+    assert result.status == "error"
+    assert result.artifact["error_code"] == "device_busy"
+    assert scripter.calls()[-1]["failed"]

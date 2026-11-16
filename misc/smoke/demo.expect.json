@@ -1,0 +1,18 @@
+{
+  "campcat": {
+    "anchors": ["entry", "tasks", "rewards", "settings", "popup"],
+    "edges": [
+      "entry-tasks", "entry-rewards", "entry-settings",
+      "tasks-entry", "tasks-rewards", "tasks-settings",
+      "rewards-entry", "rewards-tasks", "rewards-settings",
+      "settings-entry", "settings-tasks", "settings-rewards"
+    ],
+    "actions": ["entry.harvest", "tasks.checkin", "rewards.claim", "rewards.sim_popup", "rewards.sim_load"],
+    "cases": {
+      "entry.harvest": {"ready": "harvest_text.png", "done": "harvest_done.png"},
+      "tasks.checkin": {"ready": "checkin_text.png", "done": "checkin_done.png"},
+      "rewards.claim": {"ready": "claim_text.png", "done": "claim_done.png"}
+    },
+    "observations": {"rewards.sim_load": ["loading.png"]}
+  }
+}

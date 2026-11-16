@@ -279,7 +279,7 @@ void template_capture_panel_shutdown_gl() { clear_capture(); }
 
 void template_capture_panel_draw(campcat::app_config &_cfg,
                                  const campcat::ccat_script_profile *_ccat_ui,
-                                 bool _disable_capture) {
+                                 bool _disable_capture, bool _save_locked) {
     if (!_ccat_ui) {
         ImGui::TextDisabled("(CampCat bundle missing)");
         return;
@@ -301,7 +301,7 @@ void template_capture_panel_draw(campcat::app_config &_cfg,
 
     // Read after Capture, so a click that drops the old selection also drops
     // the Save enabled by it.
-    const bool can_save = g_has_sel && !g_bgr.empty();
+    const bool can_save = !_save_locked && g_has_sel && !g_bgr.empty();
     ImGui::SameLine();
     if (!can_save) {
         ImGui::BeginDisabled();
@@ -478,7 +478,7 @@ void template_capture_panel_draw(campcat::app_config &_cfg,
 
     // A click cannot arrive with no selection or no frame: Save is disabled
     // without both.
-    if (save_crop) {
+    if (save_crop && !_save_locked) {
         if (!safe_leaf_name(g_filename)) {
             campcat::automation_log::emit(
                 "[capture] invalid filename (no path separators)");

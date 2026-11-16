@@ -336,6 +336,18 @@ private:
     std::string parse_log_operand() { return parse_message("log(...)"); }
 
     std::unique_ptr<Stmt> parse_stmt() {
+        const Token start = m_lex.peek();
+        auto node = parse_stmt_body();
+        // Constant-folded branches already carry their own source location.
+        if (node->line == 0) {
+            node->line = start.line;
+            node->column = start.col;
+            node->operation = start.text;
+        }
+        return node;
+    }
+
+    std::unique_ptr<Stmt> parse_stmt_body() {
         Token t = m_lex.peek();
         switch (t.kind) {
         case TokKind::KwIf:
@@ -687,6 +699,18 @@ private:
     /// kept (`unique_ptr<TapStmt>` widens to `unique_ptr<Stmt>`), which is what
     /// the template and run-target walks rely on to still find it.
     std::unique_ptr<Stmt> parse_cond_action() {
+        const Token start = m_lex.peek();
+        auto node = parse_cond_action_body();
+        // Constant-folded branches already carry their own source location.
+        if (node->line == 0) {
+            node->line = start.line;
+            node->column = start.col;
+            node->operation = start.text;
+        }
+        return node;
+    }
+
+    std::unique_ptr<Stmt> parse_cond_action_body() {
         switch (m_lex.peek().kind) {
         case TokKind::KwHas:
             return parse_has();
@@ -778,7 +802,14 @@ private:
     /// last for free, because nothing comes back here after one.
     std::unique_ptr<Stmt> parse_else_tail() {
         if (m_lex.peek().kind == TokKind::KwElif) {
-            return parse_if();
+            const Token start = m_lex.peek();
+            auto node = parse_if();
+            if (node->line == 0) {
+                node->line = start.line;
+                node->column = start.col;
+                node->operation = start.text;
+            }
+            return node;
         }
         if (m_lex.peek().kind == TokKind::KwElse) {
             (void)m_lex.next();
@@ -811,7 +842,9 @@ private:
 
 std::unique_ptr<Program> parse_program(std::string_view _source) {
     Parser p(_source);
-    return p.parse_program();
+    auto program = p.parse_program();
+    program->source = std::string(_source);
+    return program;
 }
 
 } // namespace campcat::ccat_lang

@@ -83,6 +83,32 @@ def test_a_handoff_tool_is_the_return(monkeypatch, scripted):
     assert "写好了签到" not in text
 
 
+def test_game_ui_observation_reaches_scripter_memory(monkeypatch, scripted):
+    from agent import memorier, scripter
+
+    schema = scripter.HANDOFF_TOOL["function"]["parameters"]
+    assert "ui_style" in schema["properties"]  # The authoring model is offered it.
+    assert "ui_style" not in schema["required"]
+    style = "demo（#1、#2）：返回键是左上角的圆形箭头。"
+    _drive(monkeypatch, scripted, [
+        AIMessage(content="", tool_calls=[
+            _call("author_script", {"goal": "给 demo 写签到脚本"}, "a")]),
+        AIMessage(content="", tool_calls=[_call("Handoff", {
+            "status": "saved", "summary": "写好了签到", "ui_style": style,
+        }, "h")]),
+        AIMessage(content="Done."),
+    ])
+
+    class MemoryModel:
+        def invoke(self, messages, config=None):
+            assert style in messages[-1].content
+            return AIMessage(content='{"ops":[]}')
+
+    monkeypatch.setattr(models, "build_memory_model", MemoryModel)
+    assert memorier.memorize("", "scripter") is not None
+    assert _tool_messages()[-1].content == "saved\n写好了签到"
+
+
 def test_a_bad_handoff_does_not_finish(monkeypatch, scripted):
     calls, text, _ = _drive(monkeypatch, scripted, [
         AIMessage(content="", tool_calls=[
@@ -349,7 +375,8 @@ def test_the_finished_handoff_leaves_a_note_for_the_next_one(monkeypatch, script
     import agent.reflector as reflector
     seen = []
 
-    def spy(calls, operator_rounds, reply):
+    def spy(calls, operator_rounds, reply, *, handoff_failed=False):
+        assert not handoff_failed
         seen.append(([c["name"] for c in calls], operator_rounds, reply))
         return "这次交接：1 次调用。", "下一手先读 bundle。"
 
@@ -377,7 +404,7 @@ def test_the_note_reaches_the_next_scripter_prompt(monkeypatch, scripted):
     import agent.scripter as scripter
 
     monkeypatch.setattr(reflector, "reflect",
-                        lambda *a: ("", "别再看同一帧。"))
+                        lambda *a, **k: ("", "别再看同一帧。"))
     _drive(monkeypatch, scripted, [
         AIMessage(content="", tool_calls=[
             _call("author_script", {"goal": "签到"}, "a")]),

@@ -18,6 +18,7 @@ run_ccat_program(adb_api *_adb, const app_config *_cfg,
     if (!_adb || !_cfg) {
         automation_cycle_result r{};
         r.ok = false;
+        r.error_code = "invalid_argument";
         r.message = "run_ccat_program: adb/cfg must be non-null";
         return r;
     }
