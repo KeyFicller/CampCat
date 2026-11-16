@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import agent.operator as operator
 import models
+import prompt_host
 import tool_policy
 from agent.region_rules import REGION_RULES
 
@@ -42,8 +43,12 @@ def tools(host_tools: list) -> list:
 
 
 def prompt() -> str:
-    """Who drives a sample. The same env override as the operator replaces it."""
+    """Who drives a sample. The same env override as the operator replaces it.
+
+    Otherwise Langfuse may. The persona below is the fallback.
+    """
     override = models._env("CAMPCAT_LLM_SYSTEM_PROMPT")
     if override:
         return override
-    return SOLO_PERSONA + "\n\n" + operator.shared_rules()
+    return prompt_host.text(
+        prompt_host.SOLO, SOLO_PERSONA + "\n\n" + operator.shared_rules())

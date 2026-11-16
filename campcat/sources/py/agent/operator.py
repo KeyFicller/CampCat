@@ -13,6 +13,7 @@ from pydantic import BaseModel, Field
 
 import agent.scripter as scripter
 import models
+import prompt_host
 import tool_policy
 from agent.region_rules import REGION_RULES
 
@@ -195,8 +196,13 @@ def operator_tools(host_tools: list) -> list:
 
 
 def operator_prompt() -> str:
-    """Who the operator is. An env override replaces the whole thing, cheatsheet included."""
+    """Who the operator is. An env override replaces the whole thing, cheatsheet included.
+
+    Otherwise Langfuse may. The persona below is what is sent when that fetch
+    does not succeed.
+    """
     override = models._env("CAMPCAT_LLM_SYSTEM_PROMPT")
     if override:
         return override
-    return OPERATOR_PERSONA + "\n\n" + shared_rules()
+    return prompt_host.text(
+        prompt_host.OPERATOR, OPERATOR_PERSONA + "\n\n" + shared_rules())

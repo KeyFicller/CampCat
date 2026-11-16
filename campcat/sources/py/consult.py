@@ -12,6 +12,7 @@ from typing import Any
 from langchain_core.messages import HumanMessage, SystemMessage
 
 import models
+import prompt_host
 import protocol
 import session
 
@@ -22,6 +23,11 @@ SYSTEM = (
     "只回一个词，照抄英文原样：yes、no 或 unsure。"
     "图片里显示的信息不足以判断时，回答 unsure；永远不要猜。"
 )
+
+
+def system_prompt() -> str:
+    """The yes/no instruction. Langfuse may replace it; `SYSTEM` is the fallback."""
+    return prompt_host.text(prompt_host.CONSULT, SYSTEM)
 
 
 def parse_answer(text: str) -> str:
@@ -46,7 +52,7 @@ def answer(req: dict) -> dict:
             rid, False, error="问题或图片为空")
     try:
         reply: Any = models.build_chat_model().invoke([
-            SystemMessage(content=SYSTEM),
+            SystemMessage(content=system_prompt()),
             HumanMessage(content=session._shot_content(question, image)),
         ])
     except Exception as exc:  # noqa: BLE001 - the script stops, the loop lives
