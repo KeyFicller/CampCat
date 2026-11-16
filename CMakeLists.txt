@@ -95,10 +95,12 @@ set(GLFW_BUILD_TESTS OFF CACHE BOOL "" FORCE)
 set(GLFW_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
 FetchContent_MakeAvailable(glfw)
 
+# v1.91.8-docking is the docking branch cut of the same release, not a second
+# copy and not a newer master. DockSpace / IMGUI_HAS_DOCK exist only there.
 FetchContent_Declare(
   imgui
   GIT_REPOSITORY "https://github.com/ocornut/imgui.git"
-  GIT_TAG        v1.91.8
+  GIT_TAG        v1.91.8-docking
   GIT_SHALLOW    TRUE
   GIT_PROGRESS   TRUE
   GIT_SUBMODULES ""
@@ -299,6 +301,7 @@ add_executable(campcat
   campcat/sources/cpp/src/app/ui/console_panel.cpp
   campcat/sources/cpp/src/app/ui/script_panel.cpp
   campcat/sources/cpp/src/app/ui/settings_panel.cpp
+  campcat/sources/cpp/src/app/ui/shell_dock.cpp
   campcat/sources/cpp/src/app/ui/script_editor_panel.cpp
   campcat/sources/cpp/src/app/ui/template_capture_panel.cpp
   campcat/sources/cpp/src/app/ui/graph_panel.cpp

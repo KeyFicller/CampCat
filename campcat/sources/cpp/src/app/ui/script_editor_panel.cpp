@@ -823,28 +823,6 @@ void draw_editor_contents(script_editor &_e, bool _save_locked) {
     }
 }
 
-void draw_editor(script_editor &_e, bool _save_locked) {
-    if (!_e.open) {
-        return;
-    }
-    const bool dirty = _e.editor->GetText() != _e.loaded;
-    // Root and file path distinguish same-named scripts in different libraries.
-    const std::string title = "script: " + _e.name + (dirty ? " *" : "") +
-                              "###script_editor_" + _e.main_path.string();
-    if (_e.focus) {
-        ImGui::SetNextWindowFocus();
-        _e.focus = false;
-    }
-    const ImVec2 display = ImGui::GetIO().DisplaySize;
-    ImGui::SetNextWindowSize(
-        ImVec2(std::min(760.0F, display.x * 0.9F),
-               std::min(560.0F, display.y * 0.85F)), ImGuiCond_Appearing);
-    if (ImGui::Begin(title.c_str(), &_e.open)) {
-        draw_editor_contents(_e, _save_locked);
-    }
-    ImGui::End();
-}
-
 void prune_closed_editors() {
     std::erase_if(g_editors, [](const auto &entry) { return !entry->open; });
 }
@@ -890,16 +868,6 @@ void script_editor_draw_docked(bool _save_locked) {
             }
         }
         ImGui::EndTabBar();
-    }
-    prune_closed_editors();
-}
-
-void script_editor_draw_windows(bool _docked, bool _save_locked) {
-    prune_closed_editors();
-    if (!_docked) {
-        for (const std::unique_ptr<script_editor> &entry : g_editors) {
-            draw_editor(*entry, _save_locked);
-        }
     }
     prune_closed_editors();
 }

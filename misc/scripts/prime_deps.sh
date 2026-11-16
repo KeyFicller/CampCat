@@ -27,12 +27,26 @@ finish() { # name tmpdir
 
 tag_clone() { # name repo tag
     local name="$1" repo="$2" tag="$3" t0 t1 d="$TMP/$1"
-    if have "$name"; then echo "[skip] $name (already in cache)"; return; fi
+    local stamp="$CACHE/$name-src/.campcat-fetch"
+    if [ -f "$stamp" ] && [ "$(cat "$stamp")" = "tag=$tag" ]; then
+        echo "[skip] $name (already in cache)"
+        return
+    fi
+    # Unstamped entries predate this check. Leave them, except imgui: that pin
+    # moved off master (no DockSpace) onto the docking tag, and `have` cannot
+    # tell the two trees apart. The old tree is removed only after the clone
+    # succeeds.
+    if [ -d "$CACHE/$name-src/.git" ] && [ ! -f "$stamp" ] && [ "$name" != "imgui" ]; then
+        echo "[skip] $name (already in cache)"
+        return
+    fi
     t0=$(date +%s)
     if git clone -q --depth 1 --branch "$tag" --single-branch \
            "$M/$repo" "$d" 2>/dev/null; then
         t1=$(date +%s)
-        finish "$name" "$d"
+        rm -rf "$CACHE/$name-src"
+        mv "$d" "$CACHE/$name-src"
+        printf 'tag=%s\n' "$tag" > "$CACHE/$name-src/.campcat-fetch"
         echo "[ ok ] $name tag=$tag  $((t1-t0))s  $(du -sh "$CACHE/$name-src" | cut -f1)"
     else
         rm -rf "$d"
@@ -60,7 +74,7 @@ sha_clone() { # name repo sha
 
 # Same repos, tags and commits as CMakeLists.txt.
 tag_clone glfw       glfw/glfw.git         3.4
-tag_clone imgui      ocornut/imgui.git     v1.91.8
+tag_clone imgui      ocornut/imgui.git     v1.91.8-docking
 tag_clone json       nlohmann/json.git     v3.11.3
 tag_clone googletest google/googletest.git v1.15.2
 sha_clone cppreflect26 KeyFicller/CppReflectKit.git        d9ef3c3038d42c77d17ff2d2d7618c223693d853
