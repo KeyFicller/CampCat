@@ -5,6 +5,7 @@
 
 #include <filesystem>
 #include <fstream>
+#include <unistd.h>
 
 TEST(LlmMemory, EmptyIdlePassPreservesCommittedCursor) {
     const auto root = std::filesystem::temp_directory_path() / "campcat_empty_memory_cursor";
@@ -50,6 +51,25 @@ TEST(LlmMemory, ModelProposalRejectsMalformedTypesWithoutPartialAcceptance) {
 namespace {
 
 namespace {
+
+/// Root ignores a directory mode, so the CI container drops to this uid for the
+/// one commit that must fail. Restored on every exit, including a failed assert.
+class dropped_privileges {
+public:
+    dropped_privileges() {
+        if (geteuid() != 0)
+            return;
+        m_dropped = seteuid(65534) == 0;
+    }
+    ~dropped_privileges() {
+        if (m_dropped)
+            seteuid(0);
+    }
+    bool active() const { return m_dropped; }
+
+private:
+    bool m_dropped = false;
+};
 
 /// A clean config home per test, named so a crash leaves an obvious corpse.
 std::filesystem::path ledger_dir(const char *_name) {
@@ -606,21 +626,69 @@ TEST(LlmMemory, InterruptedPassRecoversWithoutDuplicatingItsLibraryWrite) {
     using namespace campcat::llm;
     ASSERT_TRUE(
         append_pass(dir, memory_kind::operator_notes, "", "turn:1", "turn:4"));
+    // The missing graph ledger has to read as empty, and only the append may
+    // fail. A file at graph/memory/ is unreadable, so commit_pass returns
+    // before it writes the pending journal and there is nothing to recover.
+    // A directory mode fails that append for a normal user. Root ignores the
+    // mode, so it drops to an unprivileged uid that can still search the
+    // directory and write the library ledger.
     const auto graph_dir = dir / "graph" / "memory";
     std::filesystem::create_directories(graph_dir);
-    std::filesystem::permissions(graph_dir,
-                                 std::filesystem::perms::owner_read |
-                                     std::filesystem::perms::owner_exec);
-    const auto failed =
-        commit_pass(dir, memory_kind::operator_notes, "graph",
-                    {op_of(memory_op::kind::add, "", "偏好", "library"),
-                     op_of(memory_op::kind::add, "", "叫法", "graph")},
-                    {"turn:5", "turn:9"}, "turn:5", "turn:9", nullptr);
-    EXPECT_FALSE(failed.storage_ok);
-    EXPECT_EQ(last_pass_to(dir, memory_kind::operator_notes, ""), "turn:4");
-    std::filesystem::permissions(graph_dir, std::filesystem::perms::owner_all);
+    const bool as_root = geteuid() == 0;
+    if (as_root) {
+        using std::filesystem::perms;
+        const auto traverse = perms::owner_all | perms::group_read |
+                              perms::group_exec | perms::others_read |
+                              perms::others_exec;
+        std::filesystem::permissions(dir, traverse);
+        std::filesystem::permissions(dir / "graph", traverse);
+        std::filesystem::permissions(graph_dir, traverse);
+        std::filesystem::permissions(
+            dir / "memory",
+            perms::owner_all | perms::group_all | perms::others_all);
+        std::filesystem::permissions(
+            dir / "memory" / "operator.jsonl",
+            perms::owner_read | perms::owner_write | perms::group_read |
+                perms::group_write | perms::others_read | perms::others_write);
+    } else {
+        std::filesystem::permissions(
+            graph_dir, std::filesystem::perms::owner_read |
+                           std::filesystem::perms::owner_exec);
+    }
+    const auto attempt = [&] {
+        return commit_pass(
+            dir, memory_kind::operator_notes, "graph",
+            {op_of(memory_op::kind::add, "", "偏好", "library"),
+             op_of(memory_op::kind::add, "", "叫法", "graph")},
+            {"turn:5", "turn:9"}, "turn:5", "turn:9", nullptr);
+    };
+    {
+        dropped_privileges dropped;
+        if (as_root)
+            ASSERT_TRUE(dropped.active());
+        const auto failed = attempt();
+        EXPECT_FALSE(failed.storage_ok);
+        EXPECT_EQ(last_pass_to(dir, memory_kind::operator_notes, ""),
+                  "turn:4");
+        EXPECT_TRUE(std::filesystem::is_regular_file(
+            dir / "memory" / "operator.pending.json"));
+    }
+    if (!as_root) {
+        std::filesystem::permissions(graph_dir,
+                                     std::filesystem::perms::owner_all);
+    }
     const auto recovered = ledger_entries(dir, "graph");
     ASSERT_EQ(recovered.size(), 2U);
+    std::string library_ledger;
+    {
+        std::ifstream in(dir / "memory" / "operator.jsonl");
+        library_ledger.assign(std::istreambuf_iterator<char>(in),
+                              std::istreambuf_iterator<char>());
+    }
+    const auto library_fact = library_ledger.find("\"library\"");
+    EXPECT_NE(library_fact, std::string::npos);
+    EXPECT_EQ(library_ledger.find("\"library\"", library_fact + 1),
+              std::string::npos);
     EXPECT_EQ(last_pass_to(dir, memory_kind::operator_notes, "graph"),
               "turn:9");
     const auto retried =
