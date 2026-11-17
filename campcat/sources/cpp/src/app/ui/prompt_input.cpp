@@ -1,4 +1,5 @@
 #include "app/ui/prompt_input.h"
+#include "app/ui/theme.h"
 
 #if defined(__APPLE__)
 #include "app/ui/macos_ime.h"
@@ -51,7 +52,7 @@ void draw_ime_preedit(const ImVec2 &_box_min, const ImVec2 &_box_max,
     dl->PushClipRect(_box_min, _box_max, true);
     dl->AddRectFilled(ImVec2(pos.x, _box_min.y + 3.0F),
                       ImVec2(pos.x + size.x + 2.0F, _box_min.y + size.y + 3.0F),
-                      IM_COL32(70, 70, 85, 255), 3.0F);
+                      ImGui::GetColorU32(campcat::app::theme::k_border_strong), 3.0F);
     dl->AddText(pos, ImGui::GetColorU32(ImGuiCol_Text), _preedit.c_str());
     dl->AddLine(ImVec2(pos.x, pos.y + size.y),
                 ImVec2(pos.x + size.x, pos.y + size.y),

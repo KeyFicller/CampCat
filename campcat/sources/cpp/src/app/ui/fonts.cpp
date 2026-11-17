@@ -1,9 +1,21 @@
 #include "app/ui/fonts.h"
 
+#if defined(__APPLE__)
+#define GL_SILENCE_DEPRECATION
+#endif
+
+#include <GLFW/glfw3.h>
+
 #include <imgui.h>
+#include <imgui_internal.h>
+
+#include "app/ui/icons.h"
+#include "core/automation_log.h"
 
 #include <cassert>
+#include <chrono>
 #include <filesystem>
+#include <string>
 #include <system_error>
 #include <vector>
 
@@ -12,15 +24,16 @@ namespace {
 
 /// The bundled faces, relative to the working directory the app is started from
 /// (the same base `main.cpp` resolves `config.json` against).
-constexpr char k_latin_regular[] = "campcat/sources/cpp/assets/fonts/Arimo-Regular.ttf";
-constexpr char k_latin_bold[] = "campcat/sources/cpp/assets/fonts/Arimo-Bold.ttf";
+constexpr char k_latin_regular[] = "campcat/sources/cpp/assets/fonts/Inter-Regular.ttf";
+constexpr char k_latin_semibold[] = "campcat/sources/cpp/assets/fonts/Inter-SemiBold.ttf";
 constexpr char k_mono_regular[] = "campcat/sources/cpp/assets/fonts/JetBrainsMono-Regular.ttf";
+constexpr char k_icon_face[] = "campcat/sources/cpp/assets/fonts/lucide.ttf";
 
 /// How much larger the merged CJK face is rasterized than the Latin one it
 /// joins.
 ///
 /// ImGui scales each face by its own hhea box, which lands Noto's hanzi within
-/// 3% of Arimo's capitals -- nominally the same height. On screen they are not:
+/// 3% of a Latin capital -- nominally the same height. On screen they are not:
 /// measured off a screenshot, a capital's solid ink runs 16px against a hanzi's
 /// 15px, and past a high alpha threshold the capital is still 14px tall while
 /// the hanzi has all but vanished. The strokes are simply lighter, and
@@ -39,27 +52,28 @@ constexpr float k_cjk_scale = 1.20F;
 /// nothing is rasterized twice.
 ///
 /// Only a system face carries those glyphs: Arial Unicode has them all bar
-/// Extension A and a few rare ideographs. Measured for the four CJK faces
-/// (two 16px, one 16px mono, one 18px): 92k glyphs against 29k before, and the
-/// atlas grows from 4096x4096 to 4096x16384 -- 256 MB once uploaded as RGBA,
-/// with ~0.35 s added to the first frame. Dropping a face from this merge is
-/// the whole cost curve, so a machine short on VRAM should drop one.
+/// Extension A and a few rare ideographs. Merged into every CJK face it took
+/// the atlas from 4096x4096 to 4096x16384 at 1x -- 256 MB as RGBA -- and 2x
+/// density quadruples each glyph, so only the conversation keeps it: that is
+/// where a model's symbols and rare hanzi land.
 constexpr char k_wide_face[] =
     "/System/Library/Fonts/Supplemental/Arial Unicode.ttf";
 
-/// Indexed by `font_role`. Written once by `fonts_init`, read-only after.
-ImFont *s_font[6] = {};
+/// Lucide draws on the baseline-to-ascender box; this drops the glyph so its
+/// centre meets the centre of a capital. In ems of the face it joins.
+constexpr float k_icon_offset_ems = 0.10F;
+
+/// Indexed by `font_role`. Written by `fonts_init`, read-only after.
+ImFont *s_font[7] = {};
 
 ImFont *&slot(font_role _role) { return s_font[static_cast<int>(_role)]; }
 
-} // namespace
-
-void fonts_init() {
+/// Adds every face at `_density` and fills the slots. Atlas not built yet.
+void add_faces(float _density) {
     ImGuiIO &io = ImGui::GetIO();
 
     // Every UI font is one family: a Latin face with the same CJK face merged
-    // in so Chinese never lands on a font that lacks it. Sizes and weights stay
-    // per-use (14 small, 16 body, 16 bold, 18 chat, 20 titles).
+    // in so Chinese never lands on a font that lacks it.
     //
     // The bundled subset is tried first because it is the only candidate that
     // is actually guaranteed to be there -- the system paths below are the ones
@@ -125,8 +139,8 @@ void fonts_init() {
         return r;
     }();
 
-    // The 14px status face is Latin-only. Infinity and the em dash sit outside
-    // that range, and ImGui keeps this pointer until the atlas is built.
+    // The small face is Latin-only. Infinity and the em dash sit outside that
+    // range, and ImGui keeps this pointer until the atlas is built.
     static const std::vector<ImWchar> status_ranges = [&io] {
         std::vector<ImWchar> r;
         for (const ImWchar *p = io.Fonts->GetGlyphRangesDefault();
@@ -143,69 +157,102 @@ void fonts_init() {
         return r;
     }();
 
+    // Exactly the glyphs `icon::k_all` names, so the 2k-glyph face costs a
+    // few dozen cells.
+    static const std::vector<ImWchar> icon_ranges = [] {
+        std::vector<ImWchar> r;
+        for (const char *glyph : icon::k_all) {
+            unsigned int c = 0;
+            ImTextCharFromUtf8(&c, glyph, nullptr);
+            r.push_back(static_cast<ImWchar>(c));
+            r.push_back(static_cast<ImWchar>(c));
+        }
+        r.push_back(0);
+        return r;
+    }();
+
+    auto exists = [](const char *_path) {
+        std::error_code ec;
+        return std::filesystem::exists(_path, ec);
+    };
+
     // MergeMode appends to the font added just before it, so each merge is
     // issued right after its own base font.
     //
-    // `_cjk` is false for the 20px title only: Chinese would draw "?" there,
-    // and a title that is ASCII today does not pay for the atlas (4096x16384
-    // with this merge, against 4096x4096 without).
-    auto load_font = [&io](const char *_path, float _size, bool _cjk, int _face,
-                           const ImWchar *_ranges = nullptr) -> ImFont * {
+    // `_cjk` is false for the Latin-only faces (title, display, small):
+    // Chinese draws "?" there, and the atlas does not pay for a CJK merge at
+    // every size.
+    auto load_font = [&](const char *_path, float _size, bool _cjk, bool _wide,
+                         bool _icons, const ImWchar *_ranges = nullptr) -> ImFont * {
         // AddFontFromFileTTF asserts on a missing file, and that assert is live
         // in a Debug build. Probing first turns a missing face file into a null
         // return the callers below already know how to fall back from.
-        std::error_code ec;
-        if (!std::filesystem::exists(_path, ec)) {
+        if (!exists(_path)) {
             return nullptr;
         }
         ImFontConfig base;
-        base.FontNo = _face; // a .ttc holds several faces
-        ImFont *font =
-            io.Fonts->AddFontFromFileTTF(_path, _size, &base, _ranges);
-        if (font == nullptr || !_cjk) {
+        base.RasterizerDensity = _density;
+        ImFont *font = io.Fonts->AddFontFromFileTTF(_path, _size, &base, _ranges);
+        if (font == nullptr) {
+            return font;
+        }
+        if (_icons && exists(k_icon_face)) {
+            ImFontConfig merge;
+            merge.MergeMode = true;
+            merge.RasterizerDensity = _density;
+            merge.GlyphMinAdvanceX = _size;
+            merge.GlyphOffset.y = _size * k_icon_offset_ems;
+            io.Fonts->AddFontFromFileTTF(k_icon_face, _size, &merge,
+                                         icon_ranges.data());
+        }
+        if (!_cjk) {
             return font;
         }
         for (const auto &cjk : cjk_candidates) {
-            std::error_code cjk_ec;
-            if (!std::filesystem::exists(cjk.path, cjk_ec)) {
+            if (!exists(cjk.path)) {
                 continue;
             }
             ImFontConfig merge;
             merge.MergeMode = true;  // add to that font instead of replacing it
             merge.FontNo = cjk.face; // a .ttc holds several faces
+            merge.RasterizerDensity = _density;
             io.Fonts->AddFontFromFileTTF(cjk.path, _size * k_cjk_scale, &merge,
                                          cjk_ranges.data());
             break;
         }
-        std::error_code wide_ec;
-        if (!std::filesystem::exists(k_wide_face, wide_ec)) {
+        if (!_wide || !exists(k_wide_face)) {
             return font;
         }
         ImFontConfig fill;
         fill.MergeMode = true;
+        fill.RasterizerDensity = _density;
         io.Fonts->AddFontFromFileTTF(k_wide_face, _size * k_cjk_scale, &fill,
                                      cjk_ranges.data());
         return font;
     };
 
-    // Arimo for Latin: metric-compatible with Arial, so nothing reflows, and
-    // OFL, unlike Arial itself. San Francisco would be unusable anyway: it is a
-    // variable font and ImGui's rasterizer ignores variation axes, so every
-    // weight -- titles included -- would draw Regular. That is also why the
-    // bundled faces are pre-instanced; see `campcat/sources/cpp/assets/fonts/README.md`.
-    ImFont *font_body = load_font(k_latin_regular, 16.0F, true, 0);
+    // Inter for Latin: OFL, and drawn for screens -- its tall x-height is what
+    // keeps 13-15px legible. San Francisco would be unusable anyway: it is a variable
+    // font and ImGui's rasterizer ignores variation axes, so every weight --
+    // titles included -- would draw Regular. That is also why the bundled
+    // faces are static instances; see `campcat/sources/cpp/assets/fonts/README.md`.
+    ImFont *font_body = load_font(k_latin_regular, 15.0F, true, false, true);
     if (font_body == nullptr) {
         font_body = io.Fonts->AddFontDefault();
     }
-    ImFont *font_bold = load_font(k_latin_bold, 16.0F, true, 0);
+    // SemiBold rather than Bold: a page of Bold buttons reads heavy.
+    ImFont *font_bold = load_font(k_latin_semibold, 15.0F, true, false, true);
     if (font_bold == nullptr) {
         font_bold = font_body;
     }
-    // The only Latin weight the CJK merge is skipped for, so a Chinese title
-    // would draw "?".
-    ImFont *font_title = load_font(k_latin_bold, 20.0F, false, 0);
+    ImFont *font_title = load_font(k_latin_semibold, 20.0F, false, false, true);
     if (font_title == nullptr) {
         font_title = font_bold;
+    }
+    // Empty-state headlines: Latin only, so the size costs a few hundred cells.
+    ImFont *font_display = load_font(k_latin_semibold, 26.0F, false, false, true);
+    if (font_display == nullptr) {
+        font_display = font_title;
     }
 
     // The script editor is a character grid, so it needs one width for every
@@ -213,14 +260,12 @@ void fonts_init() {
     // text. CJK is merged in for the same reason as the other faces -- comments
     // in a script are written in whatever language its author thinks in. The
     // subset costs ~2 MB of atlas, which is why it is a subset at all.
-    ImFont *font_mono = load_font(k_mono_regular, 16.0F, true, 0);
+    ImFont *font_mono = load_font(k_mono_regular, 14.0F, true, false, false);
 
-    // The status line under the prompt box, which is context, not conversation.
-    // Latin-only like `title`: a CJK merge at every size is what makes the
-    // atlas expensive. Two codepoints outside Latin come along: infinity and
-    // the em dash.
-    ImFont *font_small =
-        load_font(k_latin_regular, 14.0F, false, 0, status_ranges.data());
+    // Status bar, stats line and hints: context, not content. Latin-only like
+    // `title`; two codepoints outside Latin come along, infinity and the em dash.
+    ImFont *font_small = load_font(k_latin_regular, 13.0F, false, false, true,
+                                   status_ranges.data());
     if (font_small == nullptr) {
         font_small = font_body;
     }
@@ -229,9 +274,9 @@ void fonts_init() {
     // rather than a window font scale: `imgui_markdown` takes its wrap width
     // from `io.FontGlobalScale`, which `SetWindowFontScale` leaves at 1.0, so a
     // scaled window wraps each reply to its unscaled width and clips the last
-    // 15% of every line. It would also stretch the 16px glyphs instead of
-    // rasterizing them. Measured: the merges still fit one 4096x4096 sheet.
-    ImFont *font_chat = load_font(k_latin_regular, 18.0F, true, 0);
+    // 15% of every line. It would also stretch the glyphs instead of
+    // rasterizing them. Icons too: thinking and failure rows draw inside it.
+    ImFont *font_chat = load_font(k_latin_regular, 16.0F, true, true, true);
     if (font_chat == nullptr) {
         font_chat = font_body;
     }
@@ -239,12 +284,46 @@ void fonts_init() {
     slot(font_role::body) = font_body;
     slot(font_role::bold) = font_bold;
     slot(font_role::title) = font_title;
+    slot(font_role::display) = font_display;
     // Without the mono face the editor wants the normal one, not nothing: it
     // used to draw in whatever was current, which is `body` -- the default
     // ImGui picks is the first face added, and `body` is it.
     slot(font_role::mono) = font_mono != nullptr ? font_mono : font_body;
     slot(font_role::small) = font_small;
     slot(font_role::chat) = font_chat;
+}
+
+} // namespace
+
+void fonts_init(float _content_scale) {
+    const auto started = std::chrono::steady_clock::now();
+    ImGuiIO &io = ImGui::GetIO();
+    float density = font_density(_content_scale);
+    add_faces(density);
+    io.Fonts->Build();
+
+    // A sheet taller than the GPU allows uploads as nothing, and every glyph
+    // in the app goes blank with it. 1x is blurry on Retina but always fits.
+    GLint max_texture = 0;
+    glGetIntegerv(GL_MAX_TEXTURE_SIZE, &max_texture);
+    if (density > 1.0F && max_texture > 0 &&
+        (io.Fonts->TexHeight > max_texture || io.Fonts->TexWidth > max_texture)) {
+        automation_log::emit("[ui] font atlas too large at density " +
+                             std::to_string(static_cast<int>(density)) +
+                             ", rebuilt at 1");
+        io.Fonts->Clear();
+        density = 1.0F;
+        add_faces(density);
+        io.Fonts->Build();
+    }
+
+    const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                        std::chrono::steady_clock::now() - started)
+                        .count();
+    automation_log::emit("[ui] font atlas " + std::to_string(io.Fonts->TexWidth) +
+                         "x" + std::to_string(io.Fonts->TexHeight) + ", density " +
+                         std::to_string(static_cast<int>(density)) + ", built in " +
+                         std::to_string(ms) + " ms");
 }
 
 ImFont *fonts_get(font_role _role) {

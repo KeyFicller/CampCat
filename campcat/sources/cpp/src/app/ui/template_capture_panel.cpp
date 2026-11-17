@@ -1,6 +1,9 @@
 #include "app/ui/template_capture_panel.h"
 
 #include "app/ui/buttons.h"
+#include "app/ui/icons.h"
+#include "app/ui/theme.h"
+#include "app/ui/widgets.h"
 #include "ccat_driver/ccat_script_profile.h"
 #include "core/adb_client.h"
 #include "core/app_config.h"
@@ -249,19 +252,6 @@ void clear_capture() {
     release_tex();
 }
 
-/// The toolkit ships no help marker; this is the one from its own demo. A
-/// dimmed question mark whose answer appears on hover, wrapped, because these
-/// answers are a sentence rather than a word.
-void help_marker(const char *_text) {
-    ImGui::TextDisabled("(?)");
-    if (ImGui::BeginItemTooltip()) {
-        ImGui::PushTextWrapPos(ImGui::GetFontSize() * 35.0F);
-        ImGui::TextUnformatted(_text);
-        ImGui::PopTextWrapPos();
-        ImGui::EndTooltip();
-    }
-}
-
 /// What the panel used to print above and below the image, merged: both are
 /// reference rather than instruction, so neither needs the line it cost.
 constexpr char k_help_text[] =
@@ -285,73 +275,47 @@ void template_capture_panel_draw(campcat::app_config &_cfg,
         return;
     }
 
-    // No title and no separator here: the caller draws this inside the
-    // "Screenshot crop (ADB)" collapsing header, which already names it.
-    if (_disable_capture) {
-        ImGui::BeginDisabled();
+    // No title here: the caller draws this inside the "Template Maker" card,
+    // which already names it.
+    using namespace campcat::app;
+    const std::string save_label = std::string(icon::k_save) + "  Save##adb_tpl";
+    const std::string clear_label = std::string(icon::k_clear) + "  Clear##adb_tpl";
+    ImGui::BeginDisabled(_disable_capture);
+    if (button((std::string(icon::k_camera) + "  Capture##adb_tpl").c_str())) {
+        capture_clicked(_cfg);
     }
-    WITH_FONT(bold, {
-        if (campcat::app::button("Capture##adb_tpl")) {
-            capture_clicked(_cfg);
-        }
-    })
-    if (_disable_capture) {
-        ImGui::EndDisabled();
-    }
+    ImGui::EndDisabled();
 
     // Read after Capture, so a click that drops the old selection also drops
     // the Save enabled by it.
     const bool can_save = !_save_locked && g_has_sel && !g_bgr.empty();
-    ImGui::SameLine();
-    if (!can_save) {
-        ImGui::BeginDisabled();
+    same_line_if_fits(button_width(save_label.c_str()));
+    ImGui::BeginDisabled(!can_save);
+    const bool save_crop = button(save_label.c_str(), ImVec2(), button_kind::primary);
+    ImGui::EndDisabled();
+
+    same_line_if_fits(button_width(clear_label.c_str()));
+    if (button(clear_label.c_str(), ImVec2(), button_kind::ghost)) {
+        clear_capture();
     }
-    bool save_crop = false;
-    save_crop = campcat::app::button("Save##adb_tpl");
-    if (!can_save) {
-        ImGui::EndDisabled();
-    }
 
-    ImGui::SameLine();
-    WITH_FONT(bold, {
-        if (campcat::app::button("Clear##adb_tpl")) {
-            clear_capture();
-        }
-    })
+    same_line_if_fits(ImGui::GetFrameHeight());
+    icon_button("##adb_tpl_help", icon::k_help, k_help_text);
 
-    ImGui::SameLine();
-    help_marker(k_help_text);
-
-    // The field's own name, moved out of the row so the name stops competing
-    // with the value for it.
+    form_label("File name");
     ImGui::InputText("##adb_tpl_name", &g_filename);
-    ImGui::SameLine();
-    help_marker("Template File Name");
-
-    // The file name and the shape are two decisions, not one row of controls.
-    ImGui::Spacing();
+    focus_ring(ImGui::GetItemRectMin(), ImGui::GetItemRectMax(),
+               ImGui::GetStyle().FrameRounding, ImGui::IsItemActive());
 
     // Switching shape drops the selection: what was drawn as one shape must not
     // be saved as the other.
-    if (ImGui::RadioButton("Box##adb_tpl_shape",
-                           g_shape == capture_shape::box)) {
-        g_shape = capture_shape::box;
+    static const char *const k_shapes[] = {"Box", "Circle", "Diamond"};
+    int shape_index = static_cast<int>(g_shape);
+    form_label("Shape");
+    if (segmented("##shape", k_shapes, 3, &shape_index)) {
+        g_shape = static_cast<capture_shape>(shape_index);
         g_has_sel = false;
     }
-    ImGui::SameLine();
-    if (ImGui::RadioButton("Circle##adb_tpl_shape",
-                           g_shape == capture_shape::circle)) {
-        g_shape = capture_shape::circle;
-        g_has_sel = false;
-    }
-    ImGui::SameLine();
-    if (ImGui::RadioButton("Diamond##adb_tpl_shape",
-                           g_shape == capture_shape::diamond)) {
-        g_shape = capture_shape::diamond;
-        g_has_sel = false;
-    }
-    ImGui::SameLine();
-    help_marker("Shape to save the crop as.");
 
     if (g_tex == 0 || g_bgr.empty()) {
         ImGui::TextDisabled("(no screenshot)");
@@ -366,9 +330,13 @@ void template_capture_panel_draw(campcat::app_config &_cfg,
     const ImVec2 uv0(0.0f, 0.0f);
     const ImVec2 uv1(1.0f, 1.0f);
 
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, theme::k_surface_inset);
+    ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 8.0F);
     ImGui::BeginChild("adb_tpl_scroll", ImVec2(0.0f, k_viewport_h),
                       ImGuiChildFlags_Borders,
                       ImGuiWindowFlags_HorizontalScrollbar);
+    ImGui::PopStyleVar();
+    ImGui::PopStyleColor();
 
     ImGui::Image(static_cast<ImTextureID>(static_cast<uintptr_t>(g_tex)), disp,
                  uv0, uv1);
@@ -424,8 +392,8 @@ void template_capture_panel_draw(campcat::app_config &_cfg,
 
     ImDrawList *dl = ImGui::GetWindowDrawList();
     if (g_dragging || g_has_sel) {
-        constexpr ImU32 k_fill = IM_COL32(80, 200, 255, 55);
-        constexpr ImU32 k_stroke = IM_COL32(255, 220, 80, 255);
+        const ImU32 fill = ImGui::GetColorU32(theme::rgb(0x7EA6FF, 0.20F));
+        const ImU32 stroke = ImGui::GetColorU32(theme::k_accent_fg);
         // One screen pixel per image pixel, so the radius converts by the same
         // factor the position does.
         const float scale =
@@ -437,8 +405,8 @@ void template_capture_panel_draw(campcat::app_config &_cfg,
                               ? drag_radius(cx, cy, g_cur_ix, g_cur_iy)
                               : g_sel_r;
             const ImVec2 centre = screen_from_img_px(cx, cy, img_min, img_max);
-            dl->AddCircleFilled(centre, r * scale, k_fill);
-            dl->AddCircle(centre, r * scale, k_stroke, 0, 2.0f);
+            dl->AddCircleFilled(centre, r * scale, fill);
+            dl->AddCircle(centre, r * scale, stroke, 0, 2.0f);
         } else if (g_shape == capture_shape::diamond) {
             const int cx = g_dragging ? g_anchor_ix : g_sel_cx;
             const int cy = g_dragging ? g_anchor_iy : g_sel_cy;
@@ -454,8 +422,8 @@ void template_capture_panel_draw(campcat::app_config &_cfg,
                 screen_from_img_px(cx, cy + ry, img_min, img_max);
             const ImVec2 left =
                 screen_from_img_px(cx - rx, cy, img_min, img_max);
-            dl->AddQuadFilled(top, right, bottom, left, k_fill);
-            dl->AddQuad(top, right, bottom, left, k_stroke, 2.0f);
+            dl->AddQuadFilled(top, right, bottom, left, fill);
+            dl->AddQuad(top, right, bottom, left, stroke, 2.0f);
         } else {
             const int x0 = g_dragging ? g_anchor_ix : g_sel_x0;
             const int y0 = g_dragging ? g_anchor_iy : g_sel_y0;
@@ -467,8 +435,8 @@ void template_capture_panel_draw(campcat::app_config &_cfg,
             const ImVec2 s1 = screen_from_img_px(std::max(x0, x1),
                                                  std::max(y0, y1), img_min,
                                                  img_max);
-            dl->AddRectFilled(s0, s1, k_fill);
-            dl->AddRect(s0, s1, k_stroke, 0.0f, 0, 2.0f);
+            dl->AddRectFilled(s0, s1, fill);
+            dl->AddRect(s0, s1, stroke, 0.0f, 0, 2.0f);
         }
     }
 

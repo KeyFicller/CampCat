@@ -1,4 +1,5 @@
 #include "app/ui/ccat_highlight.h"
+#include "app/ui/theme.h"
 
 #include <cctype>
 #include <string>
@@ -155,50 +156,30 @@ const TextEditor::LanguageDefinition &ccat_language() {
 const TextEditor::Palette &ccat_palette() {
     static const TextEditor::Palette palette = [] {
         TextEditor::Palette p{};
-        p[static_cast<int>(PaletteIndex::Default)] =
-            IM_COL32(0xD4, 0xD8, 0xDC, 0xFF);
-        p[static_cast<int>(PaletteIndex::Keyword)] =
-            IM_COL32(0x7C, 0xB2, 0xE8, 0xFF);
-        p[static_cast<int>(PaletteIndex::Number)] =
-            IM_COL32(0xE0, 0xA0, 0x6A, 0xFF);
-        p[static_cast<int>(PaletteIndex::String)] =
-            IM_COL32(0x9E, 0xC9, 0x7A, 0xFF);
-        p[static_cast<int>(PaletteIndex::CharLiteral)] =
-            IM_COL32(0x9E, 0xC9, 0x7A, 0xFF);
-        p[static_cast<int>(PaletteIndex::Punctuation)] =
-            IM_COL32(0x9A, 0xA4, 0xAE, 0xFF);
-        p[static_cast<int>(PaletteIndex::Preprocessor)] =
-            IM_COL32(0xC5, 0x92, 0xD8, 0xFF);
-        p[static_cast<int>(PaletteIndex::Identifier)] =
-            IM_COL32(0xD4, 0xD8, 0xDC, 0xFF);
-        p[static_cast<int>(PaletteIndex::KnownIdentifier)] =
-            IM_COL32(0xE8, 0xD8, 0x9A, 0xFF);
-        p[static_cast<int>(PaletteIndex::PreprocIdentifier)] =
-            IM_COL32(0xC5, 0x92, 0xD8, 0xFF);
-        p[static_cast<int>(PaletteIndex::Comment)] =
-            IM_COL32(0x76, 0x80, 0x88, 0xFF);
-        p[static_cast<int>(PaletteIndex::MultiLineComment)] =
-            IM_COL32(0x76, 0x80, 0x88, 0xFF);
-        // The child background of the surrounding panel, so the editor does not
-        // read as a hole punched in the window.
-        p[static_cast<int>(PaletteIndex::Background)] =
-            IM_COL32(0x1C, 0x1F, 0x21, 0xFF);
-        p[static_cast<int>(PaletteIndex::Cursor)] =
-            IM_COL32(0xD4, 0xD8, 0xDC, 0xFF);
-        p[static_cast<int>(PaletteIndex::Selection)] =
-            IM_COL32(0x33, 0x4C, 0x5E, 0xFF);
-        p[static_cast<int>(PaletteIndex::ErrorMarker)] =
-            IM_COL32(0xE0, 0x5A, 0x5A, 0xFF);
-        p[static_cast<int>(PaletteIndex::Breakpoint)] =
-            IM_COL32(0xE0, 0x5A, 0x5A, 0xFF);
-        p[static_cast<int>(PaletteIndex::LineNumber)] =
-            IM_COL32(0x66, 0x70, 0x78, 0xFF);
-        p[static_cast<int>(PaletteIndex::CurrentLineFill)] =
-            IM_COL32(0x24, 0x28, 0x2C, 0xFF);
-        p[static_cast<int>(PaletteIndex::CurrentLineFillInactive)] =
-            IM_COL32(0x1F, 0x23, 0x26, 0xFF);
-        p[static_cast<int>(PaletteIndex::CurrentLineEdge)] =
-            IM_COL32(0x33, 0x4C, 0x5E, 0xFF);
+        const auto set = [&p](PaletteIndex _i, const ImVec4 &_c) {
+            p[static_cast<int>(_i)] = ImGui::ColorConvertFloat4ToU32(_c);
+        };
+        set(PaletteIndex::Default, theme::k_text);
+        set(PaletteIndex::Keyword, theme::k_syntax_keyword);
+        set(PaletteIndex::Number, theme::k_syntax_number);
+        set(PaletteIndex::String, theme::k_syntax_string);
+        set(PaletteIndex::CharLiteral, theme::k_syntax_string);
+        set(PaletteIndex::Punctuation, theme::k_text_2);
+        set(PaletteIndex::Preprocessor, theme::k_syntax_decl);
+        set(PaletteIndex::Identifier, theme::k_text);
+        set(PaletteIndex::KnownIdentifier, theme::k_syntax_builtin);
+        set(PaletteIndex::PreprocIdentifier, theme::k_syntax_decl);
+        set(PaletteIndex::Comment, theme::k_text_3);
+        set(PaletteIndex::MultiLineComment, theme::k_text_3);
+        set(PaletteIndex::Background, theme::k_surface_inset);
+        set(PaletteIndex::Cursor, theme::k_text);
+        set(PaletteIndex::Selection, theme::rgb(0x7EA6FF, 0.30F));
+        set(PaletteIndex::ErrorMarker, theme::k_danger);
+        set(PaletteIndex::Breakpoint, theme::k_danger);
+        set(PaletteIndex::LineNumber, theme::k_text_3);
+        set(PaletteIndex::CurrentLineFill, theme::k_surface_2);
+        set(PaletteIndex::CurrentLineFillInactive, theme::k_surface_1);
+        set(PaletteIndex::CurrentLineEdge, theme::k_border);
         return p;
     }();
     return palette;

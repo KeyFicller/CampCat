@@ -1,9 +1,11 @@
 #include "app/ui/console_panel.h"
 
 #include "app/shell_state.h"
-#include "app/ui/activity_status.h"
 #include "app/ui/fonts.h"
+#include "app/ui/icons.h"
 #include "app/ui/prompt_input.h"
+#include "app/ui/theme.h"
+#include "app/ui/widgets.h"
 #include "ccat_driver/ccat_script_profile.h"
 #include "core/script/ccat_parser.h"
 #include "core/script/ccat_repl.h"
@@ -19,22 +21,30 @@ void console_panel_draw(campcat::shell_state &_st,
     // Only this page uses them, so they live here rather than in shell_state.
     static campcat::ccat_lang::CcatRepl console_repl;
     static std::string console_input;
+    // Last frame's: the terminal's border is drawn before the input exists.
+    static bool input_active = false;
+    using namespace campcat::app;
 
-    ImGui::PushStyleColor(ImGuiCol_Text,
-                          ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
-    ImGui::TextWrapped(
-        "Interactive .ccat console. Multiline uses ... until braces/parens "
-        "balance. Disabled while a cycle is running.");
-    ImGui::PopStyleColor();
-    ImGui::Spacing();
+    WITH_FONT(small, {
+        ImGui::TextColored(theme::k_text_3, "Interactive .ccat console. "
+                                            "Multiline continues until braces balance.");
+    });
 
-    // Room for exactly the rows drawn below it, so the prompt sits at the
-    // bottom the way the LLM page's input does.
-    const float below =
-        ImGui::GetFrameHeightWithSpacing() +
-        (_busy_now ? ImGui::GetTextLineHeightWithSpacing() : 0.0F);
-    ImGui::BeginChild("console_history", ImVec2(0.0F, -below),
-                      ImGuiChildFlags_Borders);
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, theme::k_surface_inset);
+    ImGui::PushStyleColor(ImGuiCol_Border, input_active ? theme::k_accent_fg
+                                                        : theme::k_border_strong);
+    ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, theme::k_radius_card);
+    ImGui::BeginChild("console_term", ImVec2(0.0F, 0.0F), ImGuiChildFlags_Borders);
+    ImGui::PopStyleVar();
+    ImGui::PopStyleColor(2);
+
+    // Room for exactly the input row under it, so the prompt sits at the
+    // bottom the way the LLM page's input does. The rule between them is
+    // drawn in the gap, not as an item.
+    const float row_h = fonts_get(font_role::mono)->FontSize +
+                        ImGui::GetStyle().FramePadding.y * 2.0F;
+    const float below = row_h + ImGui::GetStyle().ItemSpacing.y;
+    ImGui::BeginChild("console_history", ImVec2(0.0F, -below));
     // The same affordance as the log and the LLM panes: right-click the output
     // rather than a button beside the prompt. Clearing brings back the empty
     // state below, so it is only offered when there is output to drop.
@@ -46,63 +56,70 @@ void console_panel_draw(campcat::shell_state &_st,
         }
         ImGui::EndPopup();
     }
-    // An empty bordered box reads as a drawing glitch rather than as "no
-    // output yet". Offset and centred the way the LLM log places its own
-    // empty state, so the two panes read the same at rest.
     if (console_repl.history.empty()) {
-        const char *title = "No output yet";
-        const char *hint = "Send some ccat script code for execution.";
-        const ImVec2 avail = ImGui::GetContentRegionAvail();
-        ImGui::SetCursorPosY(ImGui::GetCursorPosY() + avail.y * 0.4F);
-        WITH_FONT(bold, {
-            ImGui::SetCursorPosX(
-                ImGui::GetCursorPosX() +
-                std::max(0.0F,
-                         (avail.x - ImGui::CalcTextSize(title).x) * 0.5F));
-            ImGui::TextUnformatted(title);
-        });
-        ImGui::SetCursorPosX(
-            ImGui::GetCursorPosX() +
-            std::max(0.0F, (avail.x - ImGui::CalcTextSize(hint).x) * 0.5F));
-        ImGui::TextDisabled("%s", hint);
+        empty_state(icon::k_console, "No output yet",
+                    "Send some ccat script code for execution.");
     }
-    for (const auto &line : console_repl.history) {
-        ImGui::TextUnformatted(line.c_str());
-    }
+    WITH_FONT(mono, {
+        for (const auto &line : console_repl.history) {
+            ImGui::TextUnformatted(line.c_str());
+        }
+    });
     if (ImGui::GetScrollY() >= ImGui::GetScrollMaxY()) {
         ImGui::SetScrollHereY(1.0F);
     }
     ImGui::EndChild();
 
-    if (_busy_now) {
-        ImGui::TextColored(
-            campcat::activity_color(campcat::activity_level::waiting),
-            "cycle running - console locked");
-        ImGui::BeginDisabled();
+    {
+        // Edge to edge across the terminal, through its padding.
+        const ImVec2 p = ImGui::GetWindowPos();
+        const float x1 = p.x + ImGui::GetWindowWidth();
+        const float y = ImGui::GetCursorScreenPos().y - ImGui::GetStyle().ItemSpacing.y * 0.5F;
+        ImGui::PushClipRect(p, ImVec2(x1, p.y + ImGui::GetWindowHeight()), false);
+        ImGui::GetWindowDrawList()->AddLine(ImVec2(p.x, y), ImVec2(x1, y),
+                                            ImGui::GetColorU32(theme::k_border));
+        ImGui::PopClipRect();
     }
 
-    ImGui::AlignTextToFramePadding();
-    ImGui::TextUnformatted(console_repl.prompt());
-    ImGui::SameLine();
-    // The whole width now: the Clear button that used to sit here is the
-    // context menu on the output above.
-    ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
-    const bool submit = prompt_input_text(
-        "##console_in", "cwd → print the console directory", &console_input);
-    // Must run immediately after InputText; later widgets would steal -1.
-    if (submit && !_busy_now) {
-        ImGui::SetKeyboardFocusHere(-1);
-    }
+    bool submit = false;
+    WITH_FONT(mono, {
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextColored(theme::k_accent_fg, "%s", console_repl.prompt());
+        ImGui::SameLine();
+        if (_busy_now) {
+            tag("Cycle running \xE2\x80\x94 console locked", theme::k_warning);
+            ImGui::SameLine();
+            ImGui::BeginDisabled();
+        }
+        // The whole width now: the Clear button that used to sit here is the
+        // context menu on the output above.
+        ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
+        ImGui::PushStyleColor(ImGuiCol_FrameBg, ImVec4());
+        ImGui::PushStyleColor(ImGuiCol_FrameBgHovered, ImVec4());
+        ImGui::PushStyleColor(ImGuiCol_FrameBgActive, ImVec4());
+        ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 0.0F);
+        submit = prompt_input_text("##console_in", "cwd → print the console directory",
+                                   &console_input);
+        input_active = ImGui::IsItemActive();
+        // Must run immediately after InputText; later widgets would steal -1.
+        if (submit && !_busy_now) {
+            ImGui::SetKeyboardFocusHere(-1);
+        }
+        ImGui::PopStyleVar();
+        ImGui::PopStyleColor(3);
 
-    // Drops the half-typed multiline buffer, not the output: `clear()` is named
-    // for that buffer alone. The menu item above is what clears the output.
-    if (ImGui::IsKeyPressed(ImGuiKey_Escape)) {
-        console_repl.clear();
-    }
+        // Drops the half-typed multiline buffer, not the output: `clear()` is
+        // named for that buffer alone. The menu item above is what clears the
+        // output.
+        if (ImGui::IsKeyPressed(ImGuiKey_Escape)) {
+            console_repl.clear();
+        }
 
-    if (_busy_now) {
-        ImGui::EndDisabled();
-    }
+        if (_busy_now) {
+            ImGui::EndDisabled();
+        }
+    });
+    ImGui::EndChild();
 
     if (submit && !_busy_now) {
         const auto fr = console_repl.feed_line(console_input);

@@ -288,10 +288,11 @@ target_link_libraries(campcat_core PUBLIC
   cppreflect::mcp
 )
 
-# The IME candidate-window fix is Objective-C++, so it stays Apple-only.
+# The Cocoa glue (IME caret, title bar) is Objective-C++, so it stays Apple-only.
 set(campcat_platform_sources)
 if(APPLE)
-  list(APPEND campcat_platform_sources campcat/sources/cpp/src/app/ui/macos_ime.mm)
+  list(APPEND campcat_platform_sources campcat/sources/cpp/src/app/ui/macos_ime.mm
+                                       campcat/sources/cpp/src/app/ui/macos_window.mm)
 endif()
 
 add_executable(campcat
@@ -307,8 +308,9 @@ add_executable(campcat
   campcat/sources/cpp/src/app/ui/graph_panel.cpp
   campcat/sources/cpp/src/app/ui/prompt_input.cpp
   campcat/sources/cpp/src/app/ui/fonts.cpp
+  campcat/sources/cpp/src/app/ui/theme.cpp
+  campcat/sources/cpp/src/app/ui/widgets.cpp
   campcat/sources/cpp/src/app/ui/gl_texture.cpp
-  campcat/sources/cpp/src/app/ui/icon_texture.cpp
   ${campcat_platform_sources}
 )
 target_include_directories(campcat PRIVATE

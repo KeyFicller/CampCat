@@ -34,6 +34,19 @@ void llm_panel_shutdown_finish();
  */
 void llm_panel_draw_panel(campcat::shell_state &_st, campcat::app_config &_cfg);
 
+/**
+ * @brief Register the page's own imgui.ini section (whether the skill index is
+ * folded away).
+ *
+ * Call once after `ImGui::CreateContext` and before the first `NewFrame`: the
+ * ini is read on that frame, and a section with no handler yet is skipped.
+ */
+void llm_panel_init_settings();
+
+/// The button that folds the skill index beside the chat away, or brings it
+/// back. Drawn by the shell's workspace toolbar on the LLM page.
+void llm_panel_draw_index_toggle();
+
 /// Process worker results and idle memory even while another page is selected.
 void llm_panel_tick(campcat::shell_state &_st, const campcat::app_config &_cfg,
                     bool _on_llm_page);

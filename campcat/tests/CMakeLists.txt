@@ -4,6 +4,8 @@ add_executable(test_campcat_core cpp/test_approval_gate.cpp
                                  cpp/test_automation_log.cpp
                                  cpp/test_box_snap.cpp
                                  cpp/test_bundle_store.cpp
+                                 cpp/test_chat_text.cpp
+                                 cpp/test_font_density.cpp
                                  cpp/test_frame_store.cpp
                                  cpp/test_device_task_lease.cpp
                                  cpp/test_llm_controller.cpp
@@ -20,6 +22,7 @@ add_executable(test_campcat_core cpp/test_approval_gate.cpp
                                  cpp/test_llm_host.cpp
                                  cpp/test_llm_protocol.cpp
                                  cpp/test_llm_prompt_queue.cpp
+                                 cpp/test_log_stamp.cpp
                                  cpp/test_mumu_wait.cpp
                                  cpp/test_recents_packages.cpp
                                  cpp/test_region_record.cpp

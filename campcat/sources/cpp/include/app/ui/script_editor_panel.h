@@ -7,10 +7,6 @@ namespace campcat {
 struct workspace_selection;
 }
 
-/// Width of the script list column, which sits beside the conversation rather
-/// than taking height off it.
-inline constexpr float k_script_list_w = 180.0F;
-
 /// Payload type the script list drags a row under, and the LLM prompt box takes
 /// it from. ImGui matches drag payloads by this string, so both sides must use
 /// this one constant, and it must not start with '_' (ImGui reserves those).

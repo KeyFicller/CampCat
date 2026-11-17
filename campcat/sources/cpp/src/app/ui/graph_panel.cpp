@@ -3,7 +3,10 @@
 
 #include "app/ui/buttons.h"
 #include "app/ui/gl_texture.h"
+#include "app/ui/icons.h"
 #include "app/ui/script_editor_panel.h"
+#include "app/ui/theme.h"
+#include "app/ui/widgets.h"
 #include "core/app_config.h"
 #include "core/llm/llm_tools.h"
 #include "core/script/ccat_bundle.h"
@@ -32,13 +35,16 @@
 namespace {
 
 /// The canvas's metrics, in canvas units, at zoom 1. GraphEditor lays a node
-/// out in these units and paints a fixed 20px title band across its top, so
-/// `k_header_h` is that band plus the 3px the body is inset by; together with
-/// the padding they add up to a body that fits its lines exactly.
+/// out in these units and paints a fixed 20px title band across its top, then
+/// insets the body by the corner rounding on every side, so `k_header_h` is
+/// that band plus the inset; together with the padding they add up to a body
+/// that fits its lines exactly.
 constexpr float k_node_w = 240.0F;
-constexpr float k_header_h = 23.0F;
+constexpr float k_title_band = 20.0F;
+constexpr float k_node_rounding = 8.0F;
+constexpr float k_header_h = k_title_band + k_node_rounding;
 constexpr float k_text_pad = 8.0F;
-constexpr float k_body_pad = 3.0F;
+constexpr float k_body_pad = k_node_rounding;
 constexpr float k_line_h = 19.0F;
 constexpr float k_node_min_h = 72.0F;
 constexpr float k_gap_x = 88.0F;
@@ -56,21 +62,26 @@ constexpr float k_curve_pull = 50.0F;
 constexpr float k_return_drop = 36.0F;
 constexpr float k_return_pitch = 28.0F;
 
-const ImU32 k_ink = IM_COL32(216, 222, 229, 255);
+namespace theme = campcat::app::theme;
+
+/// ImGuizmo takes ImU32, not ImVec4. Pure arithmetic, so it is safe in static
+/// initializers before the ImGui context exists.
+ImU32 u32(const ImVec4 &_c) { return ImGui::ColorConvertFloat4ToU32(_c); }
+
+const ImU32 k_ink = u32(theme::k_text);
 /// An edge label sits on a raised chip: the canvas colour behind it would let
 /// a crossing link run straight through the word.
-const ImU32 k_label_bg = IM_COL32(30, 34, 40, 235);
-const ImU32 k_label_edge = IM_COL32(60, 66, 76, 255);
+const ImU32 k_label_bg = u32(theme::k_surface_3);
+const ImU32 k_label_edge = u32(theme::k_border_strong);
 /// A line reporting something the anchor lacks.
-const ImU32 k_bad = IM_COL32(224, 106, 106, 255);
+const ImU32 k_bad = u32(theme::k_danger);
 
-/// The shell's accent and its amber, as ImGuizmo takes them (ImU32, not
-/// ImVec4). The amber is the same one the status chips use for "waiting on the
-/// human", which is what a popup is.
-const ImU32 k_accent = IM_COL32(62, 102, 135, 255);
-const ImU32 k_amber = IM_COL32(214, 178, 92, 255);
+/// The amber is the same one the status chips use for "waiting on the human",
+/// which is what a popup is.
+const ImU32 k_accent = u32(theme::k_accent);
+const ImU32 k_amber = u32(theme::k_warning);
 /// The edge or anchor whose script the LLM is inside right now.
-const ImU32 k_run = IM_COL32(118, 196, 146, 255);
+const ImU32 k_run = u32(theme::k_success);
 
 const char *k_in_names[] = {"in"};
 const char *k_out_names[] = {"out"};
@@ -80,14 +91,19 @@ const char *k_out_names[] = {"out"};
 /// rejects an edge that starts or ends on one), so they have none.
 constexpr std::size_t k_page_template = 0;
 constexpr std::size_t k_loose_template = 1;
+/// GraphEditor draws a node's links in its template's header colour, so the
+/// templates keep the full colours and `CustomDraw` paints the header band in
+/// `k_header_fill`, a muted mix of them.
 const GraphEditor::Template k_templates[] = {
-    {k_accent, IM_COL32(26, 29, 33, 255), IM_COL32(34, 38, 44, 255), 1,
-     k_in_names, nullptr, 1, k_out_names, nullptr},
-    {k_amber, IM_COL32(33, 30, 25, 255), IM_COL32(42, 38, 32, 255), 0, nullptr,
+    {k_accent, u32(theme::k_surface_2), u32(theme::k_surface_3), 1, k_in_names,
+     nullptr, 1, k_out_names, nullptr},
+    {k_amber, u32(theme::k_surface_2), u32(theme::k_surface_3), 0, nullptr,
      nullptr, 0, nullptr, nullptr},
 };
-
-const ImVec4 k_err_col = ImVec4(0.95F, 0.42F, 0.42F, 1.0F);
+const ImU32 k_header_fill[] = {
+    u32(theme::mix(theme::k_surface_3, theme::k_accent, 0.35F)),
+    u32(theme::mix(theme::k_surface_3, theme::k_warning, 0.35F)),
+};
 
 using campcat::ccat_lang::anchor_def;
 using campcat::ccat_lang::anchor_kind;
@@ -417,6 +433,24 @@ void graph_view_delegate::place(std::string_view _root, float _gap_x) {
 
 void graph_view_delegate::CustomDraw(ImDrawList *_draw_list, ImRect _rect,
                                      GraphEditor::NodeIndex _i) {
+    // GraphEditor writes the title in black, which the muted header swallows,
+    // so the band is painted again with the title in the text colour. The
+    // band and the body inset do not scale with zoom, so neither does this.
+    const ImVec2 band_min(_rect.Min.x - k_node_rounding,
+                          _rect.Min.y - k_header_h);
+    const ImVec2 band_max(_rect.Max.x + k_node_rounding,
+                          _rect.Min.y - k_node_rounding);
+    _draw_list->AddRectFilled(band_min, band_max,
+                              k_header_fill[m_nodes[_i].mTemplateIndex],
+                              k_node_rounding, ImDrawFlags_RoundCornersTop);
+    ImFont *bold = campcat::app::fonts_get(campcat::app::font_role::bold);
+    _draw_list->PushClipRect(band_min, band_max, true);
+    _draw_list->AddText(bold, bold->FontSize,
+                        ImVec2(_rect.Min.x + k_text_pad,
+                               band_min.y + (k_title_band - bold->FontSize) * 0.5F),
+                        k_ink, m_nodes[_i].mName);
+    _draw_list->PopClipRect();
+
     _draw_list->PushClipRect(_rect.Min, _rect.Max, true);
     ImFont *font = campcat::app::fonts_get(campcat::app::font_role::small);
     const std::vector<body_line> &lines = m_body[_i];
@@ -460,18 +494,19 @@ void graph_view_delegate::CustomDraw(ImDrawList *_draw_list, ImRect _rect,
 const GraphEditor::Options &view_options() {
     static const GraphEditor::Options options = [] {
         GraphEditor::Options o;
-        o.mBackgroundColor = IM_COL32(18, 20, 23, 255);
-        o.mGridColor = IM_COL32(255, 255, 255, 12);
-        o.mGridColor2 = IM_COL32(255, 255, 255, 24);
+        o.mBackgroundColor = u32(theme::k_bg_app);
+        o.mGridColor = u32(theme::rgb(0xFFFFFF, 0.04F));
+        o.mGridColor2 = u32(theme::rgb(0xFFFFFF, 0.07F));
         // The defaults draw a 6px border around every node, which on a 240px
         // card is a frame rather than an edge.
         o.mBorderThickness = 1.5F;
         o.mBorderSelectionThickness = 3.0F;
-        o.mNodeBorderColor = IM_COL32(60, 66, 76, 255);
-        o.mSelectedNodeBorderColor = IM_COL32(97, 153, 202, 255);
-        o.mQuadSelection = IM_COL32(97, 153, 202, 40);
-        o.mQuadSelectionBorder = IM_COL32(97, 153, 202, 200);
-        o.mDefaultSlotColor = IM_COL32(150, 160, 172, 255);
+        o.mRounding = k_node_rounding;
+        o.mNodeBorderColor = u32(theme::k_border_strong);
+        o.mSelectedNodeBorderColor = u32(theme::k_accent_fg);
+        o.mQuadSelection = u32(theme::rgb(0x7EA6FF, 0.16F));
+        o.mQuadSelectionBorder = u32(theme::rgb(0x7EA6FF, 0.8F));
+        o.mDefaultSlotColor = u32(theme::k_text_2);
         o.mFrameFocus = IM_COL32(0, 0, 0, 0); // the page has no focus to show
         o.mLineThickness = 3.0F;
         o.mGridSize = 40.0F;
@@ -549,10 +584,13 @@ void draw_template_preview(const std::filesystem::path &_path) {
     if (preview->tex == 0) {
         ImGui::TextUnformatted("unreadable");
     } else {
-        ImGui::Image(
-            static_cast<ImTextureID>(static_cast<uintptr_t>(preview->tex)),
-            preview_size(preview->w, preview->h), ImVec2(0.0F, 0.0F),
-            ImVec2(1.0F, 1.0F));
+        const ImVec2 size = preview_size(preview->w, preview->h);
+        const ImVec2 pos = ImGui::GetCursorScreenPos();
+        ImGui::Dummy(size);
+        ImGui::GetWindowDrawList()->AddImageRounded(
+            static_cast<ImTextureID>(static_cast<uintptr_t>(preview->tex)), pos,
+            pos + size, ImVec2(0.0F, 0.0F), ImVec2(1.0F, 1.0F), IM_COL32_WHITE,
+            8.0F);
         ImGui::Text("%s  %dx%d", name.c_str(), preview->w, preview->h);
     }
 }
@@ -744,7 +782,7 @@ void draw_edge_labels(ImDrawList *_dl, ImVec2 _origin, ImVec2 _canvas,
         if (visible.GetWidth() <= 0.0F || visible.GetHeight() <= 0.0F) {
             continue;
         }
-        const float radius = 3.0F * factor;
+        const float radius = box.GetHeight() * 0.5F;
         _dl->AddRectFilled(box.Min, box.Max,
                            edge.script == g_browsed_bundle ? k_accent
                                                            : k_label_bg,
@@ -789,27 +827,36 @@ void graph_panel_draw(const campcat::app_config &_cfg_view,
     if (_selection.graph.empty()) {
         g_loaded_name.clear();
         g_focused_bundle.clear();
-        ImGui::TextWrapped("Choose a graph in the workspace toolbar.");
+        campcat::app::empty_state(campcat::app::icon::k_graph, "No graph selected",
+                                  "Choose a graph in the workspace toolbar.");
         return;
     }
     if (g_loaded_name != _selection.graph || g_loaded_home != home) {
         load_graph(home, _selection.graph);
     }
-    if (campcat::app::button("Reload")) {
+    using campcat::app::button;
+    using campcat::app::button_kind;
+    using campcat::app::button_width;
+    using campcat::app::same_line_if_fits;
+    namespace icon = campcat::app::icon;
+    const std::string reload_label = std::string(icon::k_reload) + "  Reload";
+    const std::string fit_label = std::string(icon::k_fit) + "  Fit graph";
+    const std::string focus_label = std::string(icon::k_focus) + "  Focus selected";
+    if (button(reload_label.c_str(), ImVec2(), button_kind::ghost)) {
         load_graph(home, _selection.graph);
     }
-    ImGui::SameLine();
-    if (campcat::app::button("Fit graph")) {
+    same_line_if_fits(button_width(fit_label.c_str()));
+    if (button(fit_label.c_str(), ImVec2(), button_kind::ghost)) {
         g_need_fit = true;
     }
-    ImGui::SameLine();
+    same_line_if_fits(button_width(focus_label.c_str()));
     ImGui::BeginDisabled(_selection.bundle.empty());
-    if (campcat::app::button("Focus selected")) {
+    if (button(focus_label.c_str(), ImVec2(), button_kind::ghost)) {
         graph_panel_focus_selection();
     }
     ImGui::EndDisabled();
     if (!g_error.empty()) {
-        ImGui::TextColored(k_err_col, "%s", g_error.c_str());
+        ImGui::TextColored(theme::k_danger, "%s", g_error.c_str());
     }
 
     GraphEditor::FitOnScreen fit =

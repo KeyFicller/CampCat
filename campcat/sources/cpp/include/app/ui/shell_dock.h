@@ -24,12 +24,20 @@ inline constexpr ImGuiWindowFlags k_dock_panel_flags =
  * @brief Submit the shell DockSpace, building the default splits when needed.
  *
  * Call from inside the host window, after its menu bar. The first launch and a
- * reset dock CampCat over Log on the left, the five pages as center tabs, and
- * Details plus Editor on the right. The right node stays hidden until one of
- * those windows is actually begun, so a fresh session is the side column plus
- * the page and not an empty tool well.
+ * reset dock CampCat full height on the left, the five pages as center tabs
+ * with Log under them, and Details plus Editor on the right. The right node
+ * stays hidden until one of those windows is actually begun, so a fresh
+ * session is the side column plus the page and not an empty tool well.
  *
  * @param[in] _reset Discard the saved splits and dock the named windows again.
  * @return true when the default layout was applied this frame.
  */
 bool shell_dock_submit(bool _reset);
+
+/**
+ * @brief Make the next `Begin` hide its dock node's tab bar.
+ *
+ * Applied through the window class every frame, so it also takes effect in a
+ * layout saved before it existed.
+ */
+void shell_dock_hide_next_tab_bar();

@@ -3,6 +3,7 @@
 #include <csignal>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <filesystem>
 #include <string>
 #include <system_error>
@@ -16,6 +17,7 @@
 #include <GLFW/glfw3.h>
 
 #include <imgui.h>
+#include <imgui_internal.h>
 #include <imgui_impl_glfw.h>
 #include <imgui_impl_opengl3.h>
 
@@ -24,14 +26,18 @@
 #include "app/ui/console_panel.h"
 #include "app/ui/buttons.h"
 #include "app/ui/graph_panel.h"
+#include "app/ui/icons.h"
 #include "app/ui/llm_panel.h"
 #include "app/ui/log_panel.h"
 #include "app/ui/macos_ime.h"
+#include "app/ui/macos_window.h"
 #include "app/ui/script_editor_panel.h"
 #include "app/ui/script_panel.h"
 #include "app/ui/settings_panel.h"
 #include "app/ui/shell_dock.h"
 #include "app/ui/template_capture_panel.h"
+#include "app/ui/theme.h"
+#include "app/ui/widgets.h"
 #include "ccat_driver/ccat_script_profile.h"
 #include "core/app_config.h"
 #include "core/script/ccat_bundle.h"
@@ -43,49 +49,10 @@
 
 namespace {
 
-/// The four UI faces come from one place (`app/ui/fonts.cpp`); the aliases keep
-/// the call sites below to one line.
-using campcat::app::font_role;
-using campcat::app::fonts_get;
-
 constexpr char k_default_config_relative[] = "config.json";
 
 /// The port `--mcp-http` listens on when none is named.
 constexpr int k_default_mcp_http_port = 8787;
-
-/// The dot diameter and the gap after it, in ems of the current font. The dot
-/// sits on the text's midline, so it reads as a bullet rather than a stray dot.
-constexpr float k_chip_dot_ems = 0.5F;
-constexpr float k_chip_dot_gap = 6.0F;
-/// Between the page chip and the device chip, wide enough that they read as two
-/// answers instead of one long one.
-constexpr float k_chip_gap = 16.0F;
-
-/// Shared by the palette and the nav's selected item, so the shell has one blue.
-const ImVec4 k_accent{0.243F, 0.400F, 0.529F, 1.00F};
-const ImVec4 k_accent_hi{0.302F, 0.478F, 0.616F, 1.00F};
-const ImVec4 k_accent_lo{0.200F, 0.341F, 0.463F, 1.00F};
-
-/// One chip's width: the dot, its gap, then the word.
-float chip_width(const campcat::activity_status &_status) {
-    return ImGui::GetTextLineHeight() * k_chip_dot_ems + k_chip_dot_gap +
-           ImGui::CalcTextSize(_status.label).x;
-}
-
-/// Draw one dot-and-word chip at the cursor. The dot goes on the window's draw
-/// list because ImGui has no bullet widget; the dummy reserves its box so the
-/// word starts where the next chip's measurement expects it to.
-void draw_chip(const campcat::activity_status &_status) {
-    const float dot = ImGui::GetTextLineHeight() * k_chip_dot_ems;
-    const ImVec2 at = ImGui::GetCursorScreenPos();
-    const ImVec4 col = activity_color(_status.level);
-    ImGui::GetWindowDrawList()->AddCircleFilled(
-        ImVec2(at.x + dot * 0.5F, at.y + ImGui::GetTextLineHeight() * 0.5F),
-        dot * 0.5F, ImGui::GetColorU32(col));
-    ImGui::Dummy(ImVec2(dot + k_chip_dot_gap, ImGui::GetTextLineHeight()));
-    ImGui::SameLine(0.0F, 0.0F);
-    ImGui::TextColored(col, "%s", _status.label);
-}
 
 /// The MCP faces take `--graph <name>` anywhere after the mode token. The other
 /// tokens keep their old positions, so `--mcp-http 8787 config.json` and
@@ -164,9 +131,13 @@ workspace_destination draw_workspace_toolbar(campcat::shell_state &_st,
                                 std::min(200.0F, width * 0.4F));
         ImGui::TableSetupColumn("selection", ImGuiTableColumnFlags_WidthStretch, 1.0F);
         ImGui::TableSetupColumn("actions", ImGuiTableColumnFlags_WidthFixed,
-                                campcat::app::button_width("More"));
+                                ImGui::GetFrameHeight());
         ImGui::TableNextRow();
         ImGui::TableSetColumnIndex(0);
+        if (_page == shell_page::Llm) {
+            llm_panel_draw_index_toggle();
+            ImGui::SameLine();
+        }
         ImGui::SetNextItemWidth(-FLT_MIN);
         ImGui::BeginDisabled(_locked);
         if (ImGui::BeginCombo("##graph", selection.graph.empty()
@@ -200,7 +171,7 @@ workspace_destination draw_workspace_toolbar(campcat::shell_state &_st,
             ImGui::SetTooltip("%s", selection.bundle.c_str());
         }
         ImGui::TableSetColumnIndex(2);
-        if (campcat::app::button("More")) {
+        if (campcat::app::icon_button("##more", campcat::app::icon::k_more, "More")) {
             ImGui::OpenPopup("skill_actions");
         }
         if (ImGui::BeginPopup("skill_actions")) {
@@ -280,34 +251,112 @@ const char *page_window_name(shell_page _page) {
     return k_dock_script;
 }
 
-/// Title in the large face, chips on its midline, then the rule under both.
-/// The chips used to sit in the one content header; each page window draws its
-/// own now that more than one page can be on screen.
-void draw_page_heading(const char *_title, const campcat::activity_status &_page,
-                       bool _show_page, const campcat::activity_status &_device) {
-    const ImVec2 title_at = ImGui::GetCursorScreenPos();
-    float title_h = 0.0F;
-    WITH_FONT(title, {
-        title_h = ImGui::GetTextLineHeight();
-        ImGui::TextUnformatted(_title);
-    });
-    WITH_FONT(bold, {
-        const float chips_w =
-            (_show_page ? chip_width(_page) + k_chip_gap : 0.0F) +
-            chip_width(_device);
-        ImGui::SameLine(ImGui::GetWindowContentRegionMax().x - chips_w);
-        const float dy = (title_h - ImGui::GetTextLineHeight()) * 0.5F;
-        const ImVec2 at = ImGui::GetCursorScreenPos();
-        ImGui::SetCursorScreenPos(ImVec2(at.x, at.y + dy));
-        if (_show_page) {
-            draw_chip(_page);
-            ImGui::SameLine(0.0F, k_chip_gap);
+/// The strip under everything: the device, the current page's own activity
+/// (null where the page has none), and the scheduler's next run. Called before
+/// the host window, because it takes its height out of the viewport's work area.
+void draw_status_bar(campcat::shell_state &_st,
+                     const campcat::activity_status &_device,
+                     const campcat::activity_status *_page) {
+    using namespace campcat::app;
+    ImGui::PushFont(fonts_get(font_role::small));
+    // A menu bar is the one row ImGui centres vertically; its height is the
+    // font plus twice this padding, so the padding is what fits it to the bar.
+    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding,
+                        ImVec2(ImGui::GetStyle().FramePadding.x,
+                               (theme::k_status_bar_h - ImGui::GetFontSize()) * 0.5F));
+    ImGui::PushStyleColor(ImGuiCol_MenuBarBg, theme::k_bg_app);
+    ImGui::PushStyleColor(ImGuiCol_WindowBg, theme::k_bg_app);
+    if (ImGui::BeginViewportSideBar("##status", ImGui::GetMainViewport(), ImGuiDir_Down,
+                                    theme::k_status_bar_h,
+                                    ImGuiWindowFlags_NoScrollbar |
+                                        ImGuiWindowFlags_NoSavedSettings |
+                                        ImGuiWindowFlags_MenuBar)) {
+        const ImVec2 p = ImGui::GetWindowPos();
+        ImGui::PushClipRect(p, ImVec2(p.x + ImGui::GetWindowWidth(), p.y + 1.0F), false);
+        ImGui::GetWindowDrawList()->AddLine(p, ImVec2(p.x + ImGui::GetWindowWidth(), p.y),
+                                            ImGui::GetColorU32(theme::k_border));
+        ImGui::PopClipRect();
+        if (ImGui::BeginMenuBar()) {
+            pill(_device);
+            // An emulator boot is both the device's state and the page's, and
+            // the same word twice reads as two things happening.
+            if (_page != nullptr && std::strcmp(_page->label, _device.label) != 0) {
+                ImGui::SameLine(0.0F, 16.0F);
+                pill(*_page);
+            }
+            if (_st.sched.running()) {
+                // The wait left, not the wait spent: `duration_seconds` is this
+                // tick's interval plus its jitter, and what the user wants to
+                // know is when the next cycle fires.
+                char text[64];
+                const auto wp = _st.sched.tick_wait_progress();
+                if (wp.in_wait_phase && wp.duration_seconds > 0) {
+                    const int left = static_cast<int>(
+                        std::max(0.0, wp.duration_seconds - wp.elapsed_seconds));
+                    std::snprintf(text, sizeof(text), "%s  Next run %d:%02d", icon::k_clock,
+                                  left / 60, left % 60);
+                } else {
+                    std::snprintf(text, sizeof(text), "%s  Running a cycle...", icon::k_clock);
+                }
+                const float w = ImGui::CalcTextSize(text).x;
+                const float x = ImGui::GetWindowContentRegionMax().x - w;
+                if (x > ImGui::GetCursorPosX()) {
+                    ImGui::SetCursorPosX(x);
+                }
+                ImGui::TextColored(theme::k_text_2, "%s", text);
+            }
+            ImGui::EndMenuBar();
         }
-        draw_chip(_device);
-        ImGui::SetCursorScreenPos(ImVec2(title_at.x, title_at.y + title_h));
-    });
-    ImGui::Separator();
-    ImGui::Spacing();
+    }
+    ImGui::End();
+    ImGui::PopStyleColor(2);
+    ImGui::PopStyleVar();
+    ImGui::PopFont();
+}
+
+/// The sidebar's head: the accent tile with the cat, then the name.
+void draw_brand() {
+    using namespace campcat::app;
+    constexpr float k_tile = 28.0F;
+    ImFont *title = fonts_get(font_role::title);
+    const ImVec2 at = ImGui::GetCursorScreenPos();
+    ImDrawList *dl = ImGui::GetWindowDrawList();
+    dl->AddRectFilled(at, ImVec2(at.x + k_tile, at.y + k_tile),
+                      ImGui::GetColorU32(theme::k_accent), 8.0F);
+    dl->AddText(title, title->FontSize,
+                icon_origin(title, icon::k_cat, at, ImVec2(at.x + k_tile, at.y + k_tile)),
+                ImGui::GetColorU32(theme::rgb(0xFFFFFF)), icon::k_cat);
+    dl->AddText(title, title->FontSize,
+                ImVec2(at.x + k_tile + 10.0F, at.y + (k_tile - title->FontSize) * 0.5F),
+                ImGui::GetColorU32(theme::k_text), "CampCat");
+    ImGui::Dummy(ImVec2(k_tile, k_tile));
+}
+
+/// One sidebar row: icon then label, left-aligned, with a wash when selected.
+bool nav_item(const char *_glyph, const char *_label, bool _selected) {
+    using namespace campcat::app;
+    constexpr float k_inset = 12.0F;
+    constexpr float k_glyph_gap = 10.0F;
+    const ImVec2 at = ImGui::GetCursorScreenPos();
+    const ImVec2 size(ImGui::GetContentRegionAvail().x, theme::k_sidebar_item_h);
+    ImGui::PushID(_label);
+    const bool clicked = ImGui::InvisibleButton("##nav", size);
+    ImGui::PopID();
+    ImDrawList *dl = ImGui::GetWindowDrawList();
+    if (_selected || ImGui::IsItemHovered()) {
+        dl->AddRectFilled(at, ImVec2(at.x + size.x, at.y + size.y),
+                          ImGui::GetColorU32(_selected ? theme::k_accent_wash
+                                                       : theme::k_surface_3),
+                          8.0F);
+    }
+    const float y = at.y + (size.y - ImGui::GetTextLineHeight()) * 0.5F;
+    dl->AddText(ImVec2(at.x + k_inset, y),
+                ImGui::GetColorU32(_selected ? theme::k_accent_fg : theme::k_text_2), _glyph);
+    ImFont *label_font = fonts_get(_selected ? font_role::bold : font_role::body);
+    dl->AddText(label_font, label_font->FontSize,
+                ImVec2(at.x + k_inset + ImGui::CalcTextSize(_glyph).x + k_glyph_gap, y),
+                ImGui::GetColorU32(_selected ? theme::k_text : theme::k_text_2), _label);
+    return clicked;
 }
 
 } // namespace
@@ -408,12 +457,39 @@ int main(int argc, char **argv) {
     glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 0);
 #endif
 
+    // The design size, shrunk to the primary monitor's work area: a 13" laptop
+    // is 1280x800 points, and macOS cuts a window taller than its screen.
+    int window_w = 1320;
+    int window_h = 860;
+    if (GLFWmonitor *monitor = glfwGetPrimaryMonitor()) {
+        int area_x = 0;
+        int area_y = 0;
+        int area_w = 0;
+        int area_h = 0;
+        glfwGetMonitorWorkarea(monitor, &area_x, &area_y, &area_w, &area_h);
+        // ponytail: 28 is the macOS title bar; a taller one (other OS, or a
+        // future macOS) clips a few points until the user resizes once.
+        constexpr int k_title_bar_h = 28;
+        if (area_w > 0 && area_h > k_title_bar_h) {
+            window_w = std::min(window_w, area_w);
+            window_h = std::min(window_h, area_h - k_title_bar_h);
+        }
+    }
     GLFWwindow *window =
-        glfwCreateWindow(1180, 780, "CampCat Shell", nullptr, nullptr);
+        glfwCreateWindow(window_w, window_h, "CampCat", nullptr, nullptr);
     if (!window) {
         glfwTerminate();
         return 2;
     }
+    glfwSetWindowSizeLimits(window, 1024, 680, GLFW_DONT_CARE, GLFW_DONT_CARE);
+#if defined(__APPLE__)
+    {
+        const float bg_rgb[3] = {campcat::app::theme::k_bg_app.x,
+                                 campcat::app::theme::k_bg_app.y,
+                                 campcat::app::theme::k_bg_app.z};
+        macos_window_style(window, bg_rgb);
+    }
+#endif
     glfwMakeContextCurrent(window);
     glfwSwapInterval(1);
 
@@ -437,118 +513,15 @@ int main(int argc, char **argv) {
     ImGui::CreateContext();
     ImGuiIO &io = ImGui::GetIO();
     io.IniFilename = imgui_ini.c_str();
+    llm_panel_init_settings();
     io.ConfigFlags |=
         ImGuiConfigFlags_NavEnableKeyboard | ImGuiConfigFlags_DockingEnable;
-    ImGui::StyleColorsDark();
-    {
-        ImGuiStyle &style = ImGui::GetStyle();
-        style.WindowRounding = 0.0F;
-        style.ChildRounding = 6.0F;
-        style.FrameRounding = 5.0F;
-        style.GrabRounding = 4.0F;
-        style.ScrollbarRounding = 6.0F;
-        style.PopupRounding = 6.0F;
-        style.WindowPadding = ImVec2(10.0F, 10.0F);
-        style.FramePadding = ImVec2(10.0F, 6.0F);
-        style.ItemSpacing = ImVec2(10.0F, 8.0F);
-        style.ItemInnerSpacing = ImVec2(8.0F, 5.0F);
-        style.ScrollbarSize = 12.0F;
-        style.GrabMinSize = 12.0F;
-        style.WindowBorderSize = 0.0F;
-        style.ChildBorderSize = 1.0F;
-        style.FrameBorderSize = 0.0F;
-        style.PopupBorderSize = 1.0F;
-        style.DisabledAlpha = 0.50F;
+    campcat::app::theme_apply();
 
-        // One palette, every slot filled. A partly themed style leaves the rest
-        // on ImGui's defaults -- bright scrollbars and checkmarks, a saturated
-        // blue on every header -- and that mix is what reads as unfinished.
-        // Values are low-contrast on purpose: the accent marks what is active,
-        // nothing shouts.
-        const ImVec4 bg{0.086F, 0.094F, 0.106F, 1.00F};
-        const ImVec4 panel{0.106F, 0.116F, 0.133F, 1.00F};
-        const ImVec4 field{0.145F, 0.157F, 0.176F, 1.00F};
-        const ImVec4 field_hi{0.176F, 0.192F, 0.216F, 1.00F};
-        const ImVec4 line{0.196F, 0.212F, 0.239F, 1.00F};
-        const ImVec4 line_hi{0.278F, 0.302F, 0.337F, 1.00F};
-        const ImVec4 ink{0.847F, 0.871F, 0.898F, 1.00F};
-        const ImVec4 ink_dim{0.478F, 0.510F, 0.549F, 1.00F};
-        const ImVec4 &accent = k_accent;
-        const ImVec4 &accent_hi = k_accent_hi;
-        const ImVec4 &accent_lo = k_accent_lo;
-        // Headers and rows get a wash of the accent, not a solid fill, so an
-        // expanded section reads as a group instead of a second toolbar.
-        const ImVec4 wash{0.243F, 0.400F, 0.529F, 0.28F};
-        const ImVec4 wash_hi{0.243F, 0.400F, 0.529F, 0.46F};
-
-        ImVec4 *c = style.Colors;
-        c[ImGuiCol_Text] = ink;
-        c[ImGuiCol_TextDisabled] = ink_dim;
-        c[ImGuiCol_WindowBg] = bg;
-        c[ImGuiCol_ChildBg] = panel;
-        c[ImGuiCol_PopupBg] = ImVec4(0.118F, 0.129F, 0.149F, 0.98F);
-        c[ImGuiCol_Border] = line;
-        c[ImGuiCol_BorderShadow] = ImVec4(0.0F, 0.0F, 0.0F, 0.0F);
-        c[ImGuiCol_FrameBg] = field;
-        c[ImGuiCol_FrameBgHovered] = field_hi;
-        c[ImGuiCol_FrameBgActive] = accent_lo;
-        c[ImGuiCol_TitleBg] = bg;
-        c[ImGuiCol_TitleBgActive] = ImVec4(0.129F, 0.145F, 0.169F, 1.00F);
-        c[ImGuiCol_TitleBgCollapsed] = bg;
-        c[ImGuiCol_MenuBarBg] = ImVec4(0.098F, 0.106F, 0.122F, 1.00F);
-        c[ImGuiCol_ScrollbarBg] = ImVec4(0.0F, 0.0F, 0.0F, 0.0F);
-        c[ImGuiCol_ScrollbarGrab] = ImVec4(0.235F, 0.255F, 0.286F, 1.00F);
-        c[ImGuiCol_ScrollbarGrabHovered] = line_hi;
-        c[ImGuiCol_ScrollbarGrabActive] = accent;
-        c[ImGuiCol_CheckMark] = accent_hi;
-        c[ImGuiCol_SliderGrab] = accent;
-        c[ImGuiCol_SliderGrabActive] = accent_hi;
-        // A plain button is a surface, not a primary. Filled with the accent,
-        // every button on a page looked equally important -- Run once, Stop and
-        // Send all read as the one thing to press. The accent is spent on the
-        // single primary per page instead; see the Send button in
-        // ui/llm_panel.cpp.
-        c[ImGuiCol_Button] = field_hi;
-        c[ImGuiCol_ButtonHovered] = line_hi;
-        c[ImGuiCol_ButtonActive] = accent_lo;
-        c[ImGuiCol_Header] = wash;
-        c[ImGuiCol_HeaderHovered] = wash_hi;
-        c[ImGuiCol_HeaderActive] = accent;
-        c[ImGuiCol_Separator] = line;
-        c[ImGuiCol_SeparatorHovered] = line_hi;
-        c[ImGuiCol_SeparatorActive] = accent_hi;
-        c[ImGuiCol_ResizeGrip] = ImVec4(0.0F, 0.0F, 0.0F, 0.0F);
-        c[ImGuiCol_ResizeGripHovered] = accent;
-        c[ImGuiCol_ResizeGripActive] = accent_hi;
-        c[ImGuiCol_TabHovered] = wash_hi;
-        c[ImGuiCol_Tab] = panel;
-        c[ImGuiCol_TabSelected] = accent_lo;
-        c[ImGuiCol_TabSelectedOverline] = accent_hi;
-        c[ImGuiCol_TabDimmed] = panel;
-        c[ImGuiCol_TabDimmedSelected] = field_hi;
-        c[ImGuiCol_TabDimmedSelectedOverline] = ImVec4(0.0F, 0.0F, 0.0F, 0.0F);
-        c[ImGuiCol_PlotLines] = accent_hi;
-        c[ImGuiCol_PlotLinesHovered] = accent_hi;
-        c[ImGuiCol_PlotHistogram] = accent; // ProgressBar fill
-        c[ImGuiCol_PlotHistogramHovered] = accent_hi;
-        c[ImGuiCol_TableHeaderBg] = ImVec4(0.129F, 0.141F, 0.165F, 1.00F);
-        c[ImGuiCol_TableBorderStrong] = line;
-        c[ImGuiCol_TableBorderLight] = ImVec4(0.153F, 0.165F, 0.188F, 1.00F);
-        c[ImGuiCol_TableRowBg] = ImVec4(0.0F, 0.0F, 0.0F, 0.0F);
-        c[ImGuiCol_TableRowBgAlt] = ImVec4(1.0F, 1.0F, 1.0F, 0.015F);
-        c[ImGuiCol_TextLink] = accent_hi;
-        c[ImGuiCol_TextSelectedBg] = wash_hi;
-        c[ImGuiCol_DockingPreview] =
-            ImVec4(accent.x, accent.y, accent.z, 0.55F);
-        c[ImGuiCol_DockingEmptyBg] = bg;
-        c[ImGuiCol_DragDropTarget] = accent_hi;
-        c[ImGuiCol_NavCursor] = accent_hi;
-        c[ImGuiCol_NavWindowingHighlight] = ImVec4(1.0F, 1.0F, 1.0F, 0.70F);
-        c[ImGuiCol_NavWindowingDimBg] = ImVec4(0.0F, 0.0F, 0.0F, 0.45F);
-        c[ImGuiCol_ModalWindowDimBg] = ImVec4(0.0F, 0.0F, 0.0F, 0.55F);
-    }
-
-    campcat::app::fonts_init();
+    float content_scale_x = 1.0F;
+    float content_scale_y = 1.0F;
+    glfwGetWindowContentScale(window, &content_scale_x, &content_scale_y);
+    campcat::app::fonts_init(content_scale_x);
 
     ImGui_ImplGlfw_InitForOpenGL(window, true);
     ImGui_ImplOpenGL3_Init(glsl_version);
@@ -566,6 +539,40 @@ int main(int argc, char **argv) {
         ImGui_ImplOpenGL3_NewFrame();
         ImGui_ImplGlfw_NewFrame();
         ImGui::NewFrame();
+
+        campcat::app_config cfg_view = st.snapshot_cfg();
+        // Re-read every frame: the Script page's bundle picker publishes
+        // through `set_script_bundle`, so this view is the shell's, not ours.
+
+        static shell_page page = shell_page::Script;
+        const bool busy_now = st.device_tasks.busy();
+        const bool lock_manual_single = busy_now || st.sched.running();
+        llm_panel_tick(st, cfg_view, page == shell_page::Llm);
+
+        // The device pill is an app level fact, so every page shows it. The
+        // page pill is that page's own: one shared flag either claimed the LLM
+        // was idle while it thought, or said "Running" on the LLM page because
+        // an automation cycle happened to be running.
+        campcat::activity_status device_status{};
+        if (st.device_online.load()) {
+            // The poll connects before it reads, so this is ground truth: a
+            // launch still in flight must not hide a device that already
+            // answers, which is what read as "should be connected" while the
+            // instance was up.
+            device_status = {campcat::activity_level::ok, "Connected"};
+        } else if (st.mumu_launching.load() || campcat::llm::emulator_starting()) {
+            // Only reached before the device answers: while the instance comes
+            // up the poll can only report "not there yet", which would read as
+            // a failure for minutes on end.
+            device_status = {campcat::activity_level::waiting, "Booting"};
+        } else {
+            device_status = {campcat::activity_level::idle, "No device"};
+        }
+        const campcat::activity_status page_status = page_activity(page, st, busy_now);
+        draw_status_bar(st, device_status,
+                        page != shell_page::Settings && page != shell_page::Graph
+                            ? &page_status
+                            : nullptr);
 
         const ImGuiViewport *viewport = ImGui::GetMainViewport();
         ImGui::SetNextWindowPos(viewport->WorkPos);
@@ -587,10 +594,6 @@ int main(int argc, char **argv) {
                          ImGuiWindowFlags_NoSavedSettings);
         ImGui::PopStyleVar();
 
-        campcat::app_config cfg_view = st.snapshot_cfg();
-        // Re-read every frame: the Script page's bundle picker publishes
-        // through `set_script_bundle`, so this view is the shell's, not ours.
-
         bool reset_layout = false;
         if (ImGui::BeginMenuBar()) {
             if (ImGui::BeginMenu("File")) {
@@ -609,12 +612,6 @@ int main(int argc, char **argv) {
         const bool layout_built = shell_dock_submit(reset_layout);
         ImGui::End();
 
-        const bool busy_now = st.device_tasks.busy();
-        const bool lock_manual_single = busy_now || st.sched.running();
-
-        static shell_page page = shell_page::Script;
-        llm_panel_tick(st, cfg_view, page == shell_page::Llm);
-
         static bool focus_queued = false;
         static shell_page focus_page = shell_page::Script;
         if (layout_built) {
@@ -628,58 +625,34 @@ int main(int argc, char **argv) {
             focus_page = target;
         };
 
-        // The device chip is an app level fact, so every page shows it. The
-        // page chip is computed inside that page: one shared flag either
-        // claimed the LLM was idle while it thought, or said "Running" on the
-        // LLM page because an automation cycle happened to be running.
-        campcat::activity_status device_status{};
-        if (st.device_online.load()) {
-            // The poll connects before it reads, so this is ground truth: a
-            // launch still in flight must not hide a device that already
-            // answers, which is what read as "should be connected" while the
-            // instance was up.
-            device_status = {campcat::activity_level::ok, "Connected"};
-        } else if (st.mumu_launching.load() || campcat::llm::emulator_starting()) {
-            // Only reached before the device answers: while the instance comes
-            // up the poll can only report "not there yet", which would read as
-            // a failure for minutes on end.
-            device_status = {campcat::activity_level::waiting, "Booting"};
-        } else {
-            device_status = {campcat::activity_level::idle, "No device"};
-        }
-
-        auto nav_item = [&](const char *label, shell_page target) {
-            const bool selected = (page == target);
-            if (selected) {
-                ImGui::PushStyleColor(ImGuiCol_Button, k_accent);
-                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, k_accent_hi);
-                ImGui::PushStyleColor(ImGuiCol_ButtonActive, k_accent_lo);
-            }
-            if (campcat::app::button(label, ImVec2(-1.0F, 0.0F))) {
+        auto nav = [&](const char *glyph, const char *label, shell_page target) {
+            if (nav_item(glyph, label, page == target)) {
                 show_page(target);
-            }
-            if (selected) {
-                ImGui::PopStyleColor(3);
             }
         };
 
+        shell_dock_hide_next_tab_bar();
         if (ImGui::Begin(k_dock_campcat, nullptr, k_dock_panel_flags)) {
+            namespace icon = campcat::app::icon;
+            draw_brand();
             ImGui::Spacing();
-            WITH_FONT(title, { ImGui::TextUnformatted("CampCat"); });
-            ImGui::Spacing();
-            ImGui::Separator();
-            ImGui::Spacing();
-            nav_item("Script", shell_page::Script);
-            nav_item("LLM", shell_page::Llm);
-            nav_item("Console", shell_page::Console);
-            nav_item("Graph", shell_page::Graph);
-            ImGui::Spacing();
-            ImGui::Separator();
-            ImGui::Spacing();
-            nav_item("Settings", shell_page::Settings);
+            nav(icon::k_script, "Script", shell_page::Script);
+            nav(icon::k_llm, "LLM", shell_page::Llm);
+            nav(icon::k_console, "Console", shell_page::Console);
+            nav(icon::k_graph, "Graph", shell_page::Graph);
             if (llm_panel_draw_sidebar_task(page == shell_page::Llm)) {
                 show_page(shell_page::Llm);
             }
+            // Pinned to the bottom while there is room; in a short window it
+            // just follows the rest, so it can never cover the agent card.
+            // The extra point keeps rounding from summoning a scrollbar.
+            const float bottom = ImGui::GetWindowHeight() -
+                                 campcat::app::theme::k_sidebar_item_h -
+                                 ImGui::GetStyle().WindowPadding.y - 1.0F;
+            if (ImGui::GetCursorPosY() < bottom) {
+                ImGui::SetCursorPosY(bottom);
+            }
+            nav(icon::k_settings, "Settings", shell_page::Settings);
         }
         ImGui::End();
 
@@ -710,11 +683,6 @@ int main(int argc, char **argv) {
                 page = which;
             }
             if (open) {
-                const bool show_chip = which != shell_page::Settings &&
-                                       which != shell_page::Graph;
-                draw_page_heading(page_window_name(which),
-                                  page_activity(which, st, busy_now), show_chip,
-                                  device_status);
                 if (which == shell_page::Llm || which == shell_page::Graph) {
                     switch (draw_workspace_toolbar(st, cfg_view, run_locked,
                                                    &details_open, which)) {
@@ -791,7 +759,8 @@ int main(int argc, char **argv) {
         int display_h = 0;
         glfwGetFramebufferSize(window, &display_w, &display_h);
         glViewport(0, 0, display_w, display_h);
-        glClearColor(0.10f, 0.10f, 0.11f, 1.0f);
+        glClearColor(campcat::app::theme::k_bg_app.x, campcat::app::theme::k_bg_app.y,
+                     campcat::app::theme::k_bg_app.z, 1.0F);
         glClear(GL_COLOR_BUFFER_BIT);
         ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
 

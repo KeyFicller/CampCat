@@ -4,10 +4,14 @@
 #include "app/ui/ccat_highlight.h"
 #include "app/ui/buttons.h"
 #include "app/ui/gl_texture.h"
+#include "app/ui/icons.h"
+#include "app/ui/theme.h"
+#include "app/ui/widgets.h"
 #include "core/script/ccat_bundle.h"
 #include "core/script/ccat_graph.h"
 
 #include <imgui.h>
+#include <imgui_internal.h> // RenderTextEllipsis
 #include <misc/cpp/imgui_stdlib.h>
 
 #include <opencv2/core.hpp>
@@ -35,10 +39,9 @@ namespace {
 constexpr float k_preview_min_side = 96.0F;
 constexpr float k_preview_max_side = 360.0F;
 
-/// Room for the template list inside a script window.
-constexpr float k_templates_h = 76.0F;
-
-const ImVec4 k_err_col = ImVec4(0.95F, 0.42F, 0.42F, 1.0F);
+/// A template thumbnail's square, and the gap down to its file name.
+constexpr float k_thumb = 96.0F;
+constexpr float k_thumb_gap = 4.0F;
 
 /// One open script: its text, the disk content it was opened from, and the last
 /// thing that happened to it.
@@ -331,6 +334,74 @@ void draw_template_preview(const std::filesystem::path &_path,
     ImGui::EndTooltip();
 }
 
+/// Height of one `template_grid` row.
+float template_cell_h() {
+    return k_thumb + k_thumb_gap +
+           campcat::app::fonts_get(campcat::app::font_role::small)->FontSize;
+}
+
+/// The templates of `_dir` as thumbnails with their file names under them,
+/// wrapped into rows. Hovering one shows the full preview.
+void template_grid(const std::filesystem::path &_dir,
+                   const std::vector<std::string> &_files) {
+    using namespace campcat::app;
+    const float right =
+        ImGui::GetCursorScreenPos().x + ImGui::GetContentRegionAvail().x;
+    ImDrawList *dl = ImGui::GetWindowDrawList();
+    ImFont *small = fonts_get(font_role::small);
+    for (std::size_t i = 0; i < _files.size(); ++i) {
+        if (i > 0) {
+            ImGui::SameLine();
+            if (ImGui::GetCursorScreenPos().x + k_thumb > right) {
+                ImGui::NewLine();
+            }
+        }
+        const std::string &file = _files[i];
+        const ImVec2 pos = ImGui::GetCursorScreenPos();
+        const ImVec2 box_max(pos.x + k_thumb, pos.y + k_thumb);
+        ImGui::PushID(file.c_str());
+        ImGui::InvisibleButton("cell", ImVec2(k_thumb, template_cell_h()));
+        ImGui::PopID();
+        const bool hovered = ImGui::IsItemHovered();
+        dl->AddRectFilled(pos, box_max, ImGui::GetColorU32(theme::k_surface_inset),
+                          theme::k_radius_popup);
+        const preview_tex *preview = preview_for(_dir / file);
+        if (preview->tex == 0) {
+            dl->AddText(small, small->FontSize, ImVec2(pos.x + 8.0F, pos.y + 8.0F),
+                        ImGui::GetColorU32(theme::k_text_3),
+                        "Could not load this template.", nullptr, k_thumb - 16.0F);
+        } else {
+            const float inner = k_thumb - 12.0F;
+            const float scale = std::min(inner / static_cast<float>(preview->w),
+                                         inner / static_cast<float>(preview->h));
+            const float w = static_cast<float>(preview->w) * scale;
+            const float h = static_cast<float>(preview->h) * scale;
+            const ImVec2 img_min(pos.x + (k_thumb - w) * 0.5F,
+                                 pos.y + (k_thumb - h) * 0.5F);
+            dl->AddImageRounded(
+                static_cast<ImTextureID>(static_cast<uintptr_t>(preview->tex)),
+                img_min, ImVec2(img_min.x + w, img_min.y + h), ImVec2(0.0F, 0.0F),
+                ImVec2(1.0F, 1.0F), IM_COL32_WHITE, 4.0F);
+        }
+        dl->AddRect(pos, box_max,
+                    ImGui::GetColorU32(hovered ? theme::k_border_strong
+                                               : theme::k_border),
+                    theme::k_radius_popup);
+        ImGui::PushFont(small);
+        ImGui::PushStyleColor(ImGuiCol_Text, theme::k_text_2);
+        const ImVec2 name_min(pos.x, box_max.y + k_thumb_gap);
+        ImGui::RenderTextEllipsis(dl, name_min,
+                                  ImVec2(box_max.x, pos.y + template_cell_h()),
+                                  box_max.x, box_max.x, file.c_str(), nullptr,
+                                  nullptr);
+        ImGui::PopStyleColor();
+        ImGui::PopFont();
+        if (hovered) {
+            draw_template_preview(_dir / file, file);
+        }
+    }
+}
+
 /// Drag, hover, double-click and the right-click menu for the item just drawn.
 /// `_new_action_on` is the anchor id when this row is an anchor of the open
 /// graph, which is the only row that can start an action.
@@ -386,14 +457,23 @@ void script_row_actions(const std::filesystem::path &_dir,
     }
 }
 
+/// Pitch of one index row, spacing included.
+constexpr float k_index_row_h = 28.0F;
+
+/// `ImGui::Selectable` at the index's row pitch: the item spacing is part of
+/// the highlight, so the box asked for is the pitch less that spacing.
+bool index_selectable(const char *_label, bool _selected) {
+    return ImGui::Selectable(_label, _selected, ImGuiSelectableFlags_AllowDoubleClick,
+                             ImVec2(0.0F, k_index_row_h - ImGui::GetStyle().ItemSpacing.y));
+}
+
 void draw_script_row(const std::filesystem::path &_dir, const std::string &_name,
                      const char *_label, std::string *_rename,
                      std::optional<std::string> *_to_delete,
                      campcat::workspace_selection &_selection,
                      std::string_view _new_action_on = {}) {
     ImGui::PushID(_name.c_str());
-    if (ImGui::Selectable(_label, _selection.bundle == _name,
-                           ImGuiSelectableFlags_AllowDoubleClick)) {
+    if (index_selectable(_label, _selection.bundle == _name)) {
         _selection.select_bundle(g_graph, _name);
     }
     script_row_actions(_dir, _name, _rename, _to_delete, _selection,
@@ -412,7 +492,8 @@ void draw_name_list(const std::filesystem::path &_dir, const char *_id,
     }
     for (const std::string &name : _names) {
         const std::string label =
-            name.rfind(_prefix, 0) == 0 ? name.substr(_prefix.size()) : name;
+            std::string(campcat::app::icon::k_edge) + "  " +
+            (name.rfind(_prefix, 0) == 0 ? name.substr(_prefix.size()) : name);
         draw_script_row(_dir, name, label.c_str(), _rename, _to_delete,
                         _selection);
     }
@@ -439,6 +520,7 @@ void draw_node_list(const std::filesystem::path &_dir, float _h,
     for (const std::string &name : g_nodes) {
         const std::string label =
             name.rfind(_prefix, 0) == 0 ? name.substr(_prefix.size()) : name;
+        const std::string row_label = std::string(campcat::app::icon::k_node) + "  " + label;
         const auto found = g_actions.find(name);
         const bool has_actions =
             found != g_actions.end() && !found->second.empty();
@@ -454,8 +536,7 @@ void draw_node_list(const std::filesystem::path &_dir, float _h,
             open = true;
             storage->SetBool(open_id, true);
         }
-        if (ImGui::Selectable(label.c_str(), _selection.bundle == name,
-                               ImGuiSelectableFlags_AllowDoubleClick)) {
+        if (index_selectable(row_label.c_str(), _selection.bundle == name)) {
             _selection.select_bundle(g_graph, name);
         }
         const ImVec2 row_min = ImGui::GetItemRectMin();
@@ -468,33 +549,26 @@ void draw_node_list(const std::filesystem::path &_dir, float _h,
         if (has_actions) {
             const float font = ImGui::GetFontSize();
             const float right = row_max.x - style.FramePadding.x;
-            const ImVec2 centre(right - font * 0.5F,
-                                (row_min.y + row_max.y) * 0.5F);
             const bool on_arrow = ImGui::IsItemHovered() &&
                                   ImGui::GetMousePos().x >= right - font;
             if (on_arrow && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
                 open = !open;
                 storage->SetBool(open_id, open);
             }
-            const float u = font * 0.22F;
-            const ImU32 col = ImGui::GetColorU32(ImGuiCol_Text);
-            ImDrawList *draw = ImGui::GetWindowDrawList();
-            if (open) {
-                draw->AddTriangleFilled(ImVec2(centre.x - u, centre.y - u),
-                                        ImVec2(centre.x + u, centre.y - u),
-                                        ImVec2(centre.x, centre.y + u), col);
-            } else {
-                draw->AddTriangleFilled(ImVec2(centre.x - u, centre.y - u),
-                                        ImVec2(centre.x - u, centre.y + u),
-                                        ImVec2(centre.x + u, centre.y), col);
-            }
+            const char *chevron = open ? campcat::app::icon::k_chevron_down
+                                       : campcat::app::icon::k_chevron_right;
+            const ImVec2 glyph = ImGui::CalcTextSize(chevron);
+            ImGui::GetWindowDrawList()->AddText(
+                ImVec2(right - glyph.x, (row_min.y + row_max.y - glyph.y) * 0.5F),
+                ImGui::GetColorU32(campcat::app::theme::k_text_2), chevron);
         }
         if (has_actions && open) {
             ImGui::Indent(indent);
             for (const std::string &action : found->second) {
                 const std::size_t dot = action.rfind('.');
                 const std::string action_label =
-                    dot == std::string::npos ? action : action.substr(dot + 1);
+                    std::string(campcat::app::icon::k_script) + "  " +
+                    (dot == std::string::npos ? action : action.substr(dot + 1));
                 draw_script_row(_dir, action, action_label.c_str(), _rename,
                                 _to_delete, _selection);
             }
@@ -509,24 +583,40 @@ void draw_node_list(const std::filesystem::path &_dir, float _h,
 std::optional<std::string> draw_list(const std::filesystem::path &_dir,
                                      float _w, float _h, std::string *_rename,
                                      campcat::workspace_selection &_selection) {
+    using namespace campcat::app;
     std::optional<std::string> to_delete;
-    ImGui::BeginChild("script_list", ImVec2(_w, _h), ImGuiChildFlags_Borders);
-    ImGui::SeparatorText("Nodes");
-    const ImGuiStyle &style = ImGui::GetStyle();
-    const float sep_h = ImGui::GetTextLineHeight() +
-                        style.SeparatorTextPadding.y * 2.0F +
-                        style.ItemSpacing.y;
+    ImGui::BeginChild("script_list", ImVec2(_w, _h));
+    {
+        // A rule, not a box: the index is a column of the page.
+        const ImVec2 p = ImGui::GetWindowPos();
+        const float x = p.x + ImGui::GetWindowWidth() - 1.0F;
+        ImGui::PushClipRect(p, ImVec2(p.x + ImGui::GetWindowWidth(),
+                                      p.y + ImGui::GetWindowHeight()), false);
+        ImGui::GetWindowDrawList()->AddLine(ImVec2(x, p.y),
+                                            ImVec2(x, p.y + ImGui::GetWindowHeight()),
+                                            ImGui::GetColorU32(theme::k_border));
+        ImGui::PopClipRect();
+    }
+    float sep_h = 0.0F;
+    const auto section = [&](const char *_label) {
+        WITH_FONT(small, {
+            ImGui::TextColored(theme::k_text_3, "%s", _label);
+            sep_h = ImGui::GetTextLineHeight();
+        });
+    };
+    section("NODES");
+    sep_h += ImGui::GetStyle().ItemSpacing.y;
     // Whole rows only: a half row at the split reads as clipped text. The
     // window padding is added back on both sides, so the content area is what
     // gets rounded, not the frame.
-    const float row_h = ImGui::GetTextLineHeightWithSpacing();
+    const float row_h = k_index_row_h;
     const float pad = ImGui::GetStyle().WindowPadding.y * 2.0F;
     const float half = (ImGui::GetContentRegionAvail().y - sep_h) * 0.5F;
     const float nodes_h =
         std::max(row_h, std::floor((half - pad) / row_h) * row_h + pad);
     const std::string prefix = g_graph.empty() ? std::string() : g_graph + ".";
     draw_node_list(_dir, nodes_h, prefix, _rename, &to_delete, _selection);
-    ImGui::SeparatorText("Edges");
+    section("EDGES");
     draw_name_list(_dir, "graph_edges", 0.0F, g_edges, prefix, _rename,
                    &to_delete, _selection);
     ImGui::EndChild();
@@ -658,7 +748,8 @@ void draw_new_action_modal(const std::filesystem::path &_dir,
         g_new_action_error.clear();
     }
     if (!g_new_action_error.empty()) {
-        ImGui::TextColored(k_err_col, "%s", g_new_action_error.c_str());
+        ImGui::TextColored(campcat::app::theme::k_danger, "%s",
+                           g_new_action_error.c_str());
     } else if (!why.empty()) {
         ImGui::TextDisabled("%s", why.c_str());
     }
@@ -757,42 +848,40 @@ void draw_delete_modal(const std::filesystem::path &_dir,
 void draw_editor_contents(script_editor &_e, bool _save_locked) {
     const std::filesystem::path bundle_dir = _e.main_path.parent_path();
 
-    // Everything below the code: the resource box and its separator sit
-    // directly above the button row, which is the window's footer, and the code
-    // takes whatever is left. ImGui advances the cursor by each item's height
-    // plus one ItemSpacing, and a separator is its label plus its own padding.
-    // The Script separator is drawn first, so its height is already spent.
+    // Everything below the code: the resource box and its label sit directly
+    // above the button row, which is the window's footer, and the code takes
+    // whatever is left. ImGui advances the cursor by each item's height plus
+    // one ItemSpacing. The Script label is drawn first, so its height is
+    // already spent.
+    using namespace campcat::app;
     const float status_h = _e.status.empty() ? 0.0F :
         ImGui::CalcTextSize(_e.status.c_str(), nullptr, false,
                             ImGui::GetContentRegionAvail().x).y +
             ImGui::GetStyle().ItemSpacing.y;
     const float footer = ImGui::GetFrameHeightWithSpacing() + status_h;
-    const float below = ImGui::GetTextLineHeight() +
-                        ImGui::GetStyle().SeparatorTextPadding.y * 2.0F +
-                        ImGui::GetStyle().ItemSpacing.y + k_templates_h +
-                        footer;
-    ImGui::SeparatorText("Script");
+    const float templates_h = template_cell_h();
+    const float below = fonts_get(font_role::small)->FontSize +
+                        ImGui::GetStyle().ItemSpacing.y + templates_h + footer;
+    const auto section = [](const char *_label) {
+        WITH_FONT(small, { ImGui::TextColored(theme::k_text_3, "%s", _label); });
+    };
+    section("SCRIPT");
     WITH_FONT(mono, { _e.editor->Render("##ccat", ImVec2(0.0F, -below)); });
 
     // Templates, read-only: the point of hovering is to see what the model cut.
-    ImGui::SeparatorText("Resources");
+    section("RESOURCES");
     const std::vector<std::string> templates =
         campcat::ccat_lang::bundle_templates(_e.dir, _e.name);
-    ImGui::BeginChild("templates", ImVec2(0.0F, k_templates_h),
-                      ImGuiChildFlags_Borders);
+    ImGui::BeginChild("templates", ImVec2(0.0F, templates_h));
     if (templates.empty()) {
         ImGui::TextDisabled("no templates");
     }
-    for (const std::string &file : templates) {
-        ImGui::Selectable(file.c_str(), false);
-        if (ImGui::IsItemHovered()) {
-            draw_template_preview(bundle_dir / file, file);
-        }
-    }
+    template_grid(bundle_dir, templates);
     ImGui::EndChild();
 
     ImGui::BeginDisabled(_save_locked);
-    if (campcat::app::button("Save")) {
+    if (button((std::string(icon::k_save) + "  Save").c_str(), ImVec2(),
+               button_kind::primary)) {
         save_editor(_e.dir, _e);
     }
     if (ImGui::IsItemHovered()) {
@@ -800,7 +889,8 @@ void draw_editor_contents(script_editor &_e, bool _save_locked) {
     }
     ImGui::EndDisabled();
     ImGui::SameLine();
-    if (campcat::app::button("Reload")) {
+    if (button((std::string(icon::k_reload) + "  Reload").c_str(), ImVec2(),
+               button_kind::ghost)) {
         reload_editor(_e);
     }
     if (ImGui::IsItemHovered()) {
@@ -808,7 +898,7 @@ void draw_editor_contents(script_editor &_e, bool _save_locked) {
     }
     if (!_e.status.empty()) {
         if (_e.status_error) {
-            ImGui::PushStyleColor(ImGuiCol_Text, k_err_col);
+            ImGui::PushStyleColor(ImGuiCol_Text, theme::k_danger);
             ImGui::TextWrapped("%s", _e.status.c_str());
             ImGui::PopStyleColor();
         } else {
@@ -926,36 +1016,29 @@ void script_editor_inspector_draw(const std::filesystem::path &_script_dir,
         templates = campcat::ccat_lang::bundle_templates(_script_dir, _name);
         tag = campcat::ccat_lang::bundle_tags(_script_dir, _name);
     }
-    ImGui::TextWrapped("%.*s", static_cast<int>(_name.size()), _name.data());
+    using namespace campcat::app;
+    WITH_FONT(bold, {
+        ImGui::TextWrapped("%.*s", static_cast<int>(_name.size()), _name.data());
+    });
     const char *kind = !tag.anchor_of.empty() ? "Anchor"
                        : !tag.edge_of.empty() ? "Route"
                        : !tag.action_of.empty() ? "Action" : "Standalone skill";
-    ImGui::TextDisabled("%s", kind);
+    campcat::app::tag(kind, theme::k_accent_fg);
     if (!description.empty()) {
         ImGui::Separator();
+        ImGui::PushStyleColor(ImGuiCol_Text, theme::k_text_2);
         ImGui::TextWrapped("%s", description.c_str());
+        ImGui::PopStyleColor();
     }
     ImGui::Separator();
-    ImGui::TextWrapped("%s", path.string().c_str());
-    ImGui::SeparatorText("Templates");
-    for (const std::string &name : templates) {
-        if (!ImGui::TreeNode(name.c_str())) {
-            continue;
-        }
-        const preview_tex *preview = preview_for(path.parent_path() / name);
-        if (preview->tex == 0) {
-            ImGui::TextWrapped("Could not load this template.");
-        } else {
-            const float scale = std::min(
-                {1.0F, ImGui::GetContentRegionAvail().x / preview->w,
-                 180.0F / preview->h});
-            ImGui::Image(
-                static_cast<ImTextureID>(static_cast<uintptr_t>(preview->tex)),
-                ImVec2(preview->w * scale, preview->h * scale));
-            ImGui::TextDisabled("%d x %d px", preview->w, preview->h);
-        }
-        ImGui::TreePop();
-    }
+    WITH_FONT(small, {
+        ImGui::PushStyleColor(ImGuiCol_Text, theme::k_text_3);
+        ImGui::TextWrapped("%s  %s", icon::k_file, path.string().c_str());
+        ImGui::PopStyleColor();
+    });
+    ImGui::Spacing();
+    WITH_FONT(small, { ImGui::TextColored(theme::k_text_3, "TEMPLATES"); });
+    template_grid(path.parent_path(), templates);
     if (templates.empty()) {
         ImGui::TextDisabled("No templates in this skill.");
     }

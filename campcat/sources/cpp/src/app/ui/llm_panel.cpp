@@ -15,10 +15,13 @@
 
 #include "app/ui/activity_status.h"
 #include "app/ui/buttons.h"
+#include "app/ui/chat_text.h"
 #include "app/ui/gl_texture.h"
-#include "app/ui/icon_texture.h"
+#include "app/ui/icons.h"
 #include "app/ui/prompt_input.h"
 #include "app/ui/script_editor_panel.h"
+#include "app/ui/theme.h"
+#include "app/ui/widgets.h"
 
 #include <imgui.h>
 #include <imgui_internal.h> // ImTextCountCharsFromUtf8
@@ -56,23 +59,18 @@ using campcat::app::fonts_get;
 /// Oldest turns are dropped past this.
 constexpr int k_turn_cap = 30;
 
-/// How wide the gear is drawn inside its square button, in pixels. Smaller than
-/// the button frame so the icon does not touch the edges; the source is 32px,
-/// so this also halves it, which is what the 8 teeth need to stay separate.
-constexpr float k_gear_side = 20.0F;
-
-/// How far the status line under the prompt box is inset, so it reads as a
-/// footnote on the conversation rather than another control.
-constexpr float k_stat_indent = 12.0F;
-
 /// One step of a turn's timeline, mirrored from the host while the turn runs.
 struct llm_item {
     campcat::llm_event::kind type = campcat::llm_event::kind::text;
     std::string text;  ///< text/thinking: the words so far; tool: the note
     bool ok = true;    ///< tool
     long image_id = 0; ///< image: host key, and this item's identity
-    /// thinking: the reader opened the folded step to read it again.
+    /// thinking, tool: the reader opened the folded step to read it again.
     bool expanded = false;
+    /// text: `text` split for drawing, redone when the size moves -- text
+    /// only ever grows, so its size is enough to tell it changed.
+    std::vector<campcat::app::chat_block> blocks;
+    size_t blocks_for = std::string::npos;
     /// Bytes until the texture is uploaded, freed right after: a conversation
     /// of screenshots does not fit in memory, let alone in VRAM.
     std::string png;
@@ -93,6 +91,7 @@ struct llm_turn {
     bool interrupted = false; ///< the turn was cut by that next message
     bool ok = false;
     std::string error;
+    bool steps_open = false; ///< the reader unfolded the finished turn's steps
 };
 
 // UI-thread state: never touched by the worker.
@@ -117,6 +116,16 @@ void md_format(const ImGui::MarkdownFormatInfo &_info, bool _start) {
             ImGui::PushFont(fonts_get(font_role::bold));
         } else {
             ImGui::PopFont();
+        }
+        return;
+    }
+    if (_info.type == ImGui::MarkdownFormatType::LINK) {
+        // Code spans arrive here as links, and no link opens anything, so the
+        // default underline would promise a click that never happens.
+        if (_start) {
+            ImGui::PushStyleColor(ImGuiCol_Text, campcat::app::theme::k_accent_fg);
+        } else {
+            ImGui::PopStyleColor();
         }
         return;
     }
@@ -236,7 +245,7 @@ void draw_memory_page(campcat::llm::memory_kind _kind) {
                         "it is cleared. A pass may not touch a fact you edited "
                         "or pinned.");
     if (g_mem_unreadable) {
-        ImGui::TextColored(ImVec4(0.95F, 0.45F, 0.35F, 1.0F),
+        ImGui::TextColored(campcat::app::theme::k_danger,
                            "The ledger could not be read.");
     }
     int live = 0;
@@ -252,13 +261,14 @@ void draw_memory_page(campcat::llm::memory_kind _kind) {
         reload_memory();
     }
     ImGui::SameLine();
-    if (campcat::app::button("Clear memory")) {
+    if (campcat::app::button("Clear memory", ImVec2(), campcat::app::button_kind::danger)) {
         ImGui::OpenPopup(popup);
     }
     if (ImGui::BeginPopupModal(popup, nullptr,
                                ImGuiWindowFlags_AlwaysAutoResize)) {
         ImGui::TextUnformatted(ask);
-        if (campcat::app::button("Delete", ImVec2(120.0F, 0.0F))) {
+        if (campcat::app::button("Delete", ImVec2(120.0F, 0.0F),
+                                 campcat::app::button_kind::danger)) {
             if (!campcat::llm::clear_memory(g_config_home, _kind, g_memory_graph)) {
                 campcat::automation_log::emit("[llm] memory ledger not deleted");
             }
@@ -379,13 +389,6 @@ void draw_memory_window() {
     }
     ImGui::End();
 }
-
-/// Bubble backgrounds. The colours also tell the two speakers apart, which is
-/// why the "You" / "CampCat" labels are gone.
-const ImVec4 k_user_bg{0.19F, 0.31F, 0.45F, 1.0F};
-const ImVec4 k_bot_bg{0.16F, 0.18F, 0.20F, 1.0F};
-const ImVec4 k_err_col{0.95F, 0.45F, 0.35F, 1.0F};
-const ImVec4 k_err_bg{0.30F, 0.16F, 0.16F, 1.0F}; ///< failed-reply bubble
 
 /// Name for the subagent card's heading. Unknown names are shown as sent.
 const char *agent_label(const std::string &_agent) {
@@ -516,8 +519,9 @@ std::string reply_text(const llm_turn &_t) {
     return out;
 }
 
-/// The latest subagent run at the end of the chat, with the same scroll as replies.
-void draw_subagent_card() {
+/// The latest subagent run at the end of the chat, with the same scroll as
+/// replies, in the message column that starts at `_x` and is `_col` wide.
+void draw_subagent_card(float _x, float _col) {
     const campcat::llm_host::subagent_state st = g_host.subagent();
     if (!st.seen || g_sub_cleared_run == st.runs) {
         return;
@@ -525,52 +529,42 @@ void draw_subagent_card() {
     const bool new_run = st.runs != g_sub_run;
     sync_sub_items(st);
     ImGui::Spacing();
+    // The card keeps its open flag in this window's storage under its id; a
+    // new run opens it again even if the reader folded the last one.
     if (new_run) {
-        ImGui::SetNextItemOpen(true);
+        ImGui::GetStateStorage()->SetBool(ImGui::GetID("subagent_card"), true);
     }
     const bool failed = !st.active && !st.ok;
-    const std::string heading = std::string("Sub-agent: ") + agent_label(st.agent) +
-        (st.active ? " / Working" : failed ? " / Failed" : " / Done") +
-        "###subagent_card";
-    if (failed) {
-        ImGui::PushStyleColor(ImGuiCol_Text, k_err_col);
+    const campcat::activity_status status =
+        st.active ? campcat::activity_status{campcat::activity_level::busy, "Working"}
+        : failed  ? campcat::activity_status{campcat::activity_level::failed, "Failed"}
+                  : campcat::activity_status{campcat::activity_level::ok, "Done"};
+    const std::string title = std::string("Sub-agent \xC2\xB7 ") + agent_label(st.agent);
+    ImGui::SetCursorPosX(_x);
+    if (campcat::app::card_begin("subagent_card", title.c_str(),
+                                 {.glyph = campcat::app::icon::k_bot,
+                                  .width = _col,
+                                  .status = &status})) {
+        if (!st.goal.empty()) {
+            ImGui::PushStyleColor(ImGuiCol_Text, campcat::app::theme::k_text_2);
+            ImGui::TextWrapped("%s", st.goal.c_str());
+            ImGui::PopStyleColor();
+        }
+        for (size_t i = 0; i < g_sub_items.size(); ++i) {
+            const bool growing = st.active && i + 1 == g_sub_items.size() &&
+                                 grows_in_place(g_sub_items[i].type);
+            const ImVec2 top = ImGui::GetCursorScreenPos();
+            ImGui::PushID(static_cast<int>(i));
+            draw_item(g_sub_items[i], growing, true);
+            copy_menu("copy", g_sub_items[i].text, top);
+            ImGui::PopID();
+        }
     }
-    const bool open = ImGui::CollapsingHeader(heading.c_str(),
-                                             ImGuiTreeNodeFlags_DefaultOpen);
-    if (failed) {
-        ImGui::PopStyleColor();
-    }
-    if (!open) {
-        return;
-    }
-    ImGui::PushID("subagent_steps");
-    ImGui::Indent();
-    if (!st.goal.empty()) {
-        ImGui::PushStyleColor(ImGuiCol_Text,
-                              ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
-        ImGui::TextWrapped("%s", st.goal.c_str());
-        ImGui::PopStyleColor();
-    }
-    for (size_t i = 0; i < g_sub_items.size(); ++i) {
-        const bool growing = st.active && i + 1 == g_sub_items.size() &&
-                             grows_in_place(g_sub_items[i].type);
-        const ImVec2 top = ImGui::GetCursorScreenPos();
-        ImGui::PushID(static_cast<int>(i));
-        draw_item(g_sub_items[i], growing, true);
-        copy_menu("copy", g_sub_items[i].text, top);
-        ImGui::PopID();
-    }
-    ImGui::Unindent();
-    ImGui::PopID();
+    campcat::app::card_end();
 }
-/// Send is the one primary action here; plain buttons are surfaces (main.cpp).
-const ImVec4 k_primary{0.243F, 0.400F, 0.529F, 1.0F};
-const ImVec4 k_primary_hi{0.302F, 0.478F, 0.616F, 1.0F};
-const ImVec4 k_primary_lo{0.200F, 0.341F, 0.463F, 1.0F};
 
-/// A bubble takes at most this share of the log width before it wraps.
+/// A user bubble takes at most this share of the message column before it wraps.
 constexpr float k_bubble_frac = 0.72F;
-constexpr float k_bubble_rounding = 6.0F;
 
 /// A tool image is decoded at no more than this width. A full frame is ~10 MB
 /// of texture, and turns are kept, so a whole conversation of them would not
@@ -707,24 +701,31 @@ void sync_items(llm_turn &_t) {
     }
 }
 
-/// Fit `_w x _h` into `_max_w`, preserving aspect.
-ImVec2 fit_image(int _w, int _h, float _max_w) {
-    float w = static_cast<float>(_w);
-    float h = static_cast<float>(_h);
-    if (w > _max_w && w > 0.0F) {
-        h *= _max_w / w;
-        w = _max_w;
-    }
-    return ImVec2(w, h);
+/// Fit `_w x _h` into `_box`, preserving aspect; never enlarged, and never
+/// below a pixel, which `InvisibleButton` would assert on.
+ImVec2 fit_image(int _w, int _h, ImVec2 _box) {
+    const float w = static_cast<float>(_w);
+    const float h = static_cast<float>(_h);
+    const float scale = std::min({1.0F, _box.x / w, _box.y / h});
+    return ImVec2(std::max(1.0F, w * scale), std::max(1.0F, h * scale));
 }
+
+/// A screenshot in the timeline is at most this tall; a click opens it whole.
+constexpr float k_thumb_h = 160.0F;
+
+/// Reply line gap. imgui_markdown lays out every wrapped line as its own item,
+/// so the item spacing is what sits between two lines of one paragraph.
+constexpr float k_line_gap = 5.0F;
+/// Extra space between paragraphs, on top of the line gap either side.
+constexpr float k_para_gap = 6.0F;
 
 /// A reasoning step: open while it is the live one, one clickable line after.
 /// Plain wrapped text rather than Markdown -- it can run to thousands of
 /// characters, and re-parsing it every frame while it grows is the cost this
 /// avoids.
 void draw_thinking(llm_item &_it, bool _streaming) {
-    ImGui::PushStyleColor(ImGuiCol_Text,
-                          ImGui::GetStyle().Colors[ImGuiCol_TextDisabled]);
+    namespace icon = campcat::app::icon;
+    ImGui::PushStyleColor(ImGuiCol_Text, campcat::app::theme::k_text_3);
     if (_streaming) {
         ImGui::TextUnformatted("Thinking");
         ImGui::TextWrapped("%s", _it.text.c_str());
@@ -732,7 +733,10 @@ void draw_thinking(llm_item &_it, bool _streaming) {
         // Several folded steps carry the same label; the item is what makes
         // each one a different widget.
         ImGui::PushID(&_it);
-        if (ImGui::Selectable(_it.expanded ? "v Thinking" : "> Thinking")) {
+        const std::string label =
+            std::string(_it.expanded ? icon::k_chevron_down : icon::k_chevron_right) +
+            " Thinking";
+        if (ImGui::Selectable(label.c_str())) {
             _it.expanded = !_it.expanded;
         }
         ImGui::PopID();
@@ -743,34 +747,181 @@ void draw_thinking(llm_item &_it, bool _streaming) {
     ImGui::PopStyleColor();
 }
 
+/// Verbatim text in the mono face on an inset box the width of the column.
+/// Drawn on the draw list, so a box needs no window or id of its own.
+void draw_code(std::string_view _code) {
+    using namespace campcat::app;
+    constexpr ImVec2 k_pad(10.0F, 8.0F);
+    ImGui::PushFont(fonts_get(font_role::mono));
+    const ImVec2 at = ImGui::GetCursorScreenPos();
+    const float w = std::max(1.0F, ImGui::GetContentRegionAvail().x);
+    const float wrap = std::max(1.0F, w - 2.0F * k_pad.x);
+    const char *end = _code.data() + _code.size();
+    const ImVec2 text = ImGui::CalcTextSize(_code.data(), end, false, wrap);
+    const ImVec2 box(w, text.y + 2.0F * k_pad.y);
+    ImDrawList *dl = ImGui::GetWindowDrawList();
+    dl->AddRectFilled(at, ImVec2(at.x + box.x, at.y + box.y),
+                      ImGui::GetColorU32(theme::k_surface_inset), theme::k_radius_popup);
+    dl->AddText(ImGui::GetFont(), ImGui::GetFontSize(),
+                ImVec2(at.x + k_pad.x, at.y + k_pad.y), ImGui::GetColorU32(theme::k_text_2),
+                _code.data(), end, wrap);
+    ImGui::Dummy(box);
+    ImGui::PopFont();
+}
+
+/// Prose through the Markdown renderer with the tighter line gap, fenced code
+/// in a box, and one fixed gap between paragraphs however many blank lines
+/// the model wrote.
+void draw_blocks(llm_item &_it) {
+    if (_it.blocks_for != _it.text.size()) {
+        _it.blocks = campcat::app::chat_blocks(_it.text);
+        _it.blocks_for = _it.text.size();
+    }
+    if (_it.blocks.empty()) {
+        return;
+    }
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing,
+                        ImVec2(ImGui::GetStyle().ItemSpacing.x, k_line_gap));
+    for (size_t i = 0; i < _it.blocks.size(); ++i) {
+        if (i > 0) {
+            ImGui::Dummy(ImVec2(0.0F, k_para_gap));
+        }
+        const campcat::app::chat_block &b = _it.blocks[i];
+        if (b.code) {
+            draw_code(b.text);
+        } else {
+            ImGui::Markdown(b.text.c_str(), b.text.size(), md_config());
+        }
+    }
+    ImGui::PopStyleVar();
+    // The last line kept the tight gap; the next step gets the usual one.
+    ImGui::Spacing();
+}
+
+/// A tool step went wrong. Host notes say so in their status word and leave
+/// `ok` at its default; a subagent's events carry `ok` and no such word.
+bool tool_failed(const llm_item &_it) {
+    const std::optional<campcat::app::tool_note_parts> note =
+        campcat::app::split_tool_note(_it.text);
+    return !_it.ok || (note && note->status == "error");
+}
+
+/// A tool call on one line -- outcome, name, the first line of what came back
+/// -- and the rest on a click. Host notes are `**name** ok|error` plus a body;
+/// a subagent's are `**name** {args}`, whose args are then the detail.
+void draw_tool(llm_item &_it) {
+    using namespace campcat::app;
+    const std::optional<tool_note_parts> note = split_tool_note(_it.text);
+    if (!note) {
+        ImGui::PushStyleColor(ImGuiCol_Text, theme::k_text_2);
+        draw_blocks(_it);
+        ImGui::PopStyleColor();
+        return;
+    }
+    const bool failed = tool_failed(_it);
+    const bool known = note->status == "ok" || note->status == "error";
+    const std::string_view detail = known ? note->body : note->status;
+    const std::string_view summary = first_line(detail);
+    const char *glyph = failed ? icon::k_failed : known ? icon::k_ok : icon::k_tool;
+    const ImVec4 glyph_col = failed ? theme::k_danger : known ? theme::k_success : theme::k_text_3;
+
+    ImGui::PushID(&_it);
+    const ImVec2 at = ImGui::GetCursorScreenPos();
+    const float w = ImGui::GetContentRegionAvail().x;
+    const float h = ImGui::GetTextLineHeight();
+    if (detail.empty()) {
+        ImGui::Dummy(ImVec2(w, h));
+    } else if (ImGui::Selectable("##tool", false, ImGuiSelectableFlags_None, ImVec2(w, h))) {
+        _it.expanded = !_it.expanded;
+    }
+    ImDrawList *dl = ImGui::GetWindowDrawList();
+    const float gap = ImGui::GetStyle().ItemInnerSpacing.x;
+    float x = at.x;
+    dl->AddText(ImVec2(x, at.y), ImGui::GetColorU32(glyph_col), glyph);
+    x += ImGui::CalcTextSize(glyph).x + gap;
+    const char *name_end = note->name.data() + note->name.size();
+    dl->AddText(ImVec2(x, at.y), ImGui::GetColorU32(theme::k_text_2), note->name.data(),
+                name_end);
+    x += ImGui::CalcTextSize(note->name.data(), name_end).x + gap * 2.0F;
+    if (!summary.empty() && x < at.x + w) {
+        ImGui::PushStyleColor(ImGuiCol_Text, failed ? theme::k_danger : theme::k_text_3);
+        ImGui::RenderTextEllipsis(dl, ImVec2(x, at.y), ImVec2(at.x + w, at.y + h), at.x + w,
+                                  at.x + w, summary.data(), summary.data() + summary.size(),
+                                  nullptr);
+        ImGui::PopStyleColor();
+    }
+    if (_it.expanded && !detail.empty()) {
+        draw_code(detail);
+    }
+    ImGui::PopID();
+}
+
+/// A screenshot as a thumbnail, opened whole in a popup on a click.
+void draw_thumbnail(llm_item &_it) {
+    using namespace campcat::app;
+    const auto tex = static_cast<ImTextureID>(static_cast<uintptr_t>(_it.tex));
+    // The id the host gave the image, not the item's address: a turn's items
+    // move when it grows, which would close a popup someone is looking at.
+    ImGui::PushID(static_cast<int>(_it.image_id));
+    const ImVec2 thumb = fit_image(_it.tex_w, _it.tex_h,
+                                   ImVec2(ImGui::GetContentRegionAvail().x, k_thumb_h));
+    if (ImGui::InvisibleButton("thumb", thumb)) {
+        ImGui::OpenPopup("view");
+    }
+    const bool hovered = ImGui::IsItemHovered();
+    if (hovered) {
+        ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+    }
+    ImDrawList *dl = ImGui::GetWindowDrawList();
+    const ImVec2 mn = ImGui::GetItemRectMin();
+    const ImVec2 mx = ImGui::GetItemRectMax();
+    dl->AddImageRounded(tex, mn, mx, ImVec2(0.0F, 0.0F), ImVec2(1.0F, 1.0F), IM_COL32_WHITE,
+                        theme::k_radius_popup);
+    dl->AddRect(mn, mx, ImGui::GetColorU32(hovered ? theme::k_border_strong : theme::k_border),
+                theme::k_radius_popup);
+    // Centred rather than at the cursor, which would push a large view off
+    // the window when the thumbnail sits low or to the right.
+    ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(), ImGuiCond_Appearing,
+                            ImVec2(0.5F, 0.5F));
+    if (ImGui::BeginPopup("view")) {
+        // ponytail: shows the timeline's own texture, decoded at most
+        // `k_turn_img_max_w` wide. Sharper needs the host to keep each turn's
+        // PNG past the next turn, which it clears today.
+        const ImVec2 disp = ImGui::GetIO().DisplaySize;
+        const ImVec2 full = fit_image(_it.tex_w, _it.tex_h,
+                                      ImVec2(disp.x * 0.85F, disp.y * 0.85F));
+        if (ImGui::InvisibleButton("full", full)) {
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::GetWindowDrawList()->AddImageRounded(
+            tex, ImGui::GetItemRectMin(), ImGui::GetItemRectMax(), ImVec2(0.0F, 0.0F),
+            ImVec2(1.0F, 1.0F), IM_COL32_WHITE, theme::k_radius_popup);
+        ImGui::EndPopup();
+    }
+    ImGui::PopID();
+}
+
 /// One step of a timeline: an image, what the agent did, its reasoning, or its
 /// words. Shared by replies and the subagent card.
 void draw_item(llm_item &_it, bool _growing, bool _subagent) {
     if (_it.type == campcat::llm_event::kind::image) {
         ensure_texture(_it, _subagent);
         if (_it.tex != 0 && _it.tex_w > 0) {
-            const ImVec2 img = fit_image(_it.tex_w, _it.tex_h,
-                                         ImGui::GetContentRegionAvail().x);
-            ImGui::Image(
-                static_cast<ImTextureID>(static_cast<uintptr_t>(_it.tex)),
-                img, ImVec2(0.0F, 0.0F), ImVec2(1.0F, 1.0F));
+            draw_thumbnail(_it);
         } else if (_it.tex_dropped) {
             ImGui::TextDisabled("(screenshot dropped)");
         }
         return;
     }
     if (_it.type == campcat::llm_event::kind::tool) {
-        ImGui::PushStyleColor(
-            ImGuiCol_Text, ImGui::GetStyle().Colors[ImGuiCol_TextDisabled]);
-        ImGui::Markdown(_it.text.c_str(), _it.text.size(), md_config());
-        ImGui::PopStyleColor();
+        draw_tool(_it);
         return;
     }
     if (_it.type == campcat::llm_event::kind::thinking) {
         draw_thinking(_it, _growing);
         return;
     }
-    ImGui::Markdown(_it.text.c_str(), _it.text.size(), md_config());
+    draw_blocks(_it);
 }
 
 bool is_blank(std::string_view _s) {    for (const char c : _s) {
@@ -786,6 +937,14 @@ bool is_blank(std::string_view _s) {    for (const char c : _s) {
 /// pixels, which pushed the controls over the log's border. Seeded generously
 /// so the very first frame under-fills instead of overlapping.
 float g_footer_h = 160.0F;
+
+/// The skill index beside the chat is folded away, and how wide it is when it
+/// shows. Both kept in imgui.ini by `llm_panel_init_settings`.
+bool g_index_hidden = false;
+float g_index_w = campcat::app::theme::k_index_w;
+constexpr float k_index_min_w = 160.0F;
+/// A drag stops here, so the index cannot take the replies with it.
+constexpr float k_chat_min_w = 280.0F;
 
 /// Queue the outgoing turn the moment it is sent, so the log shows the user's
 /// message while the reply is still in flight.
@@ -1016,24 +1175,6 @@ std::string waiting_label() {
     return std::string(g_thinking ? "Thinking" : "") + std::string(dots, '.');
 }
 
-/// Centred two-line hint for an empty conversation.
-void draw_empty_state() {
-    const char *title = "Tell CampCat what to do";
-    const char *hint = "It looks at the device screen itself, then taps";
-    const ImVec2 avail = ImGui::GetContentRegionAvail();
-    ImGui::SetCursorPosY(ImGui::GetCursorPosY() + avail.y * 0.4F);
-    WITH_FONT(bold, {
-        ImGui::SetCursorPosX(
-            ImGui::GetCursorPosX() +
-            std::max(0.0F, (avail.x - ImGui::CalcTextSize(title).x) * 0.5F));
-        ImGui::TextUnformatted(title);
-    });
-    ImGui::SetCursorPosX(
-        ImGui::GetCursorPosX() +
-        std::max(0.0F, (avail.x - ImGui::CalcTextSize(hint).x) * 0.5F));
-    ImGui::TextDisabled("%s", hint);
-}
-
 /// Width of a bubble holding `_text`. Measured with a narrower wrap width than
 /// the bubble ends up with, so the text never wraps a line earlier than needed.
 float bubble_width(const char *_text, float _max_w, float _extra, float _pad) {
@@ -1046,57 +1187,123 @@ float bubble_width(const char *_text, float _max_w, float _extra, float _pad) {
     return std::min(inner + 2.0F * _pad, _max_w);
 }
 
-/// One exchange as two bubbles: the user's hugging the right edge, the reply on
-/// the left. A pending turn shows a waiting bubble in place of the reply.
-void draw_turn(llm_turn &_t, int _index) {
+/// One exchange in the message column that starts at `_x` and is `_col` wide:
+/// the user's bubble hugging its right edge, the reply under an avatar on the
+/// left. A pending turn shows a waiting line in place of the reply.
+void draw_turn(llm_turn &_t, int _index, float _x, float _col) {
+    using namespace campcat::app;
+    constexpr float k_avatar = 24.0F;
+    constexpr float k_avatar_gap = 8.0F;
     ImGui::PushID(_index);
-    const float pad = ImGui::GetStyle().WindowPadding.x;
-    const float max_w = ImGui::GetContentRegionAvail().x * k_bubble_frac;
+    const ImVec2 bubble_pad(12.0F, 8.0F);
+    const float max_w = _col * k_bubble_frac;
 
-    const float uw = bubble_width(_t.user_text.c_str(), max_w, 0.0F, pad);
-    ImGui::SetCursorPosX(ImGui::GetCursorPosX() +
-                         ImGui::GetContentRegionAvail().x - uw);
-    ImGui::PushStyleColor(ImGuiCol_ChildBg, k_user_bg);
-    ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, k_bubble_rounding);
+    const float uw = bubble_width(_t.user_text.c_str(), max_w, 0.0F, bubble_pad.x);
+    ImGui::SetCursorPosX(_x + _col - uw);
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, theme::k_surface_3);
+    ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, theme::k_radius_bubble);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, bubble_pad);
     ImGui::BeginChild("u", ImVec2(uw, 0.0F),
                       ImGuiChildFlags_AutoResizeY |
                           ImGuiChildFlags_AlwaysUseWindowPadding,
                       ImGuiWindowFlags_NoScrollbar);
+    ImGui::PopStyleVar(2);
+    ImGui::PopStyleColor();
     const ImVec2 user_top = ImGui::GetCursorScreenPos();
     ImGui::TextWrapped("%s", _t.user_text.c_str());
     copy_menu("copy", _t.user_text, user_top);
     ImGui::EndChild();
-    ImGui::PopStyleVar();
-    ImGui::PopStyleColor();
 
-    // A markdown reply cannot be measured from the raw text (`**` would be
-    // counted), so the bubble goes full width once there is real text; the
-    // placeholder stays tight because a wide box holding "..." looks broken. It
-    // is measured at its widest so the ticking dots do not resize it. Steps and
-    // images need the full width too, or a note would be wrapped into a narrow
-    // column and an image clipped into a narrow strip.
-    const bool placeholder = _t.pending && _t.items.empty();
-    const float aw =
-        placeholder
-            ? bubble_width(g_thinking ? "Thinking..." : "...", max_w, 0.0F, pad)
-            : max_w;
+    ImGui::SetCursorPosX(_x);
+    const ImVec2 avatar = ImGui::GetCursorScreenPos();
+    ImDrawList *dl = ImGui::GetWindowDrawList();
+    const ImVec2 centre(avatar.x + k_avatar * 0.5F, avatar.y + k_avatar * 0.5F);
+    dl->AddCircleFilled(centre, k_avatar * 0.5F, ImGui::GetColorU32(theme::k_accent_wash));
+    ImFont *small_font = fonts_get(font_role::small);
+    dl->AddText(small_font, small_font->FontSize,
+                icon_origin(small_font, icon::k_cat, avatar,
+                            ImVec2(avatar.x + k_avatar, avatar.y + k_avatar)),
+                ImGui::GetColorU32(theme::k_accent_fg), icon::k_cat);
+    ImGui::Dummy(ImVec2(k_avatar, k_avatar));
+    ImGui::SameLine(0.0F, k_avatar_gap);
+
+    // No bubble around a reply: it reads as the page's own text, and only a
+    // failure gets a box. Full width, because a markdown reply cannot be
+    // measured from the raw text (`**` would be counted), and steps and images
+    // need the room.
+    const float aw = _col - k_avatar - k_avatar_gap;
     const bool failed = !_t.pending && !_t.ok;
-    ImGui::PushStyleColor(ImGuiCol_ChildBg, failed ? k_err_bg : k_bot_bg);
-    ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, k_bubble_rounding);
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, failed ? theme::k_danger_wash : ImVec4());
+    ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, theme::k_radius_card);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding,
+                        failed ? ImGui::GetStyle().WindowPadding : ImVec2(0.0F, 2.0F));
     ImGui::BeginChild("a", ImVec2(aw, 0.0F),
                       ImGuiChildFlags_AutoResizeY |
                           ImGuiChildFlags_AlwaysUseWindowPadding,
                       ImGuiWindowFlags_NoScrollbar);
+    ImGui::PopStyleVar(2);
+    ImGui::PopStyleColor();
     const ImVec2 reply_top = ImGui::GetCursorScreenPos();
-    // The turn as it happened, step by step: the model's words in the normal
-    // colour, what it did dimmed, and each image where it appeared. Markdown
-    // rather than plain text for a note, because a note carries a whole tool
-    // result and the renderer is what wraps it to the bubble width -- plain
-    // text is simply clipped at the edge once the line runs long. The disabled
-    // colour is pushed back by hand so the notes still read as quieter than the
-    // replies between them.
-    for (llm_item &it : _t.items) {
-        draw_item(it, _t.pending && &it == &_t.items.back());
+    // The turn as it happened, step by step, while it runs. Once it is over,
+    // everything before the closing words folds into one line, so the answer
+    // is what the eye lands on; a turn that never called a tool has nothing
+    // worth folding.
+    size_t reply_start = _t.items.size();
+    while (reply_start > 0 &&
+           _t.items[reply_start - 1].type == campcat::llm_event::kind::text) {
+        --reply_start;
+    }
+    int tools = 0;
+    int shots = 0;
+    int tool_failures = 0;
+    for (size_t i = 0; i < reply_start; ++i) {
+        const llm_item &it = _t.items[i];
+        tools += it.type == campcat::llm_event::kind::tool ? 1 : 0;
+        tool_failures += it.type == campcat::llm_event::kind::tool && tool_failed(it) ? 1 : 0;
+        shots += it.type == campcat::llm_event::kind::image ? 1 : 0;
+    }
+    const bool fold = !_t.pending && tools > 0;
+    size_t first = 0;
+    if (fold) {
+        char label[128];
+        int n = std::snprintf(label, sizeof(label), "%s  %d step%s",
+                              _t.steps_open ? icon::k_chevron_down : icon::k_chevron_right,
+                              tools, tools == 1 ? "" : "s");
+        if (shots > 0) {
+            n += std::snprintf(label + n, sizeof(label) - n, " \xC2\xB7 %d screenshot%s", shots,
+                               shots == 1 ? "" : "s");
+        }
+        if (tool_failures > 0) {
+            std::snprintf(label + n, sizeof(label) - n, " \xC2\xB7 %d failed", tool_failures);
+        }
+        ImGui::PushStyleColor(ImGuiCol_Text, theme::k_text_3);
+        if (ImGui::Selectable(label)) {
+            _t.steps_open = !_t.steps_open;
+        }
+        ImGui::PopStyleColor();
+        first = _t.steps_open ? 0 : reply_start;
+    }
+    // Unfolded, the steps sit behind a rule so they stay apart from the answer.
+    const bool ruled = fold && _t.steps_open;
+    const ImVec2 steps_top = ImGui::GetCursorScreenPos();
+    auto end_steps = [&] {
+        ImGui::Unindent(12.0F);
+        const float bottom = ImGui::GetCursorScreenPos().y - ImGui::GetStyle().ItemSpacing.y;
+        ImGui::GetWindowDrawList()->AddRectFilled(steps_top,
+                                                  ImVec2(steps_top.x + 2.0F, bottom),
+                                                  ImGui::GetColorU32(theme::k_border_strong));
+    };
+    if (ruled) {
+        ImGui::Indent(12.0F);
+    }
+    for (size_t i = first; i < _t.items.size(); ++i) {
+        if (ruled && i == reply_start) {
+            end_steps();
+        }
+        draw_item(_t.items[i], _t.pending && i + 1 == _t.items.size());
+    }
+    if (ruled && reply_start == _t.items.size()) {
+        end_steps();
     }
     // Only while the reply is still to come: a growing text step is its own
     // sign that the model is working, and a label under it would just be a
@@ -1108,13 +1315,13 @@ void draw_turn(llm_turn &_t, int _index) {
     } else if (_t.interrupted) {
         ImGui::TextDisabled("Interrupted");
     } else if (failed) {
-        WITH_FONT(bold, { ImGui::TextColored(k_err_col, "Request failed"); });
+        WITH_FONT(bold, {
+            ImGui::TextColored(theme::k_danger, "%s  Request failed", icon::k_failed);
+        });
         ImGui::TextWrapped("%s", _t.error.c_str());
     }
     copy_menu("copy", reply_text(_t), reply_top);
     ImGui::EndChild();
-    ImGui::PopStyleVar();
-    ImGui::PopStyleColor();
 
     ImGui::PopID();
 }
@@ -1149,16 +1356,6 @@ bool sync_approval_texture(const campcat::llm_approval &_a) {
     g_appr_tex = campcat::app::upload_bgr(bgr, &g_appr_w, &g_appr_h);
     return true;
 }
-
-/// The gear next to Send, and the approval gates behind it.
-///
-/// The gear, relative to the working directory the app is started from (the
-/// same base `fonts.cpp` resolves `campcat/sources/cpp/assets/fonts/` against).
-/// Drawn rather than designed: a white disc at radius 0.63 of the half-size,
-/// eight teeth out to 0.875, a hub punched back out at 0.22, all 8x
-/// supersampled and INTER_AREA'd down. White on an alpha channel is the shape
-/// `load_icon` uploads.
-constexpr char k_gear_path[] = "campcat/sources/cpp/assets/icons/gear.png";
 
 /// Wide enough for the longest snap mode name ("Otsu blobs") plus the arrow.
 constexpr float k_snap_combo_w = 130.0F;
@@ -1231,29 +1428,16 @@ void draw_fuse_settings(campcat::app_config &_c) {
 /// meaning -- off means nothing asks -- and the seven under it only matter
 /// while it is on, hence the greying rather than hiding them.
 void draw_approval_settings(campcat::app_config &_c) {
-    const float side = ImGui::GetFrameHeight();
-    if (campcat::app::button("##approval_settings", ImVec2(side, side))) {
+    if (campcat::app::icon_button("##approval_settings", campcat::app::icon::k_settings,
+                                  "Which tools ask before acting")) {
         ImGui::OpenPopup("llm_approval_settings");
-    }
-    if (ImGui::IsItemHovered()) {
-        ImGui::SetTooltip("Which tools ask before acting");
-    }
-    // Drawn after the button, into the same window list, so the icon lands on
-    // top of the frame. Tinted with the text colour so it follows the theme.
-    const GLuint tex = campcat::app::load_icon(k_gear_path);
-    if (tex != 0) {
-        const ImVec2 mn = ImGui::GetItemRectMin();
-        const float pad = (side - k_gear_side) * 0.5F;
-        ImGui::GetWindowDrawList()->AddImage(
-            static_cast<ImTextureID>(static_cast<uintptr_t>(tex)),
-            ImVec2(mn.x + pad, mn.y + pad),
-            ImVec2(mn.x + side - pad, mn.y + side - pad), ImVec2(0.0F, 0.0F),
-            ImVec2(1.0F, 1.0F), ImGui::GetColorU32(ImGuiCol_Text));
     }
 
     if (!ImGui::BeginPopup("llm_approval_settings")) {
         return;
     }
+    // Opened from the composer, which draws in the chat face.
+    ImGui::PushFont(fonts_get(font_role::body));
     // Not an approval gate either, but this is the panel's one settings popup,
     // and switching the model is the same kind of "change how it behaves" knob.
     ImGui::TextDisabled("Model provider");
@@ -1308,6 +1492,7 @@ void draw_approval_settings(campcat::app_config &_c) {
             "or soft-edged button) comes out worse, so choose None to restore "
             "the old behaviour exactly.");
     }
+    ImGui::PopFont();
     ImGui::EndPopup();
 }
 
@@ -1573,21 +1758,20 @@ void draw_annotation_window() {
         // to judge the snap against. The model's is a different colour and a
         // thinner line, the same encoding the approval bubble uses, so "which
         // is which" does not depend on telling two offsets apart.
+        using campcat::app::theme::rgb;
+        const ImU32 model = ImGui::GetColorU32(
+            rgb(0xE8A94B, a.given_region ? 230.0F / 255.0F : 130.0F / 255.0F));
         for (const campcat::llm::region &r : a.highlight) {
-            draw_region(dl, mn, 1.0F, r,
-                        a.given_region ? IM_COL32(255, 200, 60, 230)
-                                       : IM_COL32(255, 200, 60, 130),
-                        a.given_region ? IM_COL32(255, 200, 60, 230)
-                                       : IM_COL32(255, 200, 60, 130),
-                        a.given_region ? 2.0F : 1.0F);
+            draw_region(dl, mn, 1.0F, r, model, model, a.given_region ? 2.0F : 1.0F);
         }
         if (a.given_region) {
             draw_region(dl, mn, 1.0F, *a.given_region, 0,
-                        IM_COL32(200, 120, 255, 220), 1.0F);
+                        ImGui::GetColorU32(rgb(0xC9A2F5, 220.0F / 255.0F)), 1.0F);
         }
         if (g_annot_dragging || g_annot_has_region) {
-            draw_region(dl, mn, 1.0F, annot_draft(), IM_COL32(80, 200, 255, 55),
-                        IM_COL32(255, 220, 80, 255), 2.0F);
+            draw_region(dl, mn, 1.0F, annot_draft(),
+                        ImGui::GetColorU32(rgb(0x7EA6FF, 0.20F)),
+                        ImGui::GetColorU32(campcat::app::theme::k_accent_fg), 2.0F);
         }
         ImGui::EndChild();
         if (g_annot_has_region) {
@@ -1612,32 +1796,20 @@ void draw_annotation_window() {
         }
         // Switching shape drops the committed region: a box must not ride along
         // as a circle (or the other way round) just because it was drawn first.
-        // Re-clicking the active radio is not a switch -- RadioButton reports
-        // the click either way, and dropping the region there would throw away
-        // what was just drawn.
+        // Re-clicking the active option is not a switch (`segmented` reports
+        // only a change), so what was just drawn survives it.
         ImGui::SameLine();
-        if (ImGui::RadioButton("box", g_annot_shape == edit_shape::box) &&
-            g_annot_shape != edit_shape::box) {
-            g_annot_shape = edit_shape::box;
-            g_annot_has_region = false;
-        }
-        ImGui::SameLine();
-        if (ImGui::RadioButton("circle", g_annot_shape == edit_shape::circle) &&
-            g_annot_shape != edit_shape::circle) {
-            g_annot_shape = edit_shape::circle;
-            g_annot_has_region = false;
-        }
-        ImGui::SameLine();
-        if (ImGui::RadioButton("diamond",
-                               g_annot_shape == edit_shape::diamond) &&
-            g_annot_shape != edit_shape::diamond) {
-            g_annot_shape = edit_shape::diamond;
+        static const char *const k_shapes[] = {"Box", "Circle", "Diamond"};
+        int shape_index = static_cast<int>(g_annot_shape);
+        if (campcat::app::segmented("##annot_shape", k_shapes, 3, &shape_index)) {
+            g_annot_shape = static_cast<edit_shape>(shape_index);
             g_annot_has_region = false;
         }
         if (!g_annot_has_region) {
             ImGui::BeginDisabled();
         }
-        if (campcat::app::button("Use this region")) {
+        if (campcat::app::button("Use this region", ImVec2(),
+                                 campcat::app::button_kind::primary)) {
             g_staged_region = annot_draft();
             g_staged_id = g_annot_id;
             g_annot_open = false;
@@ -1646,7 +1818,7 @@ void draw_annotation_window() {
             ImGui::EndDisabled();
         }
         ImGui::SameLine();
-        if (campcat::app::button("Cancel")) {
+        if (campcat::app::button("Cancel", ImVec2(), campcat::app::button_kind::ghost)) {
             g_annot_open = false; // the staged box, if any, is left alone
         }
     }
@@ -1665,23 +1837,28 @@ void draw_approval_image(const campcat::llm_approval &_a, float _max_h) {
     const float scale = std::min(
         {1.0F, max_w / static_cast<float>(g_appr_w),
          _max_h / static_cast<float>(g_appr_h)});
+    using campcat::app::theme::rgb;
     const ImVec2 size(g_appr_w * scale, g_appr_h * scale);
-    ImGui::Image(static_cast<ImTextureID>(static_cast<uintptr_t>(g_appr_tex)),
-                 size);
+    ImGui::Dummy(size);
     const ImVec2 origin = ImGui::GetItemRectMin();
     ImDrawList *dl = ImGui::GetWindowDrawList();
+    dl->AddImageRounded(static_cast<ImTextureID>(static_cast<uintptr_t>(g_appr_tex)),
+                        origin, ImGui::GetItemRectMax(), ImVec2(0.0F, 0.0F),
+                        ImVec2(1.0F, 1.0F), IM_COL32_WHITE, 8.0F);
+    dl->AddRect(origin, ImGui::GetItemRectMax(),
+                ImGui::GetColorU32(campcat::app::theme::k_border), 8.0F);
     for (const campcat::llm::region &r : _a.highlight) {
-        draw_region(dl, origin, scale, r, IM_COL32(255, 200, 60, 48),
-                    IM_COL32(255, 200, 60, 230), 2.0F);
+        draw_region(dl, origin, scale, r, ImGui::GetColorU32(rgb(0xE8A94B, 48.0F / 255.0F)),
+                    ImGui::GetColorU32(rgb(0xE8A94B, 230.0F / 255.0F)), 2.0F);
     }
     if (_a.given_region) {
         draw_region(dl, origin, scale, *_a.given_region, 0,
-                    IM_COL32(200, 120, 255, 220), 1.0F);
+                    ImGui::GetColorU32(rgb(0xC9A2F5, 220.0F / 255.0F)), 1.0F);
     }
     if (g_staged_region && g_staged_id == _a.id) {
         draw_region(dl, origin, scale, *g_staged_region,
-                    IM_COL32(80, 200, 255, 55), IM_COL32(80, 200, 255, 255),
-                    2.0F);
+                    ImGui::GetColorU32(rgb(0x7EA6FF, 0.20F)),
+                    ImGui::GetColorU32(campcat::app::theme::k_accent_fg), 2.0F);
     }
     if (_a.editable && ImGui::IsItemHovered() &&
         ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
@@ -1692,11 +1869,12 @@ void draw_approval_image(const campcat::llm_approval &_a, float _max_h) {
 /// Outside the scrollback: the question and its decisions stay by the input.
 /// True when a decision was sent, so Enter cannot also submit this frame.
 bool draw_approval_panel(const campcat::llm_approval &_a) {
+    using campcat::app::button_kind;
     bool answered = false;
-    ImGui::PushStyleColor(ImGuiCol_ChildBg, k_bot_bg);
-    ImGui::BeginChild("approval", ImVec2(0.0F, 0.0F),
-                      ImGuiChildFlags_Borders | ImGuiChildFlags_AutoResizeY);
-    WITH_FONT(bold, { ImGui::TextUnformatted("Needs your approval"); });
+    campcat::app::card_begin("approval", "Needs your approval",
+                             {.glyph = campcat::app::icon::k_approval,
+                              .collapsible = false,
+                              .bar = campcat::app::theme::k_warning});
     if (ImGui::BeginTable("approval_details", 2,
                           ImGuiTableFlags_SizingStretchProp)) {
         ImGui::TableSetupColumn("evidence", ImGuiTableColumnFlags_WidthStretch,
@@ -1724,7 +1902,7 @@ bool draw_approval_panel(const campcat::llm_approval &_a) {
         ImGui::BeginChild("approval_summary", ImVec2(0.0F, 48.0F));
         ImGui::TextWrapped("%s", _a.summary.c_str());
         ImGui::EndChild();
-        if (campcat::app::button("Allow once")) {
+        if (campcat::app::button("Allow once", ImVec2(), button_kind::primary)) {
             g_host.answer_approval(true);
             clear_staged();
             answered = true;
@@ -1736,24 +1914,24 @@ bool draw_approval_panel(const campcat::llm_approval &_a) {
                 reject_w <= right) {
             ImGui::SameLine();
         }
-        if (campcat::app::button("Reject")) {
+        if (campcat::app::button("Reject", ImVec2(), button_kind::danger)) {
             g_host.answer_approval(false, {}, g_staged_region);
             clear_staged();
             answered = true;
         }
-        if (_a.editable && g_appr_tex != 0 && campcat::app::button("Edit region")) {
+        if (_a.editable && g_appr_tex != 0 &&
+            campcat::app::button("Edit region", ImVec2(), button_kind::ghost)) {
             open_annotation(_a);
         }
         if (g_staged_region) {
             ImGui::TextWrapped("Corrected region ready. Submit below to send it.");
-            if (campcat::app::small_button("Discard correction")) {
+            if (campcat::app::button("Discard correction", ImVec2(), button_kind::ghost)) {
                 clear_staged();
             }
         }
         ImGui::EndTable();
     }
-    ImGui::EndChild();
-    ImGui::PopStyleColor();
+    campcat::app::card_end();
     return answered;
 }
 
@@ -1761,7 +1939,7 @@ bool draw_approval_panel(const campcat::llm_approval &_a) {
 /// context menu, so the caller can start the reset on the worker.
 bool draw_log(const ImVec2 &_size) {
     bool clear_requested = false;
-    ImGui::BeginChild("llm_log", _size, ImGuiChildFlags_Borders);
+    ImGui::BeginChild("llm_log", _size);
     // Any upward move is the reader asking for history, and it outranks
     // following the tail. Checked before the snap below sets its target: the
     // snap lands on the next frame and would otherwise undo a notch at a time,
@@ -1794,16 +1972,21 @@ bool draw_log(const ImVec2 &_size) {
     // clipping the tail of every line.
     ImGui::PushFont(fonts_get(font_role::chat));
     if (g_turns.empty()) {
-        draw_empty_state();
+        campcat::app::empty_state(campcat::app::icon::k_cat, "Tell CampCat what to do",
+                                  "It looks at the device screen itself, then taps");
     }
+    // One centred column: a line much wider than this is hard to read back.
+    const float avail = ImGui::GetContentRegionAvail().x;
+    const float col = std::min(avail, campcat::app::theme::k_chat_max_w);
+    const float x = ImGui::GetCursorPosX() + (avail - col) * 0.5F;
     for (size_t i = 0; i < g_turns.size(); ++i) {
         if (i > 0) {
             ImGui::Spacing(); // turns read as groups: twice the in-turn bubble
                               // gap
         }
-        draw_turn(g_turns[i], static_cast<int>(i));
+        draw_turn(g_turns[i], static_cast<int>(i), x, col);
     }
-    draw_subagent_card();
+    draw_subagent_card(x, col);
 
     ImGui::PopFont();
 
@@ -1830,10 +2013,6 @@ void llm_panel_shutdown_gl() {
     g_controller.begin_shutdown(shutdown_cfg);
 
     campcat::app::delete_tex(&g_appr_tex, &g_appr_w, &g_appr_h);
-    // The gear, Send and the log's chevrons go with them. Nothing here owns
-    // them -- `load_icon` does -- but the context is still current at this
-    // point and this is where the panel's own textures are already released.
-    campcat::app::release_icons();
     g_appr_id = -1;
     drop_all_turns();
     release_sub_items();
@@ -1906,23 +2085,24 @@ bool llm_panel_draw_sidebar_task(bool _on_llm_page) {
         status.level != campcat::activity_level::failed) {
         return false;
     }
+    using campcat::app::button_kind;
     bool view_task = false;
-    ImGui::PushID("sidebar_agent_task");
     ImGui::Spacing();
-    WITH_FONT(bold, { ImGui::SeparatorText("Agent task"); });
-    ImGui::TextColored(campcat::activity_color(status.level), "%s", status.label);
-    WITH_FONT(bold, {
-        if (g_controller.running()) {
-            ImGui::BeginDisabled(g_controller.stopping() || g_controller.resetting());
-            if (campcat::app::button("Stop agent", ImVec2(-1.0F, 0.0F))) {
-                request_task_stop();
-            }
-            ImGui::EndDisabled();
+    campcat::app::card_begin("agent_task", "Agent task",
+                             {.glyph = campcat::app::icon::k_bot,
+                              .collapsible = false,
+                              .status = &status});
+    if (g_controller.running()) {
+        ImGui::BeginDisabled(g_controller.stopping() || g_controller.resetting());
+        if (campcat::app::button("Stop agent", ImVec2(-1.0F, 0.0F), button_kind::danger)) {
+            request_task_stop();
         }
-        if (!_on_llm_page) {
-            view_task = campcat::app::button("Open task in LLM", ImVec2(-1.0F, 0.0F));
-        }
-    });
+        ImGui::EndDisabled();
+    }
+    if (!_on_llm_page) {
+        view_task = campcat::app::button("Open task in LLM", ImVec2(-1.0F, 0.0F),
+                                         button_kind::ghost);
+    }
     if (g_controller.stopping() && g_controller.running()) {
         ImGui::TextWrapped("Stop requested. Waiting for the current operation to finish.");
     } else if (status.level == campcat::activity_level::waiting &&
@@ -1930,8 +2110,79 @@ bool llm_panel_draw_sidebar_task(bool _on_llm_page) {
         ImGui::TextWrapped(_on_llm_page ? "Review the pending approval in chat."
                                         : "Open LLM to review the pending approval.");
     }
-    ImGui::PopID();
+    campcat::app::card_end();
     return view_task;
+}
+
+void llm_panel_init_settings() {
+    ImGuiSettingsHandler h;
+    h.TypeName = "CampCat";
+    h.TypeHash = ImHashStr(h.TypeName);
+    h.ReadOpenFn = [](ImGuiContext *, ImGuiSettingsHandler *, const char *_name) -> void * {
+        return std::strcmp(_name, "Llm") == 0 ? &g_index_hidden : nullptr;
+    };
+    h.ReadLineFn = [](ImGuiContext *, ImGuiSettingsHandler *, void *, const char *_line) {
+        int hidden = 0;
+        float width = 0.0F;
+        if (std::sscanf(_line, "IndexHidden=%d", &hidden) == 1) {
+            g_index_hidden = hidden != 0;
+        } else if (std::sscanf(_line, "IndexWidth=%f", &width) == 1 && width >= k_index_min_w) {
+            g_index_w = width;
+        }
+    };
+    h.WriteAllFn = [](ImGuiContext *, ImGuiSettingsHandler *_h, ImGuiTextBuffer *_buf) {
+        _buf->appendf("[%s][Llm]\nIndexHidden=%d\nIndexWidth=%.0f\n\n", _h->TypeName,
+                      g_index_hidden ? 1 : 0, g_index_w);
+    };
+    ImGui::AddSettingsHandler(&h);
+}
+
+void llm_panel_draw_index_toggle() {
+    namespace icon = campcat::app::icon;
+    if (campcat::app::icon_button("##index",
+                                  g_index_hidden ? icon::k_index_show : icon::k_index_hide,
+                                  g_index_hidden ? "Show index" : "Hide index")) {
+        g_index_hidden = !g_index_hidden;
+        ImGui::MarkIniSettingsDirty();
+    }
+}
+
+/// Width of the index for this frame. The grab is the gap beside the column:
+/// the list fills the column, so a handle on the rule itself would lose the
+/// click to a row. While held, the width follows the pointer.
+static float index_column_width(float _row_h) {
+    const float avail = ImGui::GetContentRegionAvail().x;
+    const float gap = ImGui::GetStyle().ItemSpacing.x;
+    const float max_w = avail - gap - k_chat_min_w;
+    float width = g_index_w;
+    if (max_w >= k_index_min_w) {
+        width = std::min(width, max_w);
+    }
+
+    const ImVec2 origin = ImGui::GetCursorScreenPos();
+    const float h = std::max(1.0F, _row_h);
+    ImGui::SetCursorScreenPos(ImVec2(origin.x + width, origin.y));
+    ImGui::InvisibleButton("index_split", ImVec2(std::max(1.0F, gap), h));
+    const bool active = ImGui::IsItemActive();
+    if (ImGui::IsItemHovered() || active) {
+        ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeEW);
+    }
+    if (active) {
+        const float next = std::clamp(g_index_w + ImGui::GetIO().MouseDelta.x, k_index_min_w,
+                                      std::max(k_index_min_w, max_w));
+        if (next != g_index_w) {
+            g_index_w = next;
+            width = max_w >= k_index_min_w ? std::min(next, max_w) : next;
+            ImGui::MarkIniSettingsDirty();
+        }
+    }
+    if (ImGui::IsItemHovered() || active) {
+        ImGui::GetWindowDrawList()->AddRectFilled(
+            ImVec2(origin.x + width, origin.y), ImVec2(origin.x + width + 2.0F, origin.y + h),
+            ImGui::GetColorU32(active ? ImGuiCol_SeparatorActive : ImGuiCol_SeparatorHovered));
+    }
+    ImGui::SetCursorScreenPos(origin);
+    return width;
 }
 
 void llm_panel_draw_panel(campcat::shell_state &_st, campcat::app_config &_cfg) {
@@ -1947,13 +2198,15 @@ void llm_panel_draw_panel(campcat::shell_state &_st, campcat::app_config &_cfg) 
         reload_memory();
     }
 
-    // Saved skills in a fixed column on the left, conversation on the right,
-    // the prompt box below both. Side by side because the list is an index, not
-    // a second conversation: stacked, it took height off every reply.
-    script_editor_panel_draw(_cfg.library_root(),
-                             k_script_list_w, -g_footer_h, _st.workspace,
-                             _st.device_tasks.busy() || _st.sched.running());
-    ImGui::SameLine();
+    // Saved skills in a column on the left, conversation on the right, the
+    // prompt box below both. Side by side because the list is an index, not a
+    // second conversation: stacked, it took height off every reply.
+    if (!g_index_hidden) {
+        const float index_w = index_column_width(ImGui::GetContentRegionAvail().y - g_footer_h);
+        script_editor_panel_draw(_cfg.library_root(), index_w, -g_footer_h, _st.workspace,
+                                 _st.device_tasks.busy() || _st.sched.running());
+        ImGui::SameLine();
+    }
     // Measured, not another negative width: a negative size is resolved against
     // the window's content region, not against what is left past the cursor, so
     // "-list_w" here would leave the list's width blank at the right edge too.
@@ -1982,21 +2235,45 @@ void llm_panel_draw_panel(campcat::shell_state &_st, campcat::app_config &_cfg) 
     ImGui::BeginDisabled(g_controller.stopping());
     const bool answered = have_approval && draw_approval_panel(approval);
     ImGui::EndDisabled();
-    ImGui::TextUnformatted(awaiting ? "Correction for this operation"
-                                    : "Message to agent");
+    namespace theme = campcat::app::theme;
+    if (awaiting) {
+        ImGui::TextColored(theme::k_warning, "Correction for this operation");
+    }
 
     // The action label makes an approval correction distinct from a new message.
     const bool memorizing = g_controller.memorizing();
-    const float gap = ImGui::GetStyle().ItemSpacing.x;
     const char *send_label = awaiting ? "Submit correction" : "Send";
-    const float send_w = campcat::app::button_width(send_label);
-    const float gear_w = ImGui::GetFrameHeight() + gap;
-    ImGui::SetNextItemWidth(-(send_w + gear_w + gap * 2.0F + 2.0F));
+    // The frame lights up while the box inside it has focus; that is only
+    // known after the box is drawn, so it is last frame's answer.
+    static bool s_prompt_active = false;
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, theme::k_surface_inset);
+    ImGui::PushStyleColor(ImGuiCol_Border,
+                          s_prompt_active ? theme::k_accent_fg : theme::k_border_strong);
+    ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, theme::k_radius_bubble);
+    ImGui::BeginChild("composer", ImVec2(0.0F, 0.0F),
+                      ImGuiChildFlags_Borders | ImGuiChildFlags_AutoResizeY |
+                          ImGuiChildFlags_AlwaysUseWindowPadding);
+    ImGui::PopStyleVar();
+    ImGui::PopStyleColor(2);
+    // The conversation's face, which carries the wide fill: the body face
+    // turns symbols typed here into "?".
+    ImGui::PushFont(fonts_get(font_role::chat));
+    const float gap = ImGui::GetStyle().ItemSpacing.x;
+    const float frame_h = ImGui::GetFrameHeight();
+    ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - 2.0F * frame_h - 2.0F * gap);
+    // The frame around it is the box; a second box inside would double the edge.
+    ImGui::PushStyleColor(ImGuiCol_FrameBg, ImVec4());
+    ImGui::PushStyleColor(ImGuiCol_FrameBgHovered, ImVec4());
+    ImGui::PushStyleColor(ImGuiCol_FrameBgActive, ImVec4());
+    ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 0.0F);
     const bool submitted =
         prompt_input_text("##llm_prompt",
                           awaiting ? "Describe the correction for this operation..."
                                    : "Tell CampCat what to do...",
                           &g_input);
+    ImGui::PopStyleVar();
+    ImGui::PopStyleColor(3);
+    s_prompt_active = ImGui::IsItemActive();
     // Attached here rather than inside prompt_input_text: that helper paints
     // the IME pre-edit without submitting an item, so the box is still the last
     // item at this point. The target would silently leave the box if the helper
@@ -2018,76 +2295,59 @@ void llm_panel_draw_panel(campcat::shell_state &_st, campcat::app_config &_cfg) 
     }
 
     ImGui::SameLine();
+    draw_approval_settings(_cfg);
+    ImGui::SameLine();
     // A turn in flight still accepts a message: that message is how the user
     // stops it. Clear conversation does not, because the reset drops the log.
     const bool can_send = !answered &&
                           !(g_controller.stopping() && g_controller.running()) &&
                           !g_controller.resetting() &&
                           (!is_blank(g_input) || (awaiting && g_staged_region));
-    if (!can_send) {
-        ImGui::BeginDisabled();
-    }
-    ImGui::PushStyleColor(ImGuiCol_Button, k_primary);
-    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, k_primary_hi);
-    ImGui::PushStyleColor(ImGuiCol_ButtonActive, k_primary_lo);
-    const bool clicked = campcat::app::button(send_label, ImVec2(send_w, 0.0F));
-    ImGui::PopStyleColor(3);
-    if (!can_send) {
-        ImGui::EndDisabled();
-    }
-    if (memorizing && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
-        ImGui::SetTooltip("Summarizing...");
-    }
-    ImGui::SameLine();
-    draw_approval_settings(_cfg);
+    ImGui::BeginDisabled(!can_send);
+    const bool clicked =
+        campcat::app::icon_button("##send", campcat::app::icon::k_send,
+                                  memorizing ? "Summarizing..." : send_label,
+                                  campcat::app::button_kind::primary);
+    ImGui::EndDisabled();
+    ImGui::PopFont();
+    ImGui::EndChild();
 
     // Four counts. Dispatches is the only one with a fuse, and that fuse is
     // per turn while the number is the conversation total.
     const campcat::llm_protocol::usage_stats usage = g_host.usage();
-    ImGui::Indent(k_stat_indent);
+    ImGui::Indent(ImGui::GetStyle().WindowPadding.x);
     WITH_FONT(small, {
-        // Zero vertical cell padding: a row's height is its content plus
-        // `CellPadding.y * 2` (imgui_tables.cpp:1886), and this line is
-        // context, so the padding is the only slack worth removing. The
-        // horizontal half stays, so the columns keep their inset.
-        const float pad_x = ImGui::GetStyle().CellPadding.x;
-        ImGui::PushStyleVar(ImGuiStyleVar_CellPadding, ImVec2(pad_x, 0.0F));
-        // Opened after the table: a popup id pushed inside the table does not
-        // match BeginPopup outside it.
         bool open_fuse = false;
-        const auto cell = [&](const char *_label, const std::string &_value) {
-            ImGui::TableNextColumn();
-            ImGui::TextDisabled("%s", _label);
-            if (ImGui::IsItemHovered() &&
-                ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
-                open_fuse = true;
+        bool first = true;
+        const auto stat = [&](const char *_label, const std::string &_value) {
+            const auto double_clicked = [] {
+                return ImGui::IsItemHovered() &&
+                       ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left);
+            };
+            if (!first) {
+                ImGui::SameLine(0.0F, 8.0F);
+                ImGui::TextColored(theme::k_text_3, "\xC2\xB7");
+                ImGui::SameLine(0.0F, 8.0F);
             }
-            ImGui::SameLine();
-            ImGui::TextUnformatted(_value.c_str());
-            if (ImGui::IsItemHovered() &&
-                ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
-                open_fuse = true;
-            }
+            first = false;
+            ImGui::TextColored(theme::k_text_3, "%s", _label);
+            open_fuse = double_clicked() || open_fuse;
+            ImGui::SameLine(0.0F, 4.0F);
+            ImGui::TextColored(theme::k_text_2, "%s", _value.c_str());
+            open_fuse = double_clicked() || open_fuse;
         };
-        if (ImGui::BeginTable("##llm_stats", 4,
-                              ImGuiTableFlags_SizingStretchSame)) {
-            cell("Turns", std::to_string(g_sidecar_turns));
-            cell("LLM calls", std::to_string(usage.llm_calls));
-            cell("Dispatches",
-                 std::to_string(usage.tool_calls) + "/" +
-                     campcat::llm::format_fuse(_cfg.llm.max_dispatches));
-            cell("Context", usage.context_tokens < 0
-                                ? std::string("\xE2\x80\x94")
-                                : std::to_string(usage.context_tokens));
-            ImGui::EndTable();
-        }
+        stat("Turns", std::to_string(g_sidecar_turns));
+        stat("LLM calls", std::to_string(usage.llm_calls));
+        stat("Dispatches", std::to_string(usage.tool_calls) + "/" +
+                               campcat::llm::format_fuse(_cfg.llm.max_dispatches));
+        stat("Context", usage.context_tokens < 0 ? std::string("\xE2\x80\x94")
+                                                 : std::to_string(usage.context_tokens));
         if (open_fuse) {
             ImGui::OpenPopup("llm_fuse_settings");
         }
         draw_fuse_settings(_cfg);
-        ImGui::PopStyleVar();
     });
-    ImGui::Unindent(k_stat_indent);
+    ImGui::Unindent(ImGui::GetStyle().WindowPadding.x);
 
     if ((clicked || submitted) && can_send) {
         if (awaiting) {
