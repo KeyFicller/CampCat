@@ -407,6 +407,7 @@ const char *agent_label(const std::string &_agent) {
 /// Defined with the bubble's rendering below: the card shows the same four
 /// kinds of step the conversation does.
 void draw_item(llm_item &_it, bool _growing, bool _subagent = false);
+void draw_steps(std::vector<llm_item> &_items, bool _live, bool &_open, bool _subagent);
 bool grows_in_place(campcat::llm_event::kind _kind);
 
 /// How many pictures in the subagent card keep a texture.
@@ -417,6 +418,9 @@ std::vector<llm_item> g_sub_items;
 std::deque<long> g_sub_tex;
 unsigned long g_sub_run = 0;
 std::optional<unsigned long> g_sub_cleared_run;
+/// Lines of the run already turned into items; a result shares its call's item.
+size_t g_sub_lines = 0;
+bool g_sub_steps_open = false;
 
 void release_sub_items() {
     for (llm_item &it : g_sub_items) {
@@ -426,6 +430,27 @@ void release_sub_items() {
     }
     g_sub_items.clear();
     g_sub_tex.clear();
+    g_sub_lines = 0;
+}
+
+/// Folds a result line into the call it answers. The host lock lets one call
+/// wait at a time, so a result always answers the newest call; the screenshot
+/// it returned lands in between and is passed over.
+bool settle_sub_call(const campcat::llm_event &_result) {
+    const auto call = std::find_if(g_sub_items.rbegin(), g_sub_items.rend(), [](const llm_item &_it) {
+        return _it.type != campcat::llm_event::kind::image;
+    });
+    if (call == g_sub_items.rend() || call->type != campcat::llm_event::kind::tool) {
+        return false;
+    }
+    std::optional<std::string> settled =
+        campcat::app::tool_call_settled(call->text, _result.text, _result.ok);
+    if (!settled) {
+        return false;
+    }
+    call->text = std::move(*settled);
+    call->ok = _result.ok;
+    return true;
 }
 
 /// Same shape as `sync_items`, and for the same reason: a growing step is
@@ -434,13 +459,19 @@ void sync_sub_items(const campcat::llm_host::subagent_state &_st) {
     if (_st.runs != g_sub_run) {
         release_sub_items();
         g_sub_run = _st.runs;
+        g_sub_steps_open = false;
     }
-    for (size_t i = 0; i < _st.lines.size(); ++i) {
-        const campcat::llm_event &e = _st.lines[i];
-        if (i < g_sub_items.size()) {
-            if (grows_in_place(e.type) && g_sub_items[i].text != e.text) {
-                g_sub_items[i].text = e.text;
-            }
+    // Only the newest line grows, and a growing line is never folded into
+    // another, so its item is the newest one.
+    if (g_sub_lines > 0 && g_sub_lines <= _st.lines.size() && !g_sub_items.empty()) {
+        const campcat::llm_event &e = _st.lines[g_sub_lines - 1];
+        if (grows_in_place(e.type) && g_sub_items.back().text != e.text) {
+            g_sub_items.back().text = e.text;
+        }
+    }
+    for (; g_sub_lines < _st.lines.size(); ++g_sub_lines) {
+        const campcat::llm_event &e = _st.lines[g_sub_lines];
+        if (e.type == campcat::llm_event::kind::tool && settle_sub_call(e)) {
             continue;
         }
         llm_item it;
@@ -497,11 +528,10 @@ void copy_menu(const char *_id, std::string_view _text, ImVec2 _top) {
     ImGui::EndPopup();
 }
 
-/// A reply bubble as plain text: every step in the order it happened, and the
-/// error when the turn failed.
-std::string reply_text(const llm_turn &_t) {
+/// Every step as plain text, in the order it happened.
+std::string steps_text(const std::vector<llm_item> &_items) {
     std::string out;
-    for (const llm_item &it : _t.items) {
+    for (const llm_item &it : _items) {
         if (it.text.empty()) {
             continue;
         }
@@ -510,6 +540,12 @@ std::string reply_text(const llm_turn &_t) {
         }
         out += it.text;
     }
+    return out;
+}
+
+/// A reply bubble as plain text: its steps, and the error when the turn failed.
+std::string reply_text(const llm_turn &_t) {
+    std::string out = steps_text(_t.items);
     if (!_t.error.empty()) {
         if (!out.empty()) {
             out += "\n\n";
@@ -550,15 +586,9 @@ void draw_subagent_card(float _x, float _col) {
             ImGui::TextWrapped("%s", st.goal.c_str());
             ImGui::PopStyleColor();
         }
-        for (size_t i = 0; i < g_sub_items.size(); ++i) {
-            const bool growing = st.active && i + 1 == g_sub_items.size() &&
-                                 grows_in_place(g_sub_items[i].type);
-            const ImVec2 top = ImGui::GetCursorScreenPos();
-            ImGui::PushID(static_cast<int>(i));
-            draw_item(g_sub_items[i], growing, true);
-            copy_menu("copy", g_sub_items[i].text, top);
-            ImGui::PopID();
-        }
+        const ImVec2 top = ImGui::GetCursorScreenPos();
+        draw_steps(g_sub_items, st.active, g_sub_steps_open, true);
+        copy_menu("copy", steps_text(g_sub_items), top);
     }
     campcat::app::card_end();
 }
@@ -924,6 +954,69 @@ void draw_item(llm_item &_it, bool _growing, bool _subagent) {
     draw_blocks(_it);
 }
 
+/// A timeline as it happened, step by step, while `_live`. Once it is over,
+/// everything before the closing words folds into one line, so the answer is
+/// what the eye lands on; a timeline that never called a tool has nothing
+/// worth folding.
+void draw_steps(std::vector<llm_item> &_items, bool _live, bool &_open, bool _subagent) {
+    using namespace campcat::app;
+    size_t reply_start = _items.size();
+    while (reply_start > 0 && _items[reply_start - 1].type == campcat::llm_event::kind::text) {
+        --reply_start;
+    }
+    int tools = 0;
+    int shots = 0;
+    int tool_failures = 0;
+    for (size_t i = 0; i < reply_start; ++i) {
+        const llm_item &it = _items[i];
+        tools += it.type == campcat::llm_event::kind::tool ? 1 : 0;
+        tool_failures += it.type == campcat::llm_event::kind::tool && tool_failed(it) ? 1 : 0;
+        shots += it.type == campcat::llm_event::kind::image ? 1 : 0;
+    }
+    const bool fold = !_live && tools > 0;
+    size_t first = 0;
+    if (fold) {
+        char label[128];
+        int n = std::snprintf(label, sizeof(label), "%s  %d step%s",
+                              _open ? icon::k_chevron_down : icon::k_chevron_right, tools,
+                              tools == 1 ? "" : "s");
+        if (shots > 0) {
+            n += std::snprintf(label + n, sizeof(label) - n, " \xC2\xB7 %d screenshot%s", shots,
+                               shots == 1 ? "" : "s");
+        }
+        if (tool_failures > 0) {
+            std::snprintf(label + n, sizeof(label) - n, " \xC2\xB7 %d failed", tool_failures);
+        }
+        ImGui::PushStyleColor(ImGuiCol_Text, theme::k_text_3);
+        if (ImGui::Selectable(label)) {
+            _open = !_open;
+        }
+        ImGui::PopStyleColor();
+        first = _open ? 0 : reply_start;
+    }
+    // Unfolded, the steps sit behind a rule so they stay apart from the answer.
+    const bool ruled = fold && _open;
+    const ImVec2 steps_top = ImGui::GetCursorScreenPos();
+    auto end_steps = [&] {
+        ImGui::Unindent(12.0F);
+        const float bottom = ImGui::GetCursorScreenPos().y - ImGui::GetStyle().ItemSpacing.y;
+        ImGui::GetWindowDrawList()->AddRectFilled(steps_top, ImVec2(steps_top.x + 2.0F, bottom),
+                                                  ImGui::GetColorU32(theme::k_border_strong));
+    };
+    if (ruled) {
+        ImGui::Indent(12.0F);
+    }
+    for (size_t i = first; i < _items.size(); ++i) {
+        if (ruled && i == reply_start) {
+            end_steps();
+        }
+        draw_item(_items[i], _live && i + 1 == _items.size(), _subagent);
+    }
+    if (ruled && reply_start == _items.size()) {
+        end_steps();
+    }
+}
+
 bool is_blank(std::string_view _s) {    for (const char c : _s) {
         if (!std::isspace(static_cast<unsigned char>(c))) {
             return false;
@@ -1244,67 +1337,7 @@ void draw_turn(llm_turn &_t, int _index, float _x, float _col) {
     ImGui::PopStyleVar(2);
     ImGui::PopStyleColor();
     const ImVec2 reply_top = ImGui::GetCursorScreenPos();
-    // The turn as it happened, step by step, while it runs. Once it is over,
-    // everything before the closing words folds into one line, so the answer
-    // is what the eye lands on; a turn that never called a tool has nothing
-    // worth folding.
-    size_t reply_start = _t.items.size();
-    while (reply_start > 0 &&
-           _t.items[reply_start - 1].type == campcat::llm_event::kind::text) {
-        --reply_start;
-    }
-    int tools = 0;
-    int shots = 0;
-    int tool_failures = 0;
-    for (size_t i = 0; i < reply_start; ++i) {
-        const llm_item &it = _t.items[i];
-        tools += it.type == campcat::llm_event::kind::tool ? 1 : 0;
-        tool_failures += it.type == campcat::llm_event::kind::tool && tool_failed(it) ? 1 : 0;
-        shots += it.type == campcat::llm_event::kind::image ? 1 : 0;
-    }
-    const bool fold = !_t.pending && tools > 0;
-    size_t first = 0;
-    if (fold) {
-        char label[128];
-        int n = std::snprintf(label, sizeof(label), "%s  %d step%s",
-                              _t.steps_open ? icon::k_chevron_down : icon::k_chevron_right,
-                              tools, tools == 1 ? "" : "s");
-        if (shots > 0) {
-            n += std::snprintf(label + n, sizeof(label) - n, " \xC2\xB7 %d screenshot%s", shots,
-                               shots == 1 ? "" : "s");
-        }
-        if (tool_failures > 0) {
-            std::snprintf(label + n, sizeof(label) - n, " \xC2\xB7 %d failed", tool_failures);
-        }
-        ImGui::PushStyleColor(ImGuiCol_Text, theme::k_text_3);
-        if (ImGui::Selectable(label)) {
-            _t.steps_open = !_t.steps_open;
-        }
-        ImGui::PopStyleColor();
-        first = _t.steps_open ? 0 : reply_start;
-    }
-    // Unfolded, the steps sit behind a rule so they stay apart from the answer.
-    const bool ruled = fold && _t.steps_open;
-    const ImVec2 steps_top = ImGui::GetCursorScreenPos();
-    auto end_steps = [&] {
-        ImGui::Unindent(12.0F);
-        const float bottom = ImGui::GetCursorScreenPos().y - ImGui::GetStyle().ItemSpacing.y;
-        ImGui::GetWindowDrawList()->AddRectFilled(steps_top,
-                                                  ImVec2(steps_top.x + 2.0F, bottom),
-                                                  ImGui::GetColorU32(theme::k_border_strong));
-    };
-    if (ruled) {
-        ImGui::Indent(12.0F);
-    }
-    for (size_t i = first; i < _t.items.size(); ++i) {
-        if (ruled && i == reply_start) {
-            end_steps();
-        }
-        draw_item(_t.items[i], _t.pending && i + 1 == _t.items.size());
-    }
-    if (ruled && reply_start == _t.items.size()) {
-        end_steps();
-    }
+    draw_steps(_t.items, _t.pending, _t.steps_open, false);
     // Only while the reply is still to come: a growing text step is its own
     // sign that the model is working, and a label under it would just be a
     // second one. A reasoning step counts for the same reason.

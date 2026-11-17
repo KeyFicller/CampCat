@@ -189,6 +189,27 @@ inline std::optional<tool_note_parts> split_tool_note(std::string_view _text) {
     return parts;
 }
 
+/// @brief A subagent's call, `**name** {args}`, joined with what came back
+///        into the host's note shape: `**name** ok|error`, then the result,
+///        then the args. nullopt when `_call` is not a call still waiting.
+inline std::optional<std::string> tool_call_settled(std::string_view _call,
+                                                    std::string_view _result, bool _ok) {
+    const std::optional<tool_note_parts> note = split_tool_note(_call);
+    if (!note || note->status == "ok" || note->status == "error") {
+        return std::nullopt;
+    }
+    std::string out = "**";
+    out += note->name;
+    out += _ok ? "** ok" : "** error";
+    for (const std::string_view part : {_result, note->status}) {
+        if (!part.empty()) {
+            out += "\n\n";
+            out += part;
+        }
+    }
+    return out;
+}
+
 /// @brief The first non-blank line, trimmed.
 inline std::string_view first_line(std::string_view _text) {
     const std::string_view s = detail::chat_trim(_text, " \t\r\n");

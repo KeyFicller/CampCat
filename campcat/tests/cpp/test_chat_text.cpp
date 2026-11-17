@@ -6,6 +6,7 @@ using campcat::app::chat_block;
 using campcat::app::chat_blocks;
 using campcat::app::first_line;
 using campcat::app::split_tool_note;
+using campcat::app::tool_call_settled;
 
 TEST(chat_blocks, blank_lines_only_separate) {
     const std::vector<chat_block> want{{false, "one\ntwo"}, {false, "three"}};
@@ -83,6 +84,18 @@ TEST(split_tool_note, other_text_is_not_a_note) {
     EXPECT_FALSE(split_tool_note("plain reply").has_value());
     EXPECT_FALSE(split_tool_note("****").has_value());
     EXPECT_FALSE(split_tool_note("**open\nclose** x").has_value());
+}
+
+TEST(tool_call_settled, joins_outcome_result_and_args) {
+    EXPECT_EQ(tool_call_settled(R"(**tap** {"x": 1})", "tapped", true),
+              "**tap** ok\n\ntapped\n\n{\"x\": 1}");
+    EXPECT_EQ(tool_call_settled("**tap** {}", "", false), "**tap** error\n\n{}");
+}
+
+TEST(tool_call_settled, only_a_waiting_call_settles) {
+    EXPECT_FALSE(tool_call_settled("**tap** ok\n\ntapped", "again", true).has_value());
+    EXPECT_FALSE(tool_call_settled("**tap** error", "again", true).has_value());
+    EXPECT_FALSE(tool_call_settled("plain words", "x", true).has_value());
 }
 
 TEST(first_line, skips_blank_lines_and_trims) {
