@@ -338,7 +338,13 @@ bool nav_item(const char *_glyph, const char *_label, bool _selected) {
     constexpr float k_inset = 12.0F;
     constexpr float k_glyph_gap = 10.0F;
     const ImVec2 at = ImGui::GetCursorScreenPos();
-    const ImVec2 size(ImGui::GetContentRegionAvail().x, theme::k_sidebar_item_h);
+    // A split dragged onto the window padding leaves no content width, and
+    // InvisibleButton asserts on a zero size.
+    const float w = ImGui::GetContentRegionAvail().x;
+    if (w < 1.0F) {
+        return false;
+    }
+    const ImVec2 size(w, theme::k_sidebar_item_h);
     ImGui::PushID(_label);
     const bool clicked = ImGui::InvisibleButton("##nav", size);
     ImGui::PopID();

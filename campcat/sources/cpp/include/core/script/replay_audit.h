@@ -58,6 +58,8 @@ private:
     void reserve(unsigned long long _bytes) const;
     std::filesystem::path m_dir;
     std::ofstream m_log;
+    cv::Mat m_last_frame;
+    std::string m_last_shot;
     unsigned long long m_bytes = 0, m_limit;
     unsigned m_keep_runs;
     unsigned m_terminal_bytes = 0;

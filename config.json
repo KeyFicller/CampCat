@@ -32,11 +32,12 @@
   },
   "match": {
     "box_threshold": 0.7,
-    "circle_threshold": 0.96,
+    "circle_threshold": 0.801,
     "debug": false,
     "debug_dir": "match_debug",
     "multiscale": false
   },
+  "memory_graph": "sanguo",
   "mumu": {
     "device_index": 0,
     "tool_path": "/Applications/MuMuPlayer.app/Contents/MacOS/mumutool"
@@ -54,5 +55,5 @@
     "interval_seconds": 300,
     "jitter_seconds": 7
   },
-  "script_bundle": "stzb.alliance-map"
+  "script_bundle": "sanguo.recruit.free"
 }

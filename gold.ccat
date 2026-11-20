@@ -1,5 +1,9 @@
-Reference examples for graph `app`: one anchor, one edge, one action on that anchor, and a task that runs it.
-Every template name stands for a real app's control.
+Graph `app` examples for a page anchor, an incoming edge, an action on that page, and a task
+that runs the action. The graph also needs a page anchor `app.entry` for the desktop.
+Save each template in the bundle that uses it and set wait times from the observed frames.
+For each input, identify the expected screen evidence. Keep the failing statement's error
+when it already identifies the problem. When handling a failed check in a branch, log the
+expected template and the step that reached it before returning false.
 
 ### Anchor `app.feed`
 
@@ -16,7 +20,7 @@ lit, the app's logo top left. The posts, their pictures and the unread counts ch
 `main.ccat` -- only judges whether that screen is showing:
 
 ```ccat
-// The logo is fixed and on this screen only. Search covers it, so an open search is not this screen.
+// The logo is a fixed control unique to the feed.
 if (has("feed_logo.png")) { return true }
 return false
 ```
@@ -27,86 +31,85 @@ return false
 20 s to show up afterwards, so it never checks its own ends and never calls `goto`:
 
 ```ccat
-// From the desktop into the app. A cold start puts the sign-in sheet up
+// From the desktop into the app. A cold start shows an inline sign-in step
 // first; a warm start lands on the feed directly. Either way ends on the feed.
 tap("app_icon.png")
-wait(3000)                           // the captures put the app's first frame at ~1.5s; twice that
-if (tap("sign_in.png")) {            // cold start only; on a warm start this is just false
-  log("signed in on a cold start")
+log("app icon tapped; waiting for the startup screen")
+wait(3000)                           // about twice the observed 1.5 s start-up time
+if (has("sign_in.png")) {
+  tap("sign_in.png")
+  log("sign-in button tapped; waiting for the feed")
+} else {
+  log("no sign-in button matched after startup; waiting for the feed")
 }
 ```
 
 ### Action `app.feed.claim`
 
-`main.ccat` -- the claim. It starts and ends on `feed`; the engine checks both ends, runs it
-once and does not retry, so spending or claiming goes here and not on an edge. The receipt
-may cover the feed briefly. This script does not call `goto` or `at`. Its templates live in
-this bundle.
+`main.ccat` performs the daily claim and closes its single receipt. The graph engine checks
+that the action starts and ends on `feed` and runs its body once. Keep the templates in
+this action bundle.
 
 ```ccat
 // Collects the daily reward, and says what it found.
 defs {
-  feed    = "feed.png"               // the feed tab, visible again once the receipt is gone
-  claim   = "claim.png"              // the claim button, present only while the reward is unclaimed
+  feed    = "feed.png"               // feed marker hidden by the receipt
+  claim   = "claim.png"              // the enabled claim button
   taken   = "claimed.png"            // the same button, greyed out once it is collected
   popup   = "reward_popup.png"       // the receipt sheet that shows only after a claim lands
   close_x = "popup_close.png"        // its top-right X
 }
 
-// "Already claimed" is a normal screen, not a failure, so it is a branch rather
-// than a wait_until that would have to time out.
+// The button's text can match both templates. Give the completed state priority.
+if (has(taken)) {
+  log("already claimed today")
+  return true
+}
 if (has(claim)) {
   tap(claim)
-  wait_until(popup, 8000)            // the receipt shows only if the tap landed
-  log("reward collected")
-} elif (has(taken)) {
-  log("already claimed today")
-  return true                        // target already achieved; graph actions treat false as failure
-} else {
-  log("neither the claim button nor its claimed state is on screen")
-  return false                       // not the screen we expected; do not guess
-}
-
-// Close the receipt, bounded so a sheet that will not go away stops instead of
-// spinning. Each close should land back on the feed.
-loop(3) {
-  if (has(popup)) {
-    tap(close_x)
-    wait_until(feed, 4000)
-    log("closed the receipt")
+  log("claim button tapped; waiting for the reward receipt")
+  if (wait_until(popup, 8000)) {
+    log("reward receipt matched; closing it with popup_close.png")
   } else {
-    break
+    log("reward_popup.png was not confirmed after tapping claim.png")
+    return false
+  }
+  tap(close_x)
+  log("receipt close button tapped; waiting for the feed marker")
+  if (wait_until(feed, 4000)) {
+    log("feed marker matched after closing the receipt; checking the claimed state")
+  } else {
+    log("feed.png was not confirmed after tapping popup_close.png")
+    return false
+  }
+  if (wait_until(taken, 4000)) {
+    log("daily claim done")
+    return true
+  } else {
+    log("claimed.png was not confirmed after returning to the feed")
+    return false
   }
 }
 
-// The button is greyed only once the reward is ours. return true is what the
-// engine then confirms is back on the feed; return false stops here.
-if (wait_until(taken, 4000)) {
-  log("daily claim done")            // grounded in the template just matched
-  return true                        // confirmed: the reward is taken
-} else {
-  log("the claim never registered")
-  return false
-}
+log("neither claimed.png nor claim.png matched on the feed")
+return false
 ```
 
 ### Task `app.daily_claim`
 
-`main.ccat` -- `goto` the page, `run` the action, then read its answer. The claim itself
-stays in the action.
+`main.ccat` -- `goto` the page and `run` the graph action. The action logs its progress and
+the engine checks its result. On failure, use the returned error and the last script log
+to find the failing step.
 
 ```ccat
 // A task walks to the screen first. The graph checks both ends of every hop,
 // so arriving is already confirmed; a screen it cannot reach is an error that
 // names the hops, and the action does not run against the wrong screen.
 goto("app:feed")
+log("feed confirmed; running app.feed.claim")
 
-// Once. The action's log says whether it was already claimed or never landed.
-// A false answer is this branch; a dead device or a stop is still an error.
-if (run("app.feed.claim/main.ccat")) {
-  log("daily claim done")
-  return true
-}
-log("daily claim did not confirm")
-return false
+// A standalone run preserves uncaught errors. Action logs identify handled failures.
+run("app.feed.claim/main.ccat")
+log("app.feed.claim succeeded; return to the feed confirmed")
+return true
 ```

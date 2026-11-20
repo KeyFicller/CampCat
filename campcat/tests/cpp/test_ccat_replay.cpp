@@ -1,5 +1,6 @@
 #include <core/adb_client.h>
 #include <core/app_config.h>
+#include <core/automation_log.h>
 #include <core/script/ccat_interpreter.h>
 #include <core/script/ccat_parser.h>
 #include <core/smoke/smoke_run.h>
@@ -113,6 +114,7 @@ protected:
 class GoldenClaim : public CcatReplay {
 protected:
     cv::Mat ready, done, missing, popup;
+    std::string task_source;
     void SetUp() override {
         CcatReplay::SetUp();
         const auto library = dir / "library";
@@ -123,12 +125,20 @@ protected:
         for (int n = 0; n < 4; ++n) reference = reference.parent_path();
         std::ifstream in(reference / "gold.ccat");
         const std::string text{std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>()};
-        const auto heading = text.find("### Action `app.feed.claim`");
-        ASSERT_NE(heading, std::string::npos);
-        const auto start = text.find("```ccat\n", heading) + 8;
-        const auto end = text.find("```", start);
-        ASSERT_NE(end, std::string::npos);
-        write(bundle / "main.ccat", text.substr(start, end - start));
+        const auto source_for = [&](const char *heading, std::string &source) {
+            const auto section = text.find(heading);
+            ASSERT_NE(section, std::string::npos);
+            const auto fence = text.find("```ccat\n", section);
+            ASSERT_NE(fence, std::string::npos);
+            const auto start = fence + 8;
+            const auto end = text.find("```", start);
+            ASSERT_NE(end, std::string::npos);
+            source = text.substr(start, end - start);
+        };
+        std::string action_source;
+        ASSERT_NO_FATAL_FAILURE(source_for("### Action `app.feed.claim`", action_source));
+        ASSERT_NO_FATAL_FAILURE(source_for("### Task `app.daily_claim`", task_source));
+        write(bundle / "main.ccat", action_source);
         missing = cv::Mat(64, 64, CV_8UC3, cv::Scalar(20, 20, 20));
         const auto mark = [&](const char *name, unsigned seed) {
             cv::Mat image(10, 10, CV_8UC3);
@@ -194,6 +204,18 @@ TEST_F(GoldenClaim, AlreadyClaimedSucceedsWithoutInput) {
         EXPECT_NE(row.value("error_code", ""), "script_failed");
 }
 
+TEST_F(GoldenClaim, ClaimedStateTakesPriorityWhenBothTemplatesMatch) {
+    const auto bundle = dir / "library/app.feed.claim";
+    ASSERT_TRUE(std::filesystem::copy_file(
+        bundle / "claimed.png", bundle / "claim.png",
+        std::filesystem::copy_options::overwrite_existing));
+    adb.frame = done;
+    adb.tap_frames = {popup, done};
+    const auto result = claim();
+    EXPECT_TRUE(result.ok) << result.message;
+    EXPECT_EQ(adb.taps, 0);
+}
+
 TEST_F(GoldenClaim, MissingButtonWithoutDoneEvidenceFailsWithoutInput) {
     adb.frame = missing;
     const auto result = claim();
@@ -201,6 +223,41 @@ TEST_F(GoldenClaim, MissingButtonWithoutDoneEvidenceFailsWithoutInput) {
     EXPECT_EQ(result.error_code, "script_failed");
     EXPECT_EQ(adb.taps, 0);
     EXPECT_FALSE(has_problem("unverified case app.feed.claim/missing"));
+}
+
+TEST_F(GoldenClaim, TaskReportsTheReceiptCloseFailureAndLastConfirmedStep) {
+    const cv::Rect close_region(40, 32, 10, 10);
+    missing(close_region).copyTo(popup(close_region));
+    adb.frame = ready;
+    adb.tap_frames = {popup};
+    std::string logs;
+    const auto sink = automation_log::add_sink(
+        [&](const std::string &line) { logs += line + "\n"; });
+
+    const auto result = run(task_source);
+
+    EXPECT_FALSE(result.ok);
+    EXPECT_NE(result.message.find("popup_close.png"), std::string::npos) << result.message;
+    EXPECT_NE(logs.find("[script] reward receipt matched"), std::string::npos) << logs;
+    EXPECT_EQ(logs.find("[script] daily claim done"), std::string::npos) << logs;
+    EXPECT_EQ(adb.taps, 1);
+}
+
+TEST_F(GoldenClaim, TaskLogsWhichWaitCouldNotConfirmTheClaim) {
+    adb.frame = ready;
+    adb.tap_frames = {popup, missing};
+    std::string logs;
+    const auto sink = automation_log::add_sink(
+        [&](const std::string &line) { logs += line + "\n"; });
+
+    const auto result = run(task_source);
+
+    EXPECT_FALSE(result.ok);
+    EXPECT_NE(result.message.find("returned false"), std::string::npos) << result.message;
+    EXPECT_NE(logs.find("[script] claimed.png was not confirmed after returning to the feed"),
+              std::string::npos) << logs;
+    EXPECT_EQ(logs.find("[script] daily claim done"), std::string::npos) << logs;
+    EXPECT_EQ(adb.taps, 2);
 }
 
 TEST_F(CcatReplay, UnchangedTapIsRecordedWithoutRetryOrFailure) {
@@ -367,6 +424,9 @@ TEST_F(CcatReplay, BudgetFailureRetainsTheFailingStepAndDoesNotRetryInput) {
     adb.frame = cv::Mat(512, 512, CV_8UC3);
     cv::RNG rng(71);
     rng.fill(adb.frame, cv::RNG::UNIFORM, 0, 256);
+    cv::Mat changed(adb.frame.size(), adb.frame.type());
+    rng.fill(changed, cv::RNG::UNIFORM, 0, 256);
+    adb.tap_frames = {changed};
     const auto result =
         run("if (tap_at(0.5, 0.5)) {} else { tap_at(0.1, 0.1) }");
     EXPECT_EQ(result.error_code, "storage_error");
@@ -379,6 +439,31 @@ TEST_F(CcatReplay, BudgetFailureRetainsTheFailingStepAndDoesNotRetryInput) {
     ASSERT_FALSE(rows.empty());
     EXPECT_EQ(rows.back().at("event"), "run_end");
     EXPECT_EQ(rows.back().at("error_code"), "storage_error");
+}
+
+TEST_F(CcatReplay, IdenticalFramesShareEvidenceWithinTheBudget) {
+    cfg.replay.max_run_mb = 1;
+    adb.frame = cv::Mat(512, 512, CV_8UC3);
+    cv::RNG rng(71);
+    rng.fill(adb.frame, cv::RNG::UNIFORM, 0, 256);
+
+    const auto result = run("tap_at(0.5, 0.5)\ntap_at(0.5, 0.5)");
+
+    ASSERT_TRUE(result.ok) << result.message;
+    EXPECT_EQ(adb.taps, 2);
+    const auto path = step("tap_at").at("before_shot");
+    ASSERT_TRUE(path.is_string());
+    EXPECT_TRUE(std::filesystem::is_regular_file(path.get<std::string>()));
+    int taps = 0;
+    for (const auto &row : records()) {
+        if (row.value("event", "") != "step" ||
+            row.value("action", "") != "tap_at")
+            continue;
+        EXPECT_EQ(row.at("before_shot"), path);
+        EXPECT_EQ(row.at("after_shot"), path);
+        ++taps;
+    }
+    EXPECT_EQ(taps, 2);
 }
 
 TEST_F(CcatReplay, AnchorAuditFailureCannotBecomeAnElseBranch) {

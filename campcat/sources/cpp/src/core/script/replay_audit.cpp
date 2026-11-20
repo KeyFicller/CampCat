@@ -90,6 +90,11 @@ std::optional<std::string> replay_audit::save(const cv::Mat &_frame,
                                               const std::string &_name) {
     if (_frame.empty())
         return std::nullopt;
+    // A location check runs multiple anchors on the same captured frame.
+    if (!m_last_frame.empty() && m_last_frame.size() == _frame.size() &&
+        m_last_frame.type() == _frame.type() &&
+        cv::norm(m_last_frame, _frame, cv::NORM_INF) == 0)
+        return m_last_shot;
     std::vector<unsigned char> png;
     if (!cv::imencode(".png", _frame, png))
         throw std::runtime_error("cannot encode replay frame");
@@ -101,7 +106,9 @@ std::optional<std::string> replay_audit::save(const cv::Mat &_frame,
     if (!out)
         throw std::runtime_error("cannot save replay frame: " + file.string());
     m_bytes += png.size();
-    return file.string();
+    _frame.copyTo(m_last_frame);
+    m_last_shot = file.string();
+    return m_last_shot;
 }
 
 void replay_audit::record(const replay_step &_step) {

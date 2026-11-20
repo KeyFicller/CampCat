@@ -505,27 +505,28 @@ void sync_sub_items(const campcat::llm_host::subagent_state &_st) {
     }
 }
 
-/// Right-click on the block just drawn: a menu that copies `_text` out.
+/// What the log's one right-click menu copies. A block records it on the press;
+/// the menu opens on the release, so the text has to outlive that frame.
+std::string g_log_copy;
+bool g_log_copy_hit = false;
+
+/// Remember `_text` when this right-click landed on the block just drawn.
 ///
 /// `_top` is where the block started, taken before drawing it: a bubble is
 /// markdown, an image or a folded step, so the last item is only ever its final
-/// widget and cannot say where the block began.
-void copy_menu(const char *_id, std::string_view _text, ImVec2 _top) {
+/// widget and cannot say where the block began. The log draws one menu for the
+/// whole window; a second popup here would open on the same click and cover it.
+void note_copy(std::string_view _text, ImVec2 _top) {
     // The window check keeps a covered bubble quiet: the rect is in screen space.
-    if (!_text.empty() && ImGui::IsWindowHovered() &&
-        ImGui::IsMouseHoveringRect(
+    if (_text.empty() || !ImGui::IsWindowHovered() ||
+        !ImGui::IsMouseHoveringRect(
             _top, ImVec2(ImGui::GetWindowPos().x + ImGui::GetWindowSize().x,
-                         ImGui::GetItemRectMax().y)) &&
-        ImGui::IsMouseClicked(ImGuiMouseButton_Right)) {
-        ImGui::OpenPopup(_id);
-    }
-    if (!ImGui::BeginPopup(_id)) {
+                         ImGui::GetItemRectMax().y)) ||
+        !ImGui::IsMouseClicked(ImGuiMouseButton_Right)) {
         return;
     }
-    if (ImGui::MenuItem("Copy")) {
-        ImGui::SetClipboardText(std::string(_text).c_str());
-    }
-    ImGui::EndPopup();
+    g_log_copy.assign(_text);
+    g_log_copy_hit = true;
 }
 
 /// Every step as plain text, in the order it happened.
@@ -588,7 +589,7 @@ void draw_subagent_card(float _x, float _col) {
         }
         const ImVec2 top = ImGui::GetCursorScreenPos();
         draw_steps(g_sub_items, st.active, g_sub_steps_open, true);
-        copy_menu("copy", steps_text(g_sub_items), top);
+        note_copy(steps_text(g_sub_items), top);
     }
     campcat::app::card_end();
 }
@@ -1304,7 +1305,7 @@ void draw_turn(llm_turn &_t, int _index, float _x, float _col) {
     ImGui::PopStyleColor();
     const ImVec2 user_top = ImGui::GetCursorScreenPos();
     ImGui::TextWrapped("%s", _t.user_text.c_str());
-    copy_menu("copy", _t.user_text, user_top);
+    note_copy(_t.user_text, user_top);
     ImGui::EndChild();
 
     ImGui::SetCursorPosX(_x);
@@ -1353,7 +1354,7 @@ void draw_turn(llm_turn &_t, int _index, float _x, float _col) {
         });
         ImGui::TextWrapped("%s", _t.error.c_str());
     }
-    copy_menu("copy", reply_text(_t), reply_top);
+    note_copy(reply_text(_t), reply_top);
     ImGui::EndChild();
 
     ImGui::PopID();
@@ -1972,6 +1973,7 @@ bool draw_approval_panel(const campcat::llm_approval &_a) {
 /// context menu, so the caller can start the reset on the worker.
 bool draw_log(const ImVec2 &_size) {
     bool clear_requested = false;
+    g_log_copy_hit = false;
     ImGui::BeginChild("llm_log", _size);
     // Any upward move is the reader asking for history, and it outranks
     // following the tail. Checked before the snap below sets its target: the
@@ -1980,29 +1982,10 @@ bool draw_log(const ImVec2 &_size) {
     if (ImGui::GetScrollY() < g_last_scroll - 0.5F) {
         g_pin_bottom = false;
     }
-    if (ImGui::BeginPopupContextWindow("llm_log_ctx",
-                                       ImGuiPopupFlags_MouseButtonRight)) {
-        // Greyed out while a turn is in flight, because clearing would have to
-        // wait for it anyway.
-        if (ImGui::MenuItem("Clear conversation", nullptr, false,
-                            !g_controller.running() && !g_turns.empty())) {
-            clear_requested = true;
-        }
-        ImGui::Separator();
-        // Readable at any time, running turn or not: it is a file, not
-        // conversation state, so there is nothing to wait for.
-        if (ImGui::MenuItem("Long-term memory...")) {
-            g_mem_open = true;
-            reload_memory();
-        }
-        ImGui::EndPopup();
-    }
-    // Placed after the context menu so right-clicking the log does not pop a
-    // bigger menu, and popped below so nothing outside the conversation
-    // inherits it. The empty state and the trailing bubbles are conversation
-    // too. A real face, not `SetWindowFontScale`: the scale would leave
+    // A real face, not `SetWindowFontScale`: the scale would leave
     // `io.FontGlobalScale` at 1.0, and `imgui_markdown` wraps replies to that,
-    // clipping the tail of every line.
+    // clipping the tail of every line. The empty state and the trailing
+    // bubbles are conversation too.
     ImGui::PushFont(fonts_get(font_role::chat));
     if (g_turns.empty()) {
         campcat::app::empty_state(campcat::app::icon::k_cat, "Tell CampCat what to do",
@@ -2022,6 +2005,40 @@ bool draw_log(const ImVec2 &_size) {
     draw_subagent_card(x, col);
 
     ImGui::PopFont();
+
+    // A press on empty log is not a message, so the menu that opens on the
+    // release of that click has nothing to copy. The release itself must not
+    // clear it: that is the frame the menu opens, one frame after the press.
+    if (ImGui::IsMouseClicked(ImGuiMouseButton_Right) && ImGui::IsWindowHovered() &&
+        !g_log_copy_hit) {
+        g_log_copy.clear();
+    }
+    // Menu rows use HeaderHovered, which the theme sets to the popup's own
+    // background, so a row would not change when the pointer is on it.
+    ImGui::PushStyleColor(ImGuiCol_HeaderHovered, campcat::app::theme::k_surface_4);
+    if (ImGui::BeginPopupContextWindow("llm_log_ctx", ImGuiPopupFlags_MouseButtonRight)) {
+        if (!g_log_copy.empty()) {
+            if (ImGui::MenuItem("Copy")) {
+                ImGui::SetClipboardText(g_log_copy.c_str());
+            }
+            ImGui::Separator();
+        }
+        // Greyed out while a turn is in flight, because clearing would have to
+        // wait for it anyway.
+        if (ImGui::MenuItem("Clear conversation", nullptr, false,
+                            !g_controller.running() && !g_turns.empty())) {
+            clear_requested = true;
+        }
+        ImGui::Separator();
+        // Readable at any time, running turn or not: it is a file, not
+        // conversation state, so there is nothing to wait for.
+        if (ImGui::MenuItem("Long-term memory...")) {
+            g_mem_open = true;
+            reload_memory();
+        }
+        ImGui::EndPopup();
+    }
+    ImGui::PopStyleColor();
 
     // Follow new content only while the user is already at the bottom. The
     // comparison has no slack: a tolerance would keep re-arming inside the
